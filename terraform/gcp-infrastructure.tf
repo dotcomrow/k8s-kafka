@@ -259,5 +259,5 @@ output "pipeline_sa_email" {
 
 output "pipeline_sa_key_secret_name" {
   value       = google_secret_manager_secret.pipeline_key.name
-  description = "projects/<num>/secrets/<name>; read latest version for key JSON"
+  description = "projects/<num>/secrets/<name>; read latest secret version for key JSON"
 }
