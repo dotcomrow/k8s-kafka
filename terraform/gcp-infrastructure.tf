@@ -73,7 +73,7 @@ resource "null_resource" "validate_parent" {
 resource "google_project" "this" {
   name            = var.project_name
   billing_account = var.billing_account
-  project_id      = var.project_id != "" ? var.project_id : local.project_id
+  project_id      = local.project_id
   # Exactly one of these must be set; use null for the other
   org_id    = var.gcp_org_id    != "" ? var.gcp_org_id    : null
   folder_id = var.folder_id != "" ? var.folder_id : null
