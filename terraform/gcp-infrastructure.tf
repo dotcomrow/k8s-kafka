@@ -19,13 +19,12 @@ resource "random_id" "suffix_gcp" {
 # This provider is used both to create the project and, later, to operate inside it.
 # We still set 'project' so resources that don't accept a 'project' field will default correctly.
 provider "google" {
-  project = var.project_id
+  project = local.project_id
   region  = var.region
 }
 
 # ---------- Inputs ----------
 variable "project_name" { type = string }                  # e.g. "Data Pipeline"
-variable "project_id"   { type = string }                  # desired project ID (must be globally unique)
 variable "billing_account" { type = string }               # e.g. "012345-6789AB-CDEF01"
 variable "gcp_org_id" {
   type    = string
