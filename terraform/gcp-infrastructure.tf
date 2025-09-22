@@ -32,6 +32,7 @@ variable "gcp_org_id" {
 }     # one of org_id or folder_id must be set (not both)
 variable "folder_id" {
   type    = string
+  default = ""
 }     # e.g. "folders/123456789012"
 variable "region"      { type = string }                   # e.g. "us-central1" (for provider)
 variable "bq_location" { type = string }                   # e.g. "US" or "EU"
@@ -55,6 +56,7 @@ variable "labels" {
 # ---------- Validations ----------
 locals {
   parent_provided = (var.gcp_org_id != "" ? 1 : 0) + (var.folder_id != "" ? 1 : 0)
+  project_id      = "${var.project_name}-${random_id.suffix_gcp.hex}"
 }
 
 # Must set exactly one parent (org or folder)
@@ -72,7 +74,7 @@ resource "null_resource" "validate_parent" {
 resource "google_project" "this" {
   name            = var.project_name
   billing_account = var.billing_account
-  project_id      = "${var.project_name}-${random_id.suffix_gcp.hex}"
+  project_id      = var.project_id != "" ? var.project_id : local.project_id
   # Exactly one of these must be set; use null for the other
   org_id    = var.gcp_org_id    != "" ? var.gcp_org_id    : null
   folder_id = var.folder_id != "" ? var.folder_id : null
