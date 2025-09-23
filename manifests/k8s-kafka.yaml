@@ -52,6 +52,12 @@ roleRef:
 # Kafka cluster.id generator — namespace: kafka
 # ============================================================================
 ---
+# ============================================================================
+# Kafka cluster.id generator — namespace: kafka
+#   - Generates once and stores in Secret kafka-cluster-id (key: CLUSTER_ID)
+#   - No apt-get, no wget, no kubectl
+# ============================================================================
+
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -70,7 +76,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get","list","watch","create","update","patch","delete"]
+    verbs: ["get","list","watch","create","update","patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -94,6 +100,7 @@ metadata:
   name: gen-kafka-clusterid
   namespace: kafka
   annotations:
+    # Ensure SA/RBAC apply first
     argocd.argoproj.io/sync-wave: "1"
 spec:
   backoffLimit: 0
@@ -103,9 +110,9 @@ spec:
       serviceAccountName: kafka-clusterid-gen
       containers:
         - name: gen
-          image: curlimages/curl:8.8.0
+          image: curlimages/curl:8.9.1
           imagePullPolicy: IfNotPresent
-          command: ["/bin/sh","-lc"]
+          command: ["/bin/sh","-c"]
           args:
             - |
               set -euo pipefail
@@ -115,7 +122,7 @@ spec:
               TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
               CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 
-              # GET existing Secret
+              # Check if Secret already exists and has CLUSTER_ID
               HTTP="$(curl -sS -w '%{http_code}' -o /tmp/get.json \
                 --cacert "${CACERT}" -H "Authorization: Bearer ${TOKEN}" \
                 "${API}/api/v1/namespaces/${NS}/secrets/${NAME}" || true)"
@@ -128,25 +135,22 @@ spec:
                 fi
               fi
 
-              # Generate base64url 22-char id
+              # Generate a Kafka-style base64url-ish 22-char ID
               CID="$(head -c 16 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=[:space:]' | cut -c1-22)"
               echo "Generated cluster.id: ${CID}"
 
-              # Encode for Secret.data
-              if base64 --help 2>/dev/null | grep -q -- "-w"; then
-                ENC="$(printf '%s' "${CID}" | base64 -w0)"
-              else
-                ENC="$(printf '%s' "${CID}" | base64)"
-              fi
+              # base64 encode (remove newline for Secret.data)
+              ENC="$(printf '%s' "${CID}" | base64 | tr -d '\n')"
 
-              # Create or Patch Secret
               if [ "${HTTP}" = "200" ]; then
+                # Patch existing Secret
                 curl -sS -X PATCH \
                   --cacert "${CACERT}" -H "Authorization: Bearer ${TOKEN}" \
                   -H "Content-Type: application/merge-patch+json" \
                   --data "$(printf '{"data":{"CLUSTER_ID":"%s"}}' "${ENC}")" \
                   "${API}/api/v1/namespaces/${NS}/secrets/${NAME}" >/dev/null
               else
+                # Create new Secret
                 cat > /tmp/secret.json <<EOF
                 {"apiVersion":"v1","kind":"Secret","metadata":{"name":"${NAME}","namespace":"${NS}"},
                  "type":"Opaque","data":{"CLUSTER_ID":"${ENC}"}}
