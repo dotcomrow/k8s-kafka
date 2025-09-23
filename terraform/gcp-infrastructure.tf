@@ -250,10 +250,6 @@ resource "google_project_iam_audit_config" "pubsub_data_access" {
   audit_log_config { log_type = "DATA_WRITE" }  # needed for Publish logs
 }
 
-
-# Who is calling Pub/Sub? This supplies the OAuth2 access token for curl.
-data "google_client_config" "cur" {}
-
 resource "null_resource" "notify_secret_version" {
   # Re-run when a new version is created
   triggers = {
@@ -305,7 +301,7 @@ resource "null_resource" "notify_secret_version" {
         PUB_BODY="$(jq -nc --arg d "$${BASE64_PAYLOAD}" '{messages:[{data:$d}]}' )"
 
         RESP_FILE="$(mktemp)"
-        HTTP_CODE="$(curl -sS -o "$${RESP_FILE}" -w '%{http_code}' \
+        HTTP_CODE="$(curl -sS -o "$${RESP_FILE}" -w '%%{http_code}' \
         -H "Authorization: Bearer $${ACCESS_TOKEN}" \
         -H "Content-Type: application/json" \
         "https://pubsub.googleapis.com/v1/projects/$${PROJECT}/topics/$${TOPIC}:publish" \
