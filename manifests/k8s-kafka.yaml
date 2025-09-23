@@ -104,72 +104,72 @@ spec:
       restartPolicy: Never
       serviceAccountName: kafka-clusterid-gen
       volumes:
-      - name: work
-        emptyDir: {}
+        - name: work
+          emptyDir: {}
       containers:
-      - name: gen
-        image: apache/kafka:3.9.0
-        command: ["/bin/bash","-lc"]
-        args:
-          - |
-            set -eu
-            CID="$("/opt/kafka/bin/kafka-storage.sh" random-uuid)"
-            echo "Generated cluster.id: ${CID}"
-            printf '%s' "${CID}" > /work/cluster.id
-            # brief delay to ensure sidecar can read the file
-            sleep 3
-        volumeMounts:
-        - name: work
-          mountPath: /work
-      - name: apply
-        image: curlimages/curl:8.8.0
-        command: ["/bin/sh","-c"]
-        args:
-          - |
-            set -eu
-            NAMESPACE="kafka"
-            SECRET_NAME="kafka-cluster-id"
-            API="https://kubernetes.default.svc"
-            TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
-            CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+        - name: gen
+          image: apache/kafka:3.9.0
+          command: ["/bin/bash","-lc"]
+          args:
+            - |
+              set -eu
+              CID="$("/opt/kafka/bin/kafka-storage.sh" random-uuid)"
+              echo "Generated cluster.id: ${CID}"
+              printf '%s' "${CID}" > /work/cluster.id
+              # brief delay to ensure sidecar can read the file
+              sleep 3
+          volumeMounts:
+            - name: work
+              mountPath: /work
+        - name: apply
+          image: curlimages/curl:8.8.0
+          command: ["/bin/sh","-c"]
+          args:
+            - |
+              set -eu
+              NAMESPACE="kafka"
+              SECRET_NAME="kafka-cluster-id"
+              API="https://kubernetes.default.svc"
+              TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+              CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 
-            # wait for the generated file from the 'gen' container
-            i=0
-            while [ ! -s /work/cluster.id ]; do
-              i=$((i+1)); [ $i -gt 120 ] && echo "timeout waiting for /work/cluster.id" && exit 1
-              sleep 1
-            done
-            CID="$(cat /work/cluster.id)"
+              # wait for the generated file from the 'gen' container
+              i=0
+              while [ ! -s /work/cluster.id ]; do
+                i=$((i+1)); [ $i -gt 120 ] && echo "timeout waiting for /work/cluster.id" && exit 1
+                sleep 1
+              done
+              CID="$(cat /work/cluster.id)"
 
-            # If the Secret already exists, do nothing
-            code="$(curl -s -o /tmp/existing.json -w '%{http_code}' \
-                     --cacert "$CACERT" -H "Authorization: Bearer $TOKEN" \
-                     "$API/api/v1/namespaces/$NAMESPACE/secrets/$SECRET_NAME")"
-            if [ "$code" = "200" ]; then
-              echo "Secret $SECRET_NAME already exists; nothing to do."
-              exit 0
-            fi
+              # If the Secret already exists, do nothing
+              code="$(curl -s -o /tmp/existing.json -w '%{http_code}' \
+                       --cacert "$CACERT" -H "Authorization: Bearer $TOKEN" \
+                       "$API/api/v1/namespaces/$NAMESPACE/secrets/$SECRET_NAME")"
+              if [ "$code" = "200" ]; then
+                echo "Secret $SECRET_NAME already exists; nothing to do."
+                exit 0
+              fi
 
-            # Create Secret (data values must be base64)
-            b64="$(printf '%s' "$CID" | base64 | tr -d '\n')"
-            cat >/tmp/newsecret.json <<JSON
-            {
-              "apiVersion": "v1",
-              "kind": "Secret",
-              "metadata": { "name": "$SECRET_NAME", "namespace": "$NAMESPACE" },
-              "type": "Opaque",
-              "data": { "CLUSTER_ID": "$b64" }
-            }
-            JSON
+              # Create Secret (data values must be base64)
+              b64="$(printf '%s' "$CID" | base64 | tr -d '\n')"
+              cat >/tmp/newsecret.json <<JSON
+              {
+                "apiVersion": "v1",
+                "kind": "Secret",
+                "metadata": { "name": "$SECRET_NAME", "namespace": "$NAMESPACE" },
+                "type": "Opaque",
+                "data": { "CLUSTER_ID": "$b64" }
+              }
+              JSON
 
-            curl -sS -X POST --cacert "$CACERT" \
-              -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-              --data-binary @/tmp/newsecret.json \
-              "$API/api/v1/namespaces/$NAMESPACE/secrets" \
-              && echo "Created secret $SECRET_NAME."
-        volumeMounts:
-        - name: work
-          mountPath: /work
+              curl -sS -X POST --cacert "$CACERT" \
+                -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+                --data-binary @/tmp/newsecret.json \
+                "$API/api/v1/namespaces/$NAMESPACE/secrets" \
+                && echo "Created secret $SECRET_NAME."
+          volumeMounts:
+            - name: work
+              mountPath: /work
 
 # ============================================================================
 # Vault CONFIG job — namespace: vault (static user + dynamic password via KV)
@@ -232,13 +232,11 @@ spec:
             - |
               set -euo pipefail
 
-              # ---- auth to Vault with root token (mounted secret) ----
               until [ -s /vault-token/VAULT_TOKEN ]; do
                 echo "waiting for /vault-token/VAULT_TOKEN..."; sleep 2
               done
               export VAULT_TOKEN="$(cat /vault-token/VAULT_TOKEN)"
 
-              # ---- inputs ----
               : "${PG_HOST:=yb-tserver-service.yugabyte.svc.cluster.local}"
               : "${PG_PORT:=5433}"
               : "${PG_DATABASE:=kafka}"
@@ -251,7 +249,6 @@ spec:
               : "${BQ_PROJECT:=}"
               : "${BQ_DEFAULT_DATASET:=}"
 
-              # optional GCP SA JSON from Vault; write to /tmp/sa.json if present
               BQ_SA_JSON="$(vault kv get -field=value secret/k8s-kafka-gcp-service-account-json 2>/dev/null || true)"
               if [ -n "${BQ_SA_JSON}" ]; then
                 printf '%s' "${BQ_SA_JSON}" > /tmp/sa.json
@@ -260,7 +257,6 @@ spec:
                 echo "no GCP SA JSON found at secret/k8s-kafka-gcp-service-account-json (optional)"
               fi
 
-              # wait for static user's password in Vault KV (secret/<PG_USER>: value)
               echo "waiting for secret/${PG_USER} (field=value)..."
               while :; do
                 if PASS="$(vault kv get -field=value "secret/${PG_USER}" 2>/dev/null)"; then
@@ -270,7 +266,6 @@ spec:
                 sleep 5
               done
 
-              # seed multi-key KV entries used by workloads
               PG_ARGS=""
               [ -n "${PG_HOST}" ] && PG_ARGS="${PG_ARGS} host=${PG_HOST}"
               [ -n "${PG_PORT}" ] && PG_ARGS="${PG_ARGS} port=${PG_PORT}"
@@ -278,7 +273,6 @@ spec:
               [ -n "${PG_USER}" ] && PG_ARGS="${PG_ARGS} user=${PG_USER}"
               [ -n "${YB_MASTER_ADDRESSES}" ] && PG_ARGS="${PG_ARGS} master_addresses=${YB_MASTER_ADDRESSES}"
               if [ -n "${PG_ARGS}" ]; then
-                # shellcheck disable=SC2086
                 vault kv put secret/kafka/pgconfig ${PG_ARGS} >/dev/null
               fi
 
@@ -287,25 +281,18 @@ spec:
               [ -n "${BQ_BOOTSTRAP_PROJECT}" ]  && BOOT_ARGS="${BOOT_ARGS} project=${BQ_BOOTSTRAP_PROJECT}"
               [ -n "${BQ_BOOTSTRAP_LOCATION}" ] && BOOT_ARGS="${BOOT_ARGS} location=${BQ_BOOTSTRAP_LOCATION}"
               if [ -n "${BOOT_ARGS}" ]; then
-                # shellcheck disable=SC2086
                 vault kv put secret/kafka/bq/bootstrap ${BOOT_ARGS} >/dev/null
               fi
 
               CFG_ARGS=""
               [ -n "${BQ_PROJECT}" ]         && CFG_ARGS="${CFG_ARGS} project=${BQ_PROJECT}"
               [ -n "${BQ_DEFAULT_DATASET}" ] && CFG_ARGS="${CFG_ARGS} dataset=${BQ_DEFAULT_DATASET}"
-              if [ -s /tmp/sa.json ]; then
-                CFG_ARGS="${CFG_ARGS} sa_json=@/tmp/sa.json"
-              fi
+              [ -s /tmp/sa.json ] && CFG_ARGS="${CFG_ARGS} sa_json=@/tmp/sa.json"
               if [ -n "${CFG_ARGS}" ]; then
-                # shellcheck disable=SC2086
                 vault kv put secret/kafka/bq/config ${CFG_ARGS} >/dev/null
               fi
-              if [ -s /tmp/sa.json ]; then
-                vault kv put secret/kafka/bq/exporter sa_json=@/tmp/sa.json >/dev/null
-              fi
+              [ -s /tmp/sa.json ] && vault kv put secret/kafka/bq/exporter sa_json=@/tmp/sa.json >/dev/null
 
-              # policy + k8s auth role binding for the kafka SA
               vault policy write data-bootstrap - <<'EOP'
               path "secret/data/kafka/pgconfig"     { capabilities = ["read"] }
               path "secret/data/kafka/bq/bootstrap" { capabilities = ["read"] }
@@ -331,6 +318,7 @@ spec:
 
 # ============================================================================
 # One-shot Backfill Job (wave 2) — namespace: kafka
+#   - initContainer 'make-plan' generates /work/plan.tsv deterministically
 # ============================================================================
 ---
 apiVersion: batch/v1
@@ -354,7 +342,7 @@ spec:
         vault.hashicorp.com/agent-inject: "true"
         vault.hashicorp.com/role: "data-bootstrap"
 
-        # ---- GCP SA key (raw JSON from secret/kafka/bq/exporter.sa_json) ----
+        # ---- GCP SA key (raw JSON) ----
         vault.hashicorp.com/agent-inject-secret-gcp-key.json: "secret/data/kafka/bq/exporter"
         vault.hashicorp.com/agent-inject-template-gcp-key.json: |
           {{- with secret "secret/data/kafka/bq/exporter" -}}
@@ -394,14 +382,9 @@ spec:
       volumes:
         - name: work
           emptyDir: {}
-      containers:
-        # 1) importer: discovers tables, waits for CSVs, imports into YB
-        - name: importer
+      initContainers:
+        - name: make-plan
           image: yugabytedb/yugabyte:latest
-          imagePullPolicy: IfNotPresent
-          env:
-            - name: CLOUDSDK_CORE_DISABLE_PROMPTS
-              value: "1"
           volumeMounts:
             - name: work
               mountPath: /work
@@ -409,22 +392,24 @@ spec:
           args:
             - |
               set -euo pipefail
-
-              # Load Vault env
-              for f in /vault/secrets/bootstrap.env /vault/secrets/pg.env /vault/secrets/pg-admin.env; do
-                i=0; while [ ! -s "$f" ]; do i=$((i+1)); [ $i -gt 120 ] && echo "❌ Timeout waiting for $f" && exit 1; echo "⏳ waiting for $f..."; sleep 2; done
+              for f in /vault/secrets/pg.env /vault/secrets/pg-admin.env; do
+                i=0; while [ ! -s "$f" ]; do i=$((i+1)); [ $i -gt 180 ] && echo "❌ Timeout waiting for $f" && exit 1; echo "⏳ waiting for $f..."; sleep 2; done
                 . "$f"
               done
               export PGPASSWORD
-
               : "${PGHOST:=yb-tserver-service.yugabyte.svc.cluster.local}"
               : "${PGPORT:=5433}"
               : "${PGDATABASE:=kafka}"
               : "${PGUSER:=vaultadmin}"
-
               PGURL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}?sslmode=disable"
 
-              echo "🔎 Discovering bootstrap tables from comments..."
+              # Wait for DB to be reachable
+              for i in $(seq 1 60); do
+                if /home/yugabyte/bin/ysqlsh "${PGURL}" -Atc "select 1" >/dev/null 2>&1; then break; fi
+                [ "$i" -eq 60 ] && echo "❌ DB not reachable" && exit 1
+                echo "⏳ waiting for DB..."; sleep 2
+              done
+
               /home/yugabyte/bin/ysqlsh "${PGURL}" -A -t -F '|' -c "
               WITH t AS (
                 SELECT n.nspname AS schema, c.relname AS table, d.description
@@ -453,7 +438,38 @@ spec:
               " > /work/plan.tsv
 
               if [ ! -s /work/plan.tsv ]; then
-                echo "ℹ️  No flagged tables. Creating bootstrap.ok and exiting."
+                echo "NO_TABLES" > /work/NO_TABLES
+                echo "ℹ️  No flagged tables found; marker written."
+              fi
+      containers:
+        # 1) importer: imports when CSVs are ready; handles NO_TABLES
+        - name: importer
+          image: yugabytedb/yugabyte:latest
+          env:
+            - name: CLOUDSDK_CORE_DISABLE_PROMPTS
+              value: "1"
+          volumeMounts:
+            - name: work
+              mountPath: /work
+          command: ["/bin/bash","-lc"]
+          args:
+            - |
+              set -euo pipefail
+
+              # Vault env for DB connection
+              for f in /vault/secrets/pg.env /vault/secrets/pg-admin.env; do
+                . "$f"
+              done
+              export PGPASSWORD
+              : "${PGHOST:=yb-tserver-service.yugabyte.svc.cluster.local}"
+              : "${PGPORT:=5433}"
+              : "${PGDATABASE:=kafka}"
+              : "${PGUSER:=vaultadmin}"
+              PGURL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}?sslmode=disable"
+
+              # If NO_TABLES, create bootstrap.ok and exit
+              if [ -f /work/NO_TABLES ]; then
+                echo "No tables to import; creating bootstrap.ok"
                 API="https://kubernetes.default.svc"
                 TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
                 CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
@@ -463,8 +479,8 @@ spec:
                 exit 0
               fi
 
-              echo "📝 Plan:"
-              cat /work/plan.tsv
+              # Sanity: ensure plan exists
+              [ -s /work/plan.tsv ] || { echo "❌ plan.tsv missing"; exit 1; }
 
               get_columns() {
                 local sch="$1" tbl="$2"
@@ -519,7 +535,6 @@ spec:
         # 2) cloudsdk: runs BigQuery extract and copies CSVs locally
         - name: cloudsdk
           image: google/cloud-sdk:latest
-          imagePullPolicy: IfNotPresent
           env:
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: /vault/secrets/gcp-key.json
@@ -533,17 +548,25 @@ spec:
             - |
               set -euo pipefail
 
-              # Wait for Vault files we need (bucket/project/location, creds)
+              # Wait for plan OR NO_TABLES
+              i=0
+              while [ ! -s /work/plan.tsv ] && [ ! -f /work/NO_TABLES ]; do
+                i=$((i+1)); [ $i -gt 180 ] && echo "❌ Timeout waiting for plan.tsv" && exit 1
+                echo "⏳ waiting for /work/plan.tsv..."; sleep 2
+              done
+              if [ -f /work/NO_TABLES ]; then
+                echo "No tables to export; exiting."
+                exit 0
+              fi
+
+              # Wait for Vault files (bucket/project/location, creds)
               for f in /vault/secrets/bootstrap.env /vault/secrets/gcp-key.json; do
-                i=0; while [ ! -s "$f" ]; do i=$((i+1)); [ $i -gt 120 ] && echo "❌ Timeout waiting for $f" && exit 1; echo "⏳ waiting for $f..."; sleep 2; done
+                j=0; while [ ! -s "$f" ]; do j=$((j+1)); [ $j -gt 120 ] && echo "❌ Timeout waiting for $f" && exit 1; echo "⏳ waiting for $f..."; sleep 2; done
               done
               . /vault/secrets/bootstrap.env
               : "${PROJECT:?missing PROJECT in bootstrap.env}"
               : "${BUCKET:?missing BUCKET in bootstrap.env}"
               : "${LOCATION:=}"
-
-              # Wait for the plan from the importer container
-              i=0; while [ ! -s /work/plan.tsv ]; do i=$((i+1)); [ $i -gt 180 ] && echo "❌ Timeout waiting for /work/plan.tsv" && exit 1; echo "⏳ waiting for /work/plan.tsv..."; sleep 2; done
 
               if [ -n "${LOCATION}" ]; then
                 BQ_LOC_FLAG=(--location="${LOCATION}")
