@@ -359,10 +359,10 @@ resource "null_resource" "notify_secret_version" {
       PUB_BODY="$(jq -nc --arg d "$${BASE64_PAYLOAD}" '{messages:[{data:$d}]}' )"
 
       RESP_FILE="$(mktemp)"
-      HTTP_CODE="$(curl -sS -o "$${RESP_FILE}" -w '%{http_code}' \
+      HTTP_CODE="$(curl -sS -o "$${RESP_FILE}" -w '%%{http_code}' \
         -H "Authorization: Bearer $${ACCESS_TOKEN}" \
         -H "Content-Type: application/json" \
-        "$${PUBLISH_URL}" \
+        "https://pubsub.googleapis.com/v1/projects/$${PROJECT}/topics/$${TOPIC}:publish" \
         -d "$${PUB_BODY}")"
 
       echo "  publish_http_code = $${HTTP_CODE}"
