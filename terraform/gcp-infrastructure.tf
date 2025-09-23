@@ -231,6 +231,80 @@ resource "google_secret_manager_secret_version" "k8s_kafka_sa_json_v" {
 }
 
 ########################################
+# Cloud Run service to sync secrets to Vault
+########################################
+
+# Existing: your secret + version (you already have something like this)
+# ---------- inputs ----------
+variable "vault_sync_topic_name" { type = string } # e.g. "vault-sync-secret-events"
+# The secret you’re writing in GSM in this module:
+resource "google_secret_manager_secret" "sa_json" {
+  project   = var.secrets_project_id
+  secret_id = google_secret_manager_secret.k8s_kafka_sa_json.secret_id
+  replication {
+    auto {}
+  }   # provider v5 syntax
+}
+
+resource "google_secret_manager_secret_version" "sa_json_v" {
+  secret      = google_secret_manager_secret.sa_json.id
+  secret_data = file("${path.module}/service-account.json")
+}
+
+# ---------- publisher: fire when version changes ----------
+data "google_client_config" "cur" {}
+
+resource "null_resource" "notify_secret_version" {
+  triggers = {
+    version = google_secret_manager_secret_version.sa_json_v.name
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    command = <<EOT
+            set -euo pipefail
+            PROJECT="${SECRETS_PROJECT_ID}"
+            TOPIC="${TOPIC_NAME}"
+            SECRET_ID="${SECRET_ID}"
+
+            # Build payload your Cloud Run sync expects
+            read -r -d '' PAYLOAD <<JSON
+            {
+            "event": "secret.version.added",
+            "gcp_project": "${PROJECT}",
+            "secret_id": "${SECRET_ID}",
+            "version": "latest",
+            "vault_path": "secret/${SECRET_ID}",
+            "timestamp": "$(date -u +%FT%TZ)"
+            }
+            JSON
+
+            # Publish (Pub/Sub requires base64-encoded data)
+            curl -sS -X POST \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "https://pubsub.googleapis.com/v1/projects/${PROJECT}/topics/${TOPIC}:publish" \
+            -d "$(jq -nc --arg d "$(echo -n "$PAYLOAD" | base64)" '{messages:[{data:$d}]}' )" > /dev/null
+
+            echo "Published manual sync event to Pub/Sub topic: ${TOPIC}"
+    EOT
+    environment = {
+      ACCESS_TOKEN       = data.google_client_config.cur.access_token
+      SECRETS_PROJECT_ID = var.secrets_project_id
+      TOPIC_NAME         = var.vault_sync_topic_name
+      SECRET_ID          = google_secret_manager_secret.k8s_kafka_sa_json.secret_id
+    }
+  }
+}
+
+# Make sure Pub/Sub is enabled in the project that owns the topic (if you manage it here)
+resource "google_project_service" "pubsub" {
+  project = var.secrets_project_id
+  service = "pubsub.googleapis.com"
+}
+
+
+########################################
 # Outputs (wire these into your Vault config job)
 ########################################
 output "project_id" {
