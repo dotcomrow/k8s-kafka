@@ -259,73 +259,78 @@ resource "null_resource" "notify_secret_version" {
   provisioner "local-exec" {
     interpreter = ["/bin/bash", "-c"]
     command = <<-EOT
-      set -euo pipefail
+        set -euo pipefail
 
-      # ---- Inputs from Terraform env ----
-      PROJECT="$SECRETS_PROJECT_ID"
-      TOPIC_NAME_IN="$TOPIC_NAME"
-      SECRET_ID="$SECRET_ID"
-      REGION="$EVENTARC_REGION"
-      ACCESS_TOKEN="$ACCESS_TOKEN"
+        # ---- Inputs from Terraform env ----
+        PROJECT="$SECRETS_PROJECT_ID"
+        TOPIC_NAME_IN="$TOPIC_NAME"
+        SECRET_ID="$SECRET_ID"
+        REGION="$EVENTARC_REGION"
+        ACCESS_TOKEN="$ACCESS_TOKEN"
 
-      # ---- Decide topic (use existing name or fallback pattern) ----
-      if [ -n "$TOPIC_NAME_IN" ]; then
-        TOPIC="$TOPIC_NAME_IN"
-      else
-        TOPIC="eventarc-$REGION-vault-add-version-topic"
-        echo "ℹ️ Using fallback Eventarc topic: $TOPIC"
-      fi
+        # ---- Decide topic (use existing name or fallback pattern) ----
+        if [ -n "$TOPIC_NAME_IN" ]; then
+            TOPIC="$TOPIC_NAME_IN"
+        else
+            TOPIC="eventarc-$REGION-vault-add-version-topic"
+            echo "ℹ️ Using fallback Eventarc topic: $TOPIC"
+        fi
 
-      echo "▶ Pub/Sub publish debug"
-      echo "  project   = $PROJECT"
-      echo "  topic     = $TOPIC"
-      echo "  secret_id = $SECRET_ID"
+        echo "▶ Pub/Sub publish debug"
+        echo "  project   = $PROJECT"
+        echo "  topic     = $TOPIC"
+        echo "  secret_id = $SECRET_ID"
 
-      # ---- Preflight: verify topic exists ----
-      TOPIC_CHECK="$(curl -sS -o /dev/null -w '%%{http_code}' \
-        -H "Authorization: Bearer $ACCESS_TOKEN" \
-        "https://pubsub.googleapis.com/v1/projects/$PROJECT/topics/$TOPIC")"
+        # ---- Preflight: verify topic exists ----
+        TOPIC_CHECK="$(curl -sS -o /dev/null -w '%%{http_code}' \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            "https://pubsub.googleapis.com/v1/projects/$PROJECT/topics/$TOPIC")"
 
-      if [ "$TOPIC_CHECK" != "200" ]; then
-        echo "❌ Topic projects/$PROJECT/topics/$TOPIC not found (HTTP $TOPIC_CHECK)"
-        echo "   HINT: set var.vault_eventarc_topic_name to one of the existing Eventarc topics:"
-        curl -sS -H "Authorization: Bearer $ACCESS_TOKEN" \
-          "https://pubsub.googleapis.com/v1/projects/$PROJECT/topics" \
-          | jq -r '.topics[].name' 2>/dev/null \
-          | sed 's#.*/topics/##' \
-          | grep -E '^eventarc-' || true
-        exit 1
-      fi
+        if [ "$TOPIC_CHECK" != "200" ]; then
+            echo "❌ Topic projects/$PROJECT/topics/$TOPIC not found (HTTP $TOPIC_CHECK)"
+            echo "   HINT: set var.vault_eventarc_topic_name to one of the existing Eventarc topics:"
+            curl -sS -H "Authorization: Bearer $ACCESS_TOKEN" \
+            "https://pubsub.googleapis.com/v1/projects/$PROJECT/topics" \
+            | jq -r '.topics[].name' 2>/dev/null \
+            | sed 's#.*/topics/##' \
+            | grep -E '^eventarc-' || true
+            exit 1
+        fi
 
-      # ---- Build audit-style payload expected by your sync service ----
-      RNAME="projects/$PROJECT/secrets/$SECRET_ID/versions/latest"
-      PAYLOAD_JSON="$(jq -nc \
-        --arg method 'google.cloud.secretmanager.v1.SecretManagerService.AddSecretVersion' \
-        --arg rname  "$RNAME" \
-        '{protoPayload:{serviceName:"secretmanager.googleapis.com", methodName:$method, resourceName:$rname}}')"
+        # ---- Build audit-style payload expected by your sync service ----
+        RNAME="projects/$PROJECT/secrets/$SECRET_ID/versions/latest"
+        PAYLOAD_JSON="$(jq -nc \
+            --arg method 'google.cloud.secretmanager.v1.SecretManagerService.AddSecretVersion' \
+            --arg rname  "$RNAME" \
+            '{protoPayload:{serviceName:"secretmanager.googleapis.com", methodName:$method, resourceName:$rname}}')"
 
-      # ---- Encode & publish ----
-      BASE64_PAYLOAD="$(printf '%s' "$PAYLOAD_JSON" | base64 | tr -d '\\n')"
-      PUB_BODY="$(jq -nc --arg d "$BASE64_PAYLOAD" '{messages:[{data:$d}]}' )"
+        # ---- Encode & publish (IMPORTANT: strip real newlines!) ----
+        # If available, this is best:  BASE64_PAYLOAD="$(printf '%s' "$PAYLOAD_JSON" | base64 -w0 2>/dev/null || base64 | tr -d '\n\r')"
+        BASE64_PAYLOAD="$(printf '%s' "$PAYLOAD_JSON" | base64 | tr -d '\n\r')"
 
-      RESP_FILE="$(mktemp)"
-      HTTP_CODE="$(curl -sS -o "$RESP_FILE" -w '%%{http_code}' \
-        -H "Authorization: Bearer $ACCESS_TOKEN" \
-        -H "Content-Type: application/json" \
-        "https://pubsub.googleapis.com/v1/projects/$PROJECT/topics/$TOPIC:publish" \
-        -d "$PUB_BODY")"
+        echo "  payload_len      = $(printf '%s' "$PAYLOAD_JSON" | wc -c | tr -d ' ') bytes"
+        echo "  payload_b64_len  = $(printf '%s' "$BASE64_PAYLOAD" | wc -c | tr -d ' ') bytes"
 
-      echo "  publish_http_code = $HTTP_CODE"
-      echo "  publish_response  = $(head -c 1000 "$RESP_FILE")"
-      rm -f "$RESP_FILE"
+        PUB_BODY="$(jq -nc --arg d "$BASE64_PAYLOAD" '{messages:[{data:$d}]}' )"
 
-      if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
-        echo "❌ Publish failed (HTTP $HTTP_CODE)" >&2
-        exit 1
-      fi
+        RESP_FILE="$(mktemp)"
+        HTTP_CODE="$(curl -sS -o "$RESP_FILE" -w '%%{http_code}' \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            -H "Content-Type: application/json" \
+            "https://pubsub.googleapis.com/v1/projects/$PROJECT/topics/$TOPIC:publish" \
+            -d "$PUB_BODY")"
 
-      echo "✅ Published manual sync event to Pub/Sub."
-    EOT
+        echo "  publish_http_code = $HTTP_CODE"
+        echo "  publish_response  = $(head -c 1000 "$RESP_FILE")"
+        rm -f "$RESP_FILE"
+
+        if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "❌ Publish failed (HTTP $HTTP_CODE)" >&2
+            exit 1
+        fi
+
+        echo "✅ Published manual sync event to Pub/Sub."
+        EOT
 
     environment = {
       ACCESS_TOKEN       = data.google_client_config.cur.access_token
