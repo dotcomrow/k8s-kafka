@@ -382,7 +382,7 @@ resource "null_resource" "notify_secret_version" {
       echo "  publish_response  = $RESP_PREVIEW"
 
       # Save a small report for Terraform outputs (best-effort)
-      jq -nc \
+        jq -nc \
         --arg project "$PROJECT" \
         --arg region "$REGION" \
         --arg secret_id "$SECRET_ID" \
@@ -392,14 +392,14 @@ resource "null_resource" "notify_secret_version" {
         --arg mids "$MESSAGE_IDS" \
         --argjson payload "$AUDIT_JSON" \
         '{
-          project: $project,
-          region: $region,
-          secret_id: $secret_id,
-          topic_used: $topic,
-          publish_http_code: ($http_code|tonumber),
-          publish_response_preview: $resp_preview,
-          message_ids: ( ($mids == "" ) ? [] : ($mids | split(",")) ),
-          payload_json: $payload
+            project: $project,
+            region: $region,
+            secret_id: $secret_id,
+            topic_used: $topic,
+            publish_http_code: ($http_code | tonumber),
+            publish_response_preview: $resp_preview,
+            message_ids: (if $mids == "" then [] else ($mids | split(",")) end),
+            payload_json: $payload
         }' \
         > "$PUBLISH_RESULT_PATH"
 
