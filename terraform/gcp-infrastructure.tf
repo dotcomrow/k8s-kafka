@@ -12,6 +12,10 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.6"
     }
+    external = {
+      source  = "hashicorp/external"
+      version = "~> 2.3"
+    }
   }
 }
 
@@ -109,7 +113,7 @@ locals {
   audit_log_entry_b64  = base64encode(local.audit_log_entry_json)
   publish_result_path  = "${path.module}/.pubsub_publish_result.json"
 
-  # If the hint is provided, compute an "effective" FQN for outputs
+  # If the hint is provided, compute an "effective" FQN (used if discovery is skipped)
   eventarc_effective_trigger_topic_fqn = var.eventarc_add_version_trigger_topic_hint != "" ? (
     startswith(var.eventarc_add_version_trigger_topic_hint, "projects/") ?
     var.eventarc_add_version_trigger_topic_hint :
@@ -254,19 +258,66 @@ resource "google_secret_manager_secret_version" "k8s_kafka_sa_json_v" {
 
 # Optional IAM on existing topic
 resource "google_pubsub_topic_iam_member" "allow_publish_existing_eventarc_topic" {
-    count   = var.publisher_member != "" && var.eventarc_add_version_trigger_topic_hint != "" ? 1 : 0
+  count   = var.publisher_member != "" && var.eventarc_add_version_trigger_topic_hint != "" ? 1 : 0
+  project = var.secrets_project_id
+  topic   = startswith(var.eventarc_add_version_trigger_topic_hint, "projects/") ? element(split("/", var.eventarc_add_version_trigger_topic_hint), length(split("/", var.eventarc_add_version_trigger_topic_hint)) - 1) : var.eventarc_add_version_trigger_topic_hint
+  role    = "roles/pubsub.publisher"
+  member  = var.publisher_member
+  depends_on = [google_project_service.pubsub]
+}
+
+########################################
+# Discover Eventarc trigger topic in Terraform (so we can output it)
+########################################
+data "google_client_config" "cur" {}
+
+# Uses curl + jq to list topics and choose the *trigger* one
+data "external" "discover_add_version_trigger_topic" {
+  program = ["/bin/bash", "-c", <<-EOS
+    set -euo pipefail
+    # read the JSON query from stdin
+    QUERY="$(cat)"
+    PROJECT="$(printf '%s' "$QUERY" | jq -r '.project')"
+    REGION="$(printf '%s' "$QUERY" | jq -r '.region')"
+    TOKEN="$(printf '%s' "$QUERY" | jq -r '.token')"
+    HINT="$(printf '%s' "$QUERY" | jq -r '.hint')"
+
+    if [ -n "$HINT" ] && [ "$HINT" != "null" ]; then
+      if [[ "$HINT" == projects/*/topics/* ]]; then
+        printf '{"topic_fqn":"%s"}' "$HINT"
+      else
+        printf '{"topic_fqn":"projects/%s/topics/%s"}' "$PROJECT" "$HINT"
+      fi
+      exit 0
+    fi
+
+    # Discover via Pub/Sub REST
+    OUT="$(curl -sS -H "Authorization: Bearer $TOKEN" "https://pubsub.googleapis.com/v1/projects/$PROJECT/topics?pageSize=1000")"
+
+    TOPIC="$(printf '%s' "$OUT" | jq -r --arg region "$REGION" '(.topics // []) | .[].name | select(contains("eventarc-" + $region + "-") and contains("add-version") and contains("trigger-"))' | head -n1)"
+    if [ -z "$TOPIC" ]; then
+      TOPIC="$(printf '%s' "$OUT" | jq -r --arg region "$REGION" '(.topics // []) | .[].name | select(contains("eventarc-" + $region + "-") and contains("add-version") and contains("-topic"))' | head -n1)"
+    fi
+
+    if [ -z "$TOPIC" ]; then
+      printf '{"topic_fqn":""}'
+    else
+      jq -n --arg t "$TOPIC" '{"topic_fqn":$t}'
+    fi
+  EOS
+  ]
+
+  query = {
     project = var.secrets_project_id
-    topic   = startswith(var.eventarc_add_version_trigger_topic_hint, "projects/") ? element(split("/", var.eventarc_add_version_trigger_topic_hint), length(split("/", var.eventarc_add_version_trigger_topic_hint)) - 1) : var.eventarc_add_version_trigger_topic_hint
-    role    = "roles/pubsub.publisher"
-    member  = var.publisher_member
-    depends_on = [google_project_service.pubsub]
+    region  = var.eventarc_region
+    token   = data.google_client_config.cur.access_token
+    hint    = var.eventarc_add_version_trigger_topic_hint
+  }
 }
 
 ########################################
 # Manual publish to Eventarc trigger topic
 ########################################
-data "google_client_config" "cur" {}
-
 resource "google_project_iam_audit_config" "pubsub_data_access" {
   project = var.secrets_project_id
   service = "pubsub.googleapis.com"
@@ -281,6 +332,7 @@ resource "null_resource" "notify_secret_version" {
     eventarc_region = var.eventarc_region
     secret_id       = google_secret_manager_secret.k8s_kafka_sa_json.secret_id
     topic_hint      = var.eventarc_add_version_trigger_topic_hint
+    discovered      = try(data.external.discover_add_version_trigger_topic.result["topic_fqn"], "")
   }
 
   provisioner "local-exec" {
@@ -290,7 +342,8 @@ resource "null_resource" "notify_secret_version" {
       SECRETS_PROJECT_ID  = var.secrets_project_id
       EVENTARC_REGION     = var.eventarc_region
       SECRET_ID           = google_secret_manager_secret.k8s_kafka_sa_json.secret_id
-      TOPIC_HINT          = var.eventarc_add_version_trigger_topic_hint
+      # prefer discovered FQN; may be ""
+      TOPIC_FQN           = try(data.external.discover_add_version_trigger_topic.result["topic_fqn"], "")
       AUDIT_JSON          = local.audit_log_entry_json
       AUDIT_B64           = local.audit_log_entry_b64
       PUBLISH_RESULT_PATH = local.publish_result_path
@@ -302,76 +355,29 @@ resource "null_resource" "notify_secret_version" {
       REGION="$EVENTARC_REGION"
       SECRET_ID="$SECRET_ID"
       ACCESS_TOKEN="$ACCESS_TOKEN"
-      TOPIC_HINT="$TOPIC_HINT"
+      TOPIC_FQN="${TOPIC_FQN:-}"
 
       echo "▶ Pub/Sub publish debug"
       echo "  project   = $PROJECT"
       echo "  region    = $REGION"
       echo "  secret_id = $SECRET_ID"
 
-      # ---------- Resolve Eventarc *trigger* topic ----------
-      if [ -n "$TOPIC_HINT" ]; then
-        if [[ "$TOPIC_HINT" == projects/*/topics/* ]]; then
-          TOPIC_FQN="$TOPIC_HINT"
-        else
-          TOPIC_FQN="projects/$PROJECT/topics/$TOPIC_HINT"
-        fi
-        echo "✅ Using override topic: $TOPIC_FQN"
-      else
-        if ! command -v jq >/dev/null 2>&1; then
-          echo "❌ jq is required in the runner"; exit 1
-        fi
-
-        LIST_FILE="$(mktemp)"
-        LIST_CODE="$(curl -sS -o "$LIST_FILE" -w '%%{http_code}' \
-          -H "Authorization: Bearer $ACCESS_TOKEN" \
-          "https://pubsub.googleapis.com/v1/projects/$PROJECT/topics?pageSize=1000")"
-
-        if [ "$LIST_CODE" -lt 200 ] || [ "$LIST_CODE" -ge 300 ]; then
-          echo "❌ Pub/Sub list topics failed ($LIST_CODE): $(head -c 1000 "$LIST_FILE")"
-          rm -f "$LIST_FILE"
-          exit 1
-        fi
-
-        echo "  discovered topics (first few):"
-        jq -r '(.topics // []) | .[].name' "$LIST_FILE" | head -n 8 | sed 's/^/    - /'
-
-        # Prefer the *trigger* topic: eventarc-<region>-...add-version...trigger-
-        TOPIC_FQN="$(jq -r --arg region "$REGION" '
-          (.topics // []) | .[].name
-          | select(contains("eventarc-" + $region + "-") and contains("add-version") and contains("trigger-"))
-        ' "$LIST_FILE" | head -n1 || true)"
-
-        # Fallback to the non-trigger variant (...add-version...-topic)
-        if [ -z "$TOPIC_FQN" ]; then
-          TOPIC_FQN="$(jq -r --arg region "$REGION" '
-            (.topics // []) | .[].name
-            | select(contains("eventarc-" + $region + "-") and contains("add-version") and contains("-topic"))
-          ' "$LIST_FILE" | head -n1 || true)"
-        fi
-
-        rm -f "$LIST_FILE"
-
-        if [ -z "$TOPIC_FQN" ]; then
-          echo "❌ Could not find *any* AddSecretVersion Eventarc topic in region $REGION."
-          echo "   Tip: set var.eventarc_add_version_trigger_topic_hint to the exact topic FQN."
-          exit 1
-        fi
-
-        echo "✅ Using topic: $TOPIC_FQN"
+      # If discovery didn't find anything (or you're missing jq on the runner), bail with a helpful hint
+      if [ -z "$TOPIC_FQN" ]; then
+        echo "❌ No trigger topic discovered. Set var.eventarc_add_version_trigger_topic_hint (FQN or name)."
+        exit 1
       fi
+      echo "✅ Using topic: $TOPIC_FQN"
 
-      # ---------- Build CloudEvents attributes (helps Eventarc treat this as proper event) ----------
-      # ce-type must match the Eventarc trigger type
+      # ---------- CloudEvents attributes ----------
       CE_TYPE="google.cloud.audit.log.v1.written"
       CE_SOURCE="//cloudaudit.googleapis.com/projects/$PROJECT/logs/cloudaudit.googleapis.com%2Factivity"
       CE_SPEC="1.0"
       CE_TIME="$(date -u +%FT%TZ)"
-      # simple unique id if uuidgen absent
       if command -v uuidgen >/dev/null 2>&1; then CE_ID="$(uuidgen)"; else CE_ID="$(date +%s%N)-manual"; fi
 
-      # ---------- Publish ----------
       echo "  payload_len = $(printf '%s' "$AUDIT_JSON" | wc -c | tr -d ' ') bytes"
+
       PUB_BODY="$(jq -nc --arg d "$AUDIT_B64" \
         --arg t "$CE_TYPE" --arg s "$CE_SOURCE" --arg v "$CE_SPEC" --arg i "$CE_ID" --arg tm "$CE_TIME" \
         '{messages:[{data:$d, attributes:{ "ce-type":$t, "ce-source":$s, "ce-specversion":$v, "ce-id":$i, "ce-time":$tm, "content-type":"application/json"}}]}')"
@@ -391,7 +397,6 @@ resource "null_resource" "notify_secret_version" {
       echo "  message_ids       = $MESSAGE_IDS"
       echo "  publish_response  = $RESP_PREVIEW"
 
-      # Save a small report for Terraform outputs (best-effort), include payload preview
       PAYLOAD_PREVIEW="$(printf '%s' "$AUDIT_JSON" | head -c 500)"
       jq -nc \
         --arg project "$PROJECT" \
@@ -411,8 +416,7 @@ resource "null_resource" "notify_secret_version" {
           message_ids: (if $mids == "" then [] else ($mids | split(",")) end),
           payload_json: $payload,
           payload_preview: $payload_preview
-        }' \
-        > "$PUBLISH_RESULT_PATH"
+        }' > "$PUBLISH_RESULT_PATH"
 
       if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
         echo "❌ Publish failed (HTTP $HTTP_CODE)"; exit 1
@@ -440,23 +444,24 @@ output "pubsub_published_payload" {
   description = "AuditLog JSON that was published to Pub/Sub."
 }
 
-# If you provided a topic hint, this shows the exact FQN Terraform used.
-# (Dynamic discovery topics found in the shell are printed in apply logs,
-# but cannot be reflected in outputs without a provider-managed resource.)
-output "eventarc_effective_trigger_topic_fqn" {
-  value       = local.eventarc_effective_trigger_topic_fqn != "" ? local.eventarc_effective_trigger_topic_fqn : null
-  description = "Trigger topic FQN when hint is provided."
+# The discovered (or hinted) Eventarc trigger topic FQN — purely Terraform-level (no file needed)
+output "eventarc_trigger_topic_fqn" {
+  value       = coalesce(
+                  try(data.external.discover_add_version_trigger_topic.result["topic_fqn"], ""),
+                  local.eventarc_effective_trigger_topic_fqn != "" ? local.eventarc_effective_trigger_topic_fqn : null
+               )
+  description = "Eventarc AddSecretVersion trigger topic FQN used for publishing."
 }
 
-# Best-effort file-based report (may be null in Terraform Cloud)
+# Best-effort file-based report (from the publisher script)
 output "pubsub_publish_result" {
   value       = try(jsondecode(file(local.publish_result_path)), null)
-  description = "Publish report: topic used, message IDs, HTTP code, response preview, payload."
+  description = "Publish report: topic used, message IDs, HTTP code, payload preview."
 }
 
 output "pubsub_topic_used" {
   value       = try(jsondecode(file(local.publish_result_path)).topic_used, null)
-  description = "Fully-qualified topic that received the message (best-effort)."
+  description = "Fully-qualified topic that received the message (best-effort, from runtime)."
 }
 
 output "pubsub_publish_http_code" {
