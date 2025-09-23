@@ -272,7 +272,7 @@ variable "vault_sync_topic_name" { type = string } # e.g. "eventarc-us-east1-vau
 resource "null_resource" "notify_secret_version" {
   triggers = {
     version      = google_secret_manager_secret_version.k8s_kafka_sa_json_v.name
-    secrets_proj = var.secrets_project_id
+    project      = var.secrets_project_id
     region       = var.region
     secret_id    = google_secret_manager_secret.k8s_kafka_sa_json.secret_id
     topic_hint   = var.eventarc_add_version_trigger_topic_hint
@@ -294,7 +294,7 @@ resource "null_resource" "notify_secret_version" {
       echo "  region    = $REGION"
       echo "  secret_id = $SECRET_ID"
 
-      # ---------- resolve trigger topic (override → discovery: prefer *trigger*, then *topic*) ----------
+      # ---------- Resolve Eventarc trigger topic ----------
       if [ -n "$TOPIC_HINT" ]; then
         if [[ "$TOPIC_HINT" == projects/*/topics/* ]]; then
           TOPIC_FQN="$TOPIC_HINT"
@@ -303,45 +303,65 @@ resource "null_resource" "notify_secret_version" {
         fi
         echo "✅ Using override topic: $TOPIC_FQN"
       else
+        # Need jq for discovery
         if ! command -v jq >/dev/null 2>&1; then
           echo "❌ jq is required in the runner"; exit 1
         fi
-        TOPICS_JSON="$(curl -sS -H "Authorization: Bearer $ACCESS_TOKEN" \
+
+        # List topics with status check
+        LIST_FILE="$(mktemp)"
+        LIST_CODE="$(curl -sS -o "$LIST_FILE" -w '%%{http_code}' \
+          -H "Authorization: Bearer $ACCESS_TOKEN" \
           "https://pubsub.googleapis.com/v1/projects/$PROJECT/topics?pageSize=1000")"
 
-        # Prefer: eventarc-<region>-*add-version-trigger-<id>
-        TOPIC_FQN="$(printf '%s' "$TOPICS_JSON" | jq -r --arg region "$REGION" '
-          (.topics // []) | map(.name) | .[]
-          | select( test("^projects/.+/topics/eventarc-" + $region + "-.*add-version-trigger-\\d+$") )
-        ' | head -n1 || true)"
-
-        # Fallback: eventarc-<region>-*add-version-topic
-        if [ -z "$TOPIC_FQN" ]; then
-          TOPIC_FQN="$(printf '%s' "$TOPICS_JSON" | jq -r --arg region "$REGION" '
-            (.topics // []) | map(.name) | .[]
-            | select( test("^projects/.+/topics/eventarc-" + $region + "-.*add-version-topic$") )
-          ' | head -n1 || true)"
+        if [ "$LIST_CODE" -lt 200 ] || [ "$LIST_CODE" -ge 300 ]; then
+          echo "❌ Pub/Sub list topics failed ($LIST_CODE): $(head -c 1000 "$LIST_FILE")"
+          rm -f "$LIST_FILE"
+          exit 1
         fi
 
-        if [ -z "$TOPIC_FQN" ]; then
-          echo "❌ Could not find Eventarc AddSecretVersion trigger/topic in $REGION."; exit 1
+        # Show a quick sample of discovered names (first 8) for debugging
+        echo "  discovered topics (first few):"
+        jq -r '(.topics // []) | .[].name' "$LIST_FILE" | head -n 8 | sed 's/^/    - /'
+
+        # Prefer names that contain: eventarc-<region>- … add-version … trigger-
+        TOPIC_FQN="$(jq -r --arg region "$REGION" '
+          (.topics // []) | .[].name
+          | select(contains("eventarc-" + $region + "-") and contains("add-version") and contains("trigger-"))
+        ' "$LIST_FILE" | head -n1 || true)"
+
+        # Fallback to the non-trigger variant (… add-version … topic)
+        if [ -z "${TOPIC_FQN:-}" ]; then
+          TOPIC_FQN="$(jq -r --arg region "$REGION" '
+            (.topics // []) | .[].name
+            | select(contains("eventarc-" + $region + "-") and contains("add-version") and contains("-topic"))
+          ' "$LIST_FILE" | head -n1 || true)"
+        fi
+
+        rm -f "$LIST_FILE"
+
+        if [ -z "${TOPIC_FQN:-}" ]; then
+          echo "❌ Could not find *any* Eventarc AddSecretVersion topic in region $REGION."
+          echo "   Tip: set var.eventarc_add_version_trigger_topic_hint to the exact topic FQN."
+          exit 1
         fi
 
         echo "✅ Using topic: $TOPIC_FQN"
       fi
 
-      # ---------- payload (AuditLog-like) ----------
+      # ---------- Build an AuditLog-shaped payload (what your sync service expects) ----------
       SERVICE="secretmanager.googleapis.com"
       METHOD="google.cloud.secretmanager.v1.SecretManagerService.AddSecretVersion"
       RESOURCE="projects/$PROJECT/secrets/$SECRET_ID/versions/latest"
 
-      PAYLOAD_JSON="$(jq -nc --arg svc "$SERVICE" --arg method "$METHOD" --arg rname "$RESOURCE" \
-        '{protoPayload:{serviceName:$svc, methodName:$method, resourceName:$rname}}')"
+      PAYLOAD_JSON="$(jq -nc --arg svc "$SERVICE" --arg m "$METHOD" --arg rn "$RESOURCE" \
+        '{protoPayload:{serviceName:$svc, methodName:$m, resourceName:$rn}}')"
       echo "  payload_len = $(printf '%s' "$PAYLOAD_JSON" | wc -c | tr -d ' ') bytes"
 
       BASE64_PAYLOAD="$(printf '%s' "$PAYLOAD_JSON" | base64 | tr -d '\n')"
       PUB_BODY="$(jq -nc --arg d "$BASE64_PAYLOAD" '{messages:[{data:$d}]}' )"
 
+      # ---------- Publish ----------
       RESP_FILE="$(mktemp)"
       HTTP_CODE="$(curl -sS -o "$RESP_FILE" -w '%%{http_code}' \
         -H "Authorization: Bearer $ACCESS_TOKEN" \
@@ -361,11 +381,11 @@ resource "null_resource" "notify_secret_version" {
     EOT
 
     environment = {
-      ACCESS_TOKEN = data.google_client_config.cur.access_token
+      ACCESS_TOKEN       = data.google_client_config.cur.access_token
       SECRETS_PROJECT_ID = var.secrets_project_id
-      REGION      = var.region
-      SECRET_ID   = google_secret_manager_secret.k8s_kafka_sa_json.secret_id
-      TOPIC_HINT  = var.eventarc_add_version_trigger_topic_hint
+      REGION             = var.region
+      SECRET_ID          = google_secret_manager_secret.k8s_kafka_sa_json.secret_id
+      TOPIC_HINT         = var.eventarc_add_version_trigger_topic_hint
     }
   }
 }
