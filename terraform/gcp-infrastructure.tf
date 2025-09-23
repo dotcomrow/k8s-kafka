@@ -17,7 +17,6 @@ resource "random_id" "suffix_gcp" {
 }
 
 # This provider is used both to create the project and, later, to operate inside it.
-# We still set 'project' so resources that don't accept a 'project' field will default correctly.
 provider "google" {
   project = local.project_id
   region  = var.region
@@ -25,26 +24,35 @@ provider "google" {
 
 # ---------- Inputs ----------
 variable "secrets_project_id" { type = string }  # e.g. "tf-k8s-cluster-infra-9734"
-variable "project_name" { type = string }                  # e.g. "Data Pipeline"
-variable "billing_account" { type = string }               # e.g. "012345-6789AB-CDEF01"
-variable "gcp_org_id" {
-  type    = string
-}     # one of org_id or folder_id must be set (not both)
-variable "folder_id" {
-  type    = string
-  default = ""
-}     # e.g. "folders/123456789012"
-variable "region"      { type = string }                   # e.g. "us-central1" (for provider)
-variable "bq_location" { type = string }                   # e.g. "US" or "EU"
-variable "dataset_id"  { type = string }                   # e.g. "analytics"
-variable "bootstrap_bucket" { type = string }              # globally-unique bucket name
-variable "sa_name" {
-  type    = string
-  default = "bq-data-pipeline"                             # one SA used by both jobs
+variable "project_name"       { type = string }  # e.g. "Data Pipeline"
+variable "billing_account"    { type = string }  # e.g. "012345-6789AB-CDEF01"
+variable "gcp_org_id"         { type = string }  # one of org_id or folder_id must be set (not both)
+variable "folder_id"          { type = string, default = "" } # e.g. "folders/123456789012"
+variable "region"             { type = string }  # e.g. "us-central1" (for provider)
+variable "bq_location"        { type = string }  # e.g. "US" or "EU"
+variable "dataset_id"         { type = string }  # e.g. "analytics"
+variable "bootstrap_bucket"   { type = string }  # globally-unique bucket name
+variable "sa_name"            { type = string, default = "bq-data-pipeline" }
+variable "secret_id"          { type = string, default = "bq-data-pipeline-key" }
+
+# Eventarc topic usage (existing topics)
+variable "vault_eventarc_topic_name" {
+  type        = string
+  default     = ""
+  description = "Existing Eventarc Pub/Sub topic name (no projects/... prefix). If empty, will fall back to eventarc-<eventarc_region>-vault-add-version-topic."
 }
-variable "secret_id" {
-  type    = string
-  default = "bq-data-pipeline-key"                         # Secret Manager secret name
+
+variable "eventarc_region" {
+  type        = string
+  default     = "us-east1"
+  description = "Region of the Eventarc trigger/topics."
+}
+
+# Optional: grant publish to an identity on the existing topic
+variable "publisher_member" {
+  type        = string
+  default     = ""
+  description = "Optional IAM member to grant roles/pubsub.publisher on the existing Eventarc topic, e.g. serviceAccount:tf-sa@proj.iam.gserviceaccount.com"
 }
 
 # Optional: free-form labels
@@ -55,21 +63,20 @@ variable "labels" {
 
 # ---------- Validations ----------
 locals {
-    parent_provided = (var.gcp_org_id != "" ? 1 : 0) + (var.folder_id != "" ? 1 : 0)
-    project_id      = "${var.project_name}-${random_id.suffix_gcp.hex}"
-    kafka_apis = toset([
-        "bigquery.googleapis.com",
-        "storage.googleapis.com",
-        "iam.googleapis.com",
-        "logging.googleapis.com",
-        "bigquery.googleapis.com",
-        "bigquerystorage.googleapis.com",
-        "iam.googleapis.com",
-        "secretmanager.googleapis.com",
-        "storage.googleapis.com",
-    ])
+  parent_provided = (var.gcp_org_id != "" ? 1 : 0) + (var.folder_id != "" ? 1 : 0)
+  project_id      = "${var.project_name}-${random_id.suffix_gcp.hex}"
+
+  kafka_apis = toset([
+    "bigquery.googleapis.com",
+    "bigquerystorage.googleapis.com",
+    "iam.googleapis.com",
+    "logging.googleapis.com",
+    "secretmanager.googleapis.com",
+    "storage.googleapis.com",
+  ])
 }
 
+# Ensure Pub/Sub API is enabled in the secrets/infra project (where Eventarc topics live)
 resource "google_project_service" "pubsub" {
   project = var.secrets_project_id
   service = "pubsub.googleapis.com"
@@ -85,17 +92,15 @@ resource "null_resource" "validate_parent" {
 }
 
 ########################################
-# Project + API enablement
+# Project + API enablement (Kafka project)
 ########################################
 resource "google_project" "this" {
   name            = var.project_name
   billing_account = var.billing_account
   project_id      = local.project_id
-  # Exactly one of these must be set; use null for the other
-  org_id    = var.gcp_org_id    != "" ? var.gcp_org_id    : null
-  folder_id = var.folder_id != "" ? var.folder_id : null
-
-  labels = var.labels
+  org_id          = var.gcp_org_id != "" ? var.gcp_org_id : null
+  folder_id       = var.folder_id   != "" ? var.folder_id : null
+  labels          = var.labels
 
   depends_on = [null_resource.validate_parent]
 }
@@ -111,13 +116,12 @@ resource "google_project_service" "enable" {
 # BigQuery dataset (target for sink)
 ########################################
 resource "google_bigquery_dataset" "target" {
-  project                     = google_project.this.project_id
-  dataset_id                  = var.dataset_id
-  location                    = var.bq_location    # must be US/EU family compatible with bucket
-  delete_contents_on_destroy  = false
-  labels                      = var.labels
-
-  depends_on = [google_project_service.enable]
+  project                    = google_project.this.project_id
+  dataset_id                 = var.dataset_id
+  location                   = var.bq_location
+  delete_contents_on_destroy = false
+  labels                     = var.labels
+  depends_on                 = [google_project_service.enable]
 }
 
 ########################################
@@ -126,14 +130,14 @@ resource "google_bigquery_dataset" "target" {
 resource "google_storage_bucket" "bootstrap" {
   project                      = google_project.this.project_id
   name                         = var.bootstrap_bucket
-  location                     = var.bq_location   # use US/EU multi-region to match BigQuery location family
+  location                     = var.bq_location
   force_destroy                = false
   uniform_bucket_level_access  = true
   labels                       = var.labels
 
   lifecycle_rule {
-    action { type = "Delete" }
-    condition { age = 3 }      # auto-clean bootstrap files after N days
+    action    { type = "Delete" }
+    condition { age  = 3 }
   }
 
   depends_on = [google_project_service.enable]
@@ -148,196 +152,173 @@ resource "google_service_account" "pipeline" {
   display_name = "Kafka↔BQ pipeline SA (bootstrap export + sink)"
 }
 
-# Allow BigQuery jobs in the project
 resource "google_project_iam_member" "sa_bq_job_user" {
   project = google_project.this.project_id
   role    = "roles/bigquery.jobUser"
   member  = "serviceAccount:${google_service_account.pipeline.email}"
-
   depends_on = [google_project_service.enable]
 }
 
-# Allow writes into the target dataset (sink)
 resource "google_bigquery_dataset_iam_member" "sa_dataset_editor" {
   project    = google_project.this.project_id
   dataset_id = google_bigquery_dataset.target.dataset_id
   role       = "roles/bigquery.dataEditor"
   member     = "serviceAccount:${google_service_account.pipeline.email}"
-
   depends_on = [google_project_service.enable]
 }
 
-# Allow bootstrap export to write to the GCS bucket
 resource "google_storage_bucket_iam_member" "sa_bucket_object_creator" {
   bucket = google_storage_bucket.bootstrap.name
   role   = "roles/storage.objectCreator"
   member = "serviceAccount:${google_service_account.pipeline.email}"
-
   depends_on = [google_project_service.enable]
 }
 
 ########################################
-# Create a key and store in Secret Manager
+# Create a key and store in Secret Manager (Kafka project)
 ########################################
 resource "google_service_account_key" "pipeline_key" {
   service_account_id = google_service_account.pipeline.name
-  keepers = {
-    # rotate by changing this value (e.g., commit timestamp or manual value)
-    rotated_at = timestamp()
-  }
-
+  keepers = { rotated_at = timestamp() }
   depends_on = [google_project_service.enable]
 }
 
 resource "google_secret_manager_secret" "pipeline_key" {
   project   = google_project.this.project_id
   secret_id = var.secret_id
-  replication {
-    auto {}
-  }   # provider v5 syntax
-
-  labels = var.labels
-
+  replication { auto {} }
+  labels     = var.labels
   depends_on = [google_project_service.enable]
 }
 
 resource "google_secret_manager_secret_version" "pipeline_key_v" {
   secret      = google_secret_manager_secret.pipeline_key.id
-  # SA key is base64; Secret Manager expects raw JSON
   secret_data = base64decode(google_service_account_key.pipeline_key.private_key)
 }
 
 # ------------------------------------------------------------
-# Save SA key JSON to Secret Manager so it can sync to Vault
-# Name must be EXACT (user requested):
-#   k8s-kafka-gcp-sesrvice-account-json
+# Save SA key JSON to Secret Manager in the infra/secrets project
 # ------------------------------------------------------------
-
-# Secret container (auto replication; provider v5 syntax)
 resource "google_secret_manager_secret" "k8s_kafka_sa_json" {
   project   = var.secrets_project_id
   secret_id = "k8s-kafka-gcp-service-account-json"
-
-  replication {
-    auto {}
-  }   # provider v5 syntax
-
-  # (optional) labels
-  # labels = var.labels
-
-  depends_on = [google_project_service.enable]
+  replication { auto {} }
+  depends_on = [google_project_service.pubsub] # ensure API on the target project
 }
 
-# Put the SA key JSON into the secret (latest version)
-# NOTE: google_service_account_key.pipeline_key.private_key is base64; decode to raw JSON
 resource "google_secret_manager_secret_version" "k8s_kafka_sa_json_v" {
   secret      = google_secret_manager_secret.k8s_kafka_sa_json.id
   secret_data = base64decode(google_service_account_key.pipeline_key.private_key)
 }
 
-########################################
-# Cloud Run service to sync secrets to Vault
-########################################
+# Optional: grant publish on existing Eventarc topic to a runner identity
+resource "google_pubsub_topic_iam_member" "allow_publish_existing_eventarc_topic" {
+  count   = var.vault_eventarc_topic_name != "" && var.publisher_member != "" ? 1 : 0
+  project = var.secrets_project_id
+  topic   = var.vault_eventarc_topic_name
+  role    = "roles/pubsub.publisher"
+  member  = var.publisher_member
 
-# Existing: your secret + version (you already have something like this)
-# ---------- inputs ----------
-variable "vault_sync_topic_name" { type = string } # e.g. "vault-sync-secret-events"
-# The secret you’re writing in GSM in this module:
+  depends_on = [google_project_service.pubsub]
+}
 
-# ---------- publisher: fire when version changes ----------
+########################################
+# Manual publish to existing Eventarc topic when secret version changes
+########################################
 data "google_client_config" "cur" {}
 
 resource "google_project_iam_audit_config" "pubsub_data_access" {
-  project = var.secrets_project_id   # <- the project with the Pub/Sub topic
+  project = var.secrets_project_id
   service = "pubsub.googleapis.com"
-
-  audit_log_config { log_type = "DATA_READ" }   # optional
-  audit_log_config { log_type = "DATA_WRITE" }  # needed for Publish logs
+  audit_log_config { log_type = "DATA_READ" }
+  audit_log_config { log_type = "DATA_WRITE" } # to see Publish logs
 }
 
 resource "null_resource" "notify_secret_version" {
-  # Re-run when a new version is created
   triggers = {
-    version        = google_secret_manager_secret_version.k8s_kafka_sa_json_v.name
-    topic          = var.vault_sync_topic_name
-    secrets_proj   = var.secrets_project_id
-    secret_id      = google_secret_manager_secret.k8s_kafka_sa_json.secret_id
+    version      = google_secret_manager_secret_version.k8s_kafka_sa_json_v.name
+    topic        = var.vault_eventarc_topic_name
+    secrets_proj = var.secrets_project_id
+    secret_id    = google_secret_manager_secret.k8s_kafka_sa_json.secret_id
+    region       = var.eventarc_region
   }
 
   provisioner "local-exec" {
     interpreter = ["/bin/bash", "-c"]
     command = <<-EOT
-        set -euo pipefail
+      set -euo pipefail
 
-        # -------- Inputs from Terraform (non-sensitive) ----------
-        PROJECT="$${SECRETS_PROJECT_ID}"
-        TOPIC="$${TOPIC_NAME}"
-        SECRET_ID="$${SECRET_ID}"
+      # ---- Inputs from Terraform env ----
+      PROJECT="$SECRETS_PROJECT_ID"
+      TOPIC_NAME_IN="$TOPIC_NAME"
+      SECRET_ID="$SECRET_ID"
+      REGION="$EVENTARC_REGION"
+      ACCESS_TOKEN="$ACCESS_TOKEN"
 
-        # -------- Access token (sensitive) ----------
-        ACCESS_TOKEN="$${ACCESS_TOKEN}"
+      # ---- Decide topic (use existing name or fallback pattern) ----
+      if [ -n "$TOPIC_NAME_IN" ]; then
+        TOPIC="$TOPIC_NAME_IN"
+      else
+        TOPIC="eventarc-$REGION-vault-add-version-topic"
+        echo "ℹ️ Using fallback Eventarc topic: $TOPIC"
+      fi
 
-        # Print non-sensitive diagnostics
-        echo "▶ Pub/Sub publish debug"
-        echo "  project        = $PROJECT"
-        echo "  topic          = $TOPIC"
-        echo "  secret_id      = $SECRET_ID"
-        # Print a token fingerprint only (no secrets in logs)
-        if command -v sha256sum >/dev/null 2>&1; then
-            echo "  access_token_sha256 = $(printf '%s' "$${ACCESS_TOKEN}" | sha256sum | cut -d' ' -f1)"
-        else
-            echo "  access_token_present = $([ -n "$${ACCESS_TOKEN}" ] && echo yes || echo no)"
-        fi
+      echo "▶ Pub/Sub publish debug"
+      echo "  project   = $PROJECT"
+      echo "  topic     = $TOPIC"
+      echo "  secret_id = $SECRET_ID"
 
-        # Build an audit-style payload your Cloud Run expects
-        # (Matches your sync service which looks at protoPayload.methodName/resourceName)
-        PAYLOAD_JSON="$(jq -nc \
-            --arg method  "google.cloud.secretmanager.v1.SecretManagerService.AddSecretVersion" \
-            --arg rname   "projects/$${PROJECT}/secrets/$${SECRET_ID}/versions/latest" \
-            '{protoPayload:{serviceName:"secretmanager.googleapis.com", methodName:$method, resourceName:$rname}}')"
+      # ---- Preflight: verify topic exists ----
+      TOPIC_CHECK="$(curl -sS -o /dev/null -w '%%{http_code}' \
+        -H "Authorization: Bearer $ACCESS_TOKEN" \
+        "https://pubsub.googleapis.com/v1/projects/$PROJECT/topics/$TOPIC")"
 
-        # Show payload sizes, not contents
-        echo "  payload_len    = $(printf '%s' "$${PAYLOAD_JSON}" | wc -c | tr -d ' ') bytes"
-
-        # Base64 encode for Pub/Sub (define it *before* using it)
-        BASE64_PAYLOAD="$(printf '%s' "$${PAYLOAD_JSON}" | base64 | tr -d '\n')"
-        echo "  payload_b64_len= $(printf '%s' "$${BASE64_PAYLOAD}" | wc -c | tr -d ' ') bytes"
-
-        # Assemble publish body
-        PUB_BODY="$(jq -nc --arg d "$${BASE64_PAYLOAD}" '{messages:[{data:$d}]}' )"
-
-        # Show payload sizes, not contents
-        echo "  payload_len    = $(printf '%s' "$${PAYLOAD_JSON}" | wc -c | tr -d ' ') bytes"
-
-        # Base64 encode for Pub/Sub
-        payload_b64_len="$(printf '%s' "$${BASE64_PAYLOAD}" | wc -c | tr -d ' ')"
-        echo "  payload_b64_len= $payload_b64_len bytes"
-
-        PUB_BODY="$(jq -nc --arg d "$${BASE64_PAYLOAD}" '{messages:[{data:$d}]}' )"
-
-        RESP_FILE="$(mktemp)"
-        HTTP_CODE="$(curl -sS -o "$${RESP_FILE}" -w '%%{http_code}' \
-        -H "Authorization: Bearer $${ACCESS_TOKEN}" \
-        -H "Content-Type: application/json" \
-        "https://pubsub.googleapis.com/v1/projects/$${PROJECT}/topics/$${TOPIC}:publish" \
-        -d "$${PUB_BODY}")"
-
-        echo "  http_code      = $${HTTP_CODE}"
-        echo "  response_body  = $(head -c 1000 "$${RESP_FILE}")"
-        rm -f "$${RESP_FILE}"
-
-        if [ "$${HTTP_CODE}" -lt 200 ] || [ "$${HTTP_CODE}" -ge 300 ]; then
-        echo "❌ Publish failed (HTTP $${HTTP_CODE})" >&2
+      if [ "$TOPIC_CHECK" != "200" ]; then
+        echo "❌ Topic projects/$PROJECT/topics/$TOPIC not found (HTTP $TOPIC_CHECK)"
+        echo "   HINT: set var.vault_eventarc_topic_name to one of the existing Eventarc topics:"
+        curl -sS -H "Authorization: Bearer $ACCESS_TOKEN" \
+          "https://pubsub.googleapis.com/v1/projects/$PROJECT/topics" \
+          | jq -r '.topics[].name' 2>/dev/null \
+          | sed 's#.*/topics/##' \
+          | grep -E '^eventarc-' || true
         exit 1
-        fi
+      fi
 
-      echo "✅ Published manual sync event to Pub/Sub: topic=$${TOPIC}"
+      # ---- Build audit-style payload expected by your sync service ----
+      RNAME="projects/$PROJECT/secrets/$SECRET_ID/versions/latest"
+      PAYLOAD_JSON="$(jq -nc \
+        --arg method 'google.cloud.secretmanager.v1.SecretManagerService.AddSecretVersion' \
+        --arg rname  "$RNAME" \
+        '{protoPayload:{serviceName:"secretmanager.googleapis.com", methodName:$method, resourceName:$rname}}')"
+
+      # ---- Encode & publish ----
+      BASE64_PAYLOAD="$(printf '%s' "$PAYLOAD_JSON" | base64 | tr -d '\\n')"
+      PUB_BODY="$(jq -nc --arg d "$BASE64_PAYLOAD" '{messages:[{data:$d}]}' )"
+
+      RESP_FILE="$(mktemp)"
+      HTTP_CODE="$(curl -sS -o "$RESP_FILE" -w '%%{http_code}' \
+        -H "Authorization: Bearer $ACCESS_TOKEN" \
+        -H "Content-Type: application/json" \
+        "https://pubsub.googleapis.com/v1/projects/$PROJECT/topics/$TOPIC:publish" \
+        -d "$PUB_BODY")"
+
+      echo "  publish_http_code = $HTTP_CODE"
+      echo "  publish_response  = $(head -c 1000 "$RESP_FILE")"
+      rm -f "$RESP_FILE"
+
+      if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+        echo "❌ Publish failed (HTTP $HTTP_CODE)" >&2
+        exit 1
+      fi
+
+      echo "✅ Published manual sync event to Pub/Sub."
     EOT
 
     environment = {
-      ACCESS_TOKEN       = data.google_client_config.cur.access_token   # sensitive (don’t echo raw)
-      SECRETS_PROJECT_ID = var.secrets_project_id                       # non-sensitive
-      TOPIC_NAME         = var.vault_sync_topic_name                    # non-sensitive
+      ACCESS_TOKEN       = data.google_client_config.cur.access_token
+      SECRETS_PROJECT_ID = var.secrets_project_id
+      TOPIC_NAME         = var.vault_eventarc_topic_name  # may be empty → fallback used
+      EVENTARC_REGION    = var.eventarc_region
       SECRET_ID          = google_secret_manager_secret.k8s_kafka_sa_json.secret_id
     }
   }
