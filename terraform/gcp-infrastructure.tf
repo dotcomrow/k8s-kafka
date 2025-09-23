@@ -266,9 +266,8 @@ resource "null_resource" "notify_secret_version" {
   triggers = {
     version      = google_secret_manager_secret_version.k8s_kafka_sa_json_v.name
     secrets_proj = var.secrets_project_id
-    # force rerun if you change region or override
-    region       = var.region
-    override     = var.eventarc_add_version_topic_override
+    secret_id    = google_secret_manager_secret.k8s_kafka_sa_json.secret_id
+    topic_hint   = var.vault_sync_topic_name  # optional, may be empty
   }
 
   provisioner "local-exec" {
@@ -276,113 +275,70 @@ resource "null_resource" "notify_secret_version" {
     command = <<-EOT
       set -euo pipefail
 
-      # ------------ Inputs from TF env ------------
+      # -------- Inputs ----------
       PROJECT="$${SECRETS_PROJECT_ID}"
-      REGION="$${EVENTARC_REGION}"
+      REGION="$${REGION}"
       SECRET_ID="$${SECRET_ID}"
+      TOPIC_HINT="$${TOPIC_NAME}"          # may be empty
       ACCESS_TOKEN="$${ACCESS_TOKEN}"
-      TOPIC_OVERRIDE="$${TOPIC_OVERRIDE}"
 
       echo "▶ Pub/Sub publish debug"
-      echo "  project   = $${PROJECT}"
-      echo "  region    = $${REGION}"
-      echo "  secret_id = $${SECRET_ID}"
+      echo "  project   = $PROJECT"
+      echo "  region    = $REGION"
+      echo "  secret_id = $SECRET_ID"
 
-      # ------------ Resolve topic ------------
-      if [ -n "$${TOPIC_OVERRIDE}" ]; then
-        if [[ "$${TOPIC_OVERRIDE}" == projects/*/topics/* ]]; then
-          TOPIC_FULL="$${TOPIC_OVERRIDE}"
-        else
-          TOPIC_FULL="projects/$${PROJECT}/topics/$${TOPIC_OVERRIDE}"
-        fi
-        echo "ℹ️ Using override topic: $${TOPIC_FULL}"
+      # -------- Resolve topic FQN ----------
+      TOPIC_FQN=""
+      if [ -n "$TOPIC_HINT" ]; then
+        TOPIC_FQN="projects/$PROJECT/topics/$TOPIC_HINT"
       else
-        # List topics in the project
-        TOPICS_JSON="$(curl -sS -H "Authorization: Bearer $${ACCESS_TOKEN}" \
-          "https://pubsub.googleapis.com/v1/projects/$${PROJECT}/topics" || true)"
-
-        if [ -z "$${TOPICS_JSON}" ] || ! echo "$${TOPICS_JSON}" | jq -e '.topics? | length>0' >/dev/null; then
-          echo "❌ Could not list Pub/Sub topics in $${PROJECT}" >&2
-          echo "$${TOPICS_JSON}" >&2 || true
-          exit 1
-        fi
-
-        # Prefer the *trigger* topic for AddSecretVersion in the given region
-        CAND_TRIGGER="$(echo "$${TOPICS_JSON}" \
-          | jq -r --arg r "$${REGION}" '.topics[]?.name
-               | select(test("eventarc-" + $r + "-vault-add-version-trigger-"))' \
-          | head -n1 || true)"
-
-        if [ -n "$${CAND_TRIGGER}" ]; then
-          TOPIC_FULL="$${CAND_TRIGGER}"
-          echo "✅ Found Eventarc trigger topic: $${TOPIC_FULL}"
-        else
-          # Fallback: the non-trigger topic for the region
-          CAND_BASE="$(echo "$${TOPICS_JSON}" \
-            | jq -r --arg r "$${REGION}" '.topics[]?.name
-                 | select(test("eventarc-" + $r + "-vault-add-version-topic$"))' \
-            | head -n1 || true)"
-          if [ -n "$${CAND_BASE}" ]; then
-            TOPIC_FULL="$${CAND_BASE}"
-            echo "⚠️ Using Eventarc base topic: $${TOPIC_FULL}"
-          else
-            # Last resort: any region trigger
-            ANY_TRIGGER="$(echo "$${TOPICS_JSON}" \
-              | jq -r '.topics[]?.name | select(test("eventarc-.*-vault-add-version-trigger-"))' \
-              | head -n1 || true)"
-            if [ -n "$${ANY_TRIGGER}" ]; then
-              TOPIC_FULL="$${ANY_TRIGGER}"
-              echo "⚠️ Using ANY-region trigger topic: $${TOPIC_FULL}"
-            else
-              echo "❌ No Eventarc topics matching *add-version* found in $${PROJECT}" >&2
-              echo "Here are a few topics for context:" >&2
-              echo "$${TOPICS_JSON}" | jq -r '.topics[]?.name' | head -n 20 >&2
-              exit 1
-            fi
-          fi
-        fi
+        PREFIX="projects/$PROJECT/topics/eventarc-${REGION}-vault-add-version-trigger-"
+        LIST_JSON="$(curl -sS -H "Authorization: Bearer $ACCESS_TOKEN" \
+          "https://pubsub.googleapis.com/v1/projects/$PROJECT/topics")"
+        TOPIC_FQN="$(printf '%s' "$LIST_JSON" | jq -r --arg p "$PREFIX" '.topics[]?.name | select(startswith($p))' | head -n1 || true)"
       fi
 
-      # ------------ Build Eventarc-like payload ------------
+      if [ -z "$TOPIC_FQN" ]; then
+        echo "❌ No Eventarc trigger topic found (and no TOPIC_HINT provided)"; exit 1
+      fi
+      echo "✅ Using topic: $TOPIC_FQN"
+
+      # -------- Build payload (what your sync service expects) ----------
       PAYLOAD_JSON="$(jq -nc \
         --arg method  "google.cloud.secretmanager.v1.SecretManagerService.AddSecretVersion" \
         --arg svc     "secretmanager.googleapis.com" \
-        --arg rname   "projects/$${PROJECT}/secrets/$${SECRET_ID}/versions/latest" \
+        --arg rname   "projects/$PROJECT/secrets/$SECRET_ID/versions/latest" \
         '{protoPayload:{serviceName:$svc, methodName:$method, resourceName:$rname}}')"
+      echo "  payload_len = $(printf '%s' "$PAYLOAD_JSON" | wc -c | tr -d ' ') bytes"
 
-      BASE64_PAYLOAD="$(printf '%s' "$${PAYLOAD_JSON}" | base64 | tr -d '\n')"
+      BASE64_PAYLOAD="$(printf '%s' "$PAYLOAD_JSON" | base64 | tr -d '\n')"
+      PUB_BODY="$(jq -nc --arg d "$BASE64_PAYLOAD" '{messages:[{data:$d}]}' )"
 
-      echo "  payload_len = $(printf '%s' "$${PAYLOAD_JSON}" | wc -c | tr -d ' ') bytes"
-
-      # ------------ Publish ------------
-      PUBLISH_URL="https://pubsub.googleapis.com/v1/$${TOPIC_FULL}:publish"
-      PUB_BODY="$(jq -nc --arg d "$${BASE64_PAYLOAD}" '{messages:[{data:$d}]}' )"
-
+      # -------- Publish ----------
       RESP_FILE="$(mktemp)"
-      HTTP_CODE="$(curl -sS -o "$${RESP_FILE}" -w '%%{http_code}' \
-        -H "Authorization: Bearer $${ACCESS_TOKEN}" \
+      HTTP_CODE="$(curl -sS -o "$RESP_FILE" -w '%%{http_code}' \
+        -H "Authorization: Bearer $ACCESS_TOKEN" \
         -H "Content-Type: application/json" \
-        "https://pubsub.googleapis.com/v1/projects/$${PROJECT}/topics/$${TOPIC}:publish" \
-        -d "$${PUB_BODY}")"
+        "https://pubsub.googleapis.com/v1/$TOPIC_FQN:publish" \
+        -d "$PUB_BODY")"
 
-      echo "  publish_http_code = $${HTTP_CODE}"
-      echo "  publish_response  = $(head -c 1000 "$${RESP_FILE}")"
-      rm -f "$${RESP_FILE}"
+      echo "  publish_http_code = $HTTP_CODE"
+      echo "  publish_response  = $(head -c 1000 "$RESP_FILE")"
+      rm -f "$RESP_FILE"
 
-      if [ "$${HTTP_CODE}" -lt 200 ] || [ "$${HTTP_CODE}" -ge 300 ]; then
-        echo "❌ Publish failed (HTTP $${HTTP_CODE})" >&2
-        exit 1
+      if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+        echo "❌ Publish failed (HTTP $HTTP_CODE)"; exit 1
       fi
 
       echo "✅ Published manual sync event to Pub/Sub."
     EOT
 
     environment = {
-      ACCESS_TOKEN   = data.google_client_config.cur.access_token
+      ACCESS_TOKEN       = data.google_client_config.cur.access_token
       SECRETS_PROJECT_ID = var.secrets_project_id
-      EVENTARC_REGION    = var.region
+      REGION             = var.region
+      TOPIC_NAME         = var.vault_sync_topic_name   # leave empty to auto-discover
       SECRET_ID          = google_secret_manager_secret.k8s_kafka_sa_json.secret_id
-      TOPIC_OVERRIDE     = var.eventarc_add_version_topic_override
     }
   }
 }
