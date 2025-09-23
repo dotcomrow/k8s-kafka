@@ -62,6 +62,11 @@ locals {
         "storage.googleapis.com",
         "iam.googleapis.com",
         "logging.googleapis.com",
+        "bigquery.googleapis.com",
+        "bigquerystorage.googleapis.com",
+        "iam.googleapis.com",
+        "secretmanager.googleapis.com",
+        "storage.googleapis.com",
     ])
 }
 
@@ -91,7 +96,6 @@ resource "google_project" "this" {
 }
 
 resource "google_project_service" "enable_kafka" {
-  provider           = google.kafka
   for_each           = local.kafka_apis
   project            = local.project_id
   service            = each.value
