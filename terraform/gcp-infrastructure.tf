@@ -355,7 +355,7 @@ resource "null_resource" "notify_secret_version" {
       REGION="$EVENTARC_REGION"
       SECRET_ID="$SECRET_ID"
       ACCESS_TOKEN="$ACCESS_TOKEN"
-      TOPIC_FQN="${TOPIC_FQN:-}"
+      TOPIC_FQN="$TOPIC_FQN"
 
       echo "▶ Pub/Sub publish debug"
       echo "  project   = $PROJECT"
