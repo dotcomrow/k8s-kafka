@@ -260,10 +260,10 @@ resource "null_resource" "notify_secret_version" {
             PAYLOAD="$(cat <<EOF
             {
             "event": "secret.version.added",
-            "gcp_project": "${PROJECT}",
-            "secret_id": "${SECRET_ID}",
+            "gcp_project": "$PROJECT",
+            "secret_id": "$SECRET_ID",
             "version": "latest",
-            "vault_path": "secret/${SECRET_ID}",
+            "vault_path": "secret/$SECRET_ID",
             "timestamp": "$(date -u +%FT%TZ)"
             }
             EOF
@@ -272,12 +272,12 @@ resource "null_resource" "notify_secret_version" {
             BASE64_PAYLOAD="$(printf '%s' "$PAYLOAD" | base64 | tr -d '\n')"
 
             curl -sS -X POST \
-            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
             -H "Content-Type: application/json" \
-            "https://pubsub.googleapis.com/v1/projects/${PROJECT}/topics/${TOPIC}:publish" \
-            -d "{\"messages\":[{\"data\":\"${BASE64_PAYLOAD}\"}]}" >/dev/null
+            "https://pubsub.googleapis.com/v1/projects/$PROJECT/topics/$TOPIC:publish" \
+            -d "{\"messages\":[{\"data\":\"$BASE64_PAYLOAD\"}]}" >/dev/null
 
-            echo "Published manual sync event to Pub/Sub topic: ${TOPIC}"
+            echo "Published manual sync event to Pub/Sub topic: $TOPIC"
         EOT
 
         environment = {
