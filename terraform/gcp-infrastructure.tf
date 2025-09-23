@@ -238,25 +238,13 @@ resource "google_secret_manager_secret_version" "k8s_kafka_sa_json_v" {
 # ---------- inputs ----------
 variable "vault_sync_topic_name" { type = string } # e.g. "vault-sync-secret-events"
 # The secret you’re writing in GSM in this module:
-resource "google_secret_manager_secret" "sa_json" {
-  project   = var.secrets_project_id
-  secret_id = google_secret_manager_secret.k8s_kafka_sa_json.secret_id
-  replication {
-    auto {}
-  }   # provider v5 syntax
-}
-
-resource "google_secret_manager_secret_version" "sa_json_v" {
-  secret      = google_secret_manager_secret.sa_json.id
-  secret_data = file("${path.module}/service-account.json")
-}
 
 # ---------- publisher: fire when version changes ----------
 data "google_client_config" "cur" {}
 
 resource "null_resource" "notify_secret_version" {
   triggers = {
-    version = google_secret_manager_secret_version.sa_json_v.name
+    version = google_secret_manager_secret_version.k8s_kafka_sa_json_v.name
   }
 
   provisioner "local-exec" {
