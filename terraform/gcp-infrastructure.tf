@@ -242,6 +242,15 @@ variable "vault_sync_topic_name" { type = string } # e.g. "vault-sync-secret-eve
 # ---------- publisher: fire when version changes ----------
 data "google_client_config" "cur" {}
 
+resource "google_project_iam_audit_config" "pubsub_data_access" {
+  project = var.secrets_project_id   # <- the project with the Pub/Sub topic
+  service = "pubsub.googleapis.com"
+
+  audit_log_config { log_type = "DATA_READ" }   # optional
+  audit_log_config { log_type = "DATA_WRITE" }  # needed for Publish logs
+}
+
+
 resource "null_resource" "notify_secret_version" {
   triggers = {
     version = google_secret_manager_secret_version.k8s_kafka_sa_json_v.name
