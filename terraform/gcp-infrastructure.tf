@@ -50,14 +50,6 @@ variable "vault_eventarc_trigger_topic_name" {
   default     = ""
 }
 
-# Optional: Eventarc region hint used when auto-discovering trigger topic (e.g. us-east1)
-variable "eventarc_region" {
-  type        = string
-  description = "Eventarc region used to prefer a matching trigger topic during auto-discovery"
-  default     = ""
-}
-
-
 # Eventarc topic usage (existing topics)
 variable "vault_eventarc_topic_name" {
   type        = string
