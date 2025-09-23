@@ -17,12 +17,16 @@ kind: ServiceAccount
 metadata:
   name: bq-yb-bootstrap
   namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: bootstrap-ok-writer
   namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
 rules:
   - apiGroups: [""]
     resources: ["configmaps"]
@@ -33,6 +37,8 @@ kind: RoleBinding
 metadata:
   name: bootstrap-ok-writer
   namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
 subjects:
   - kind: ServiceAccount
     name: bq-yb-bootstrap
@@ -43,8 +49,9 @@ roleRef:
   name: bootstrap-ok-writer
 
 # ============================================================================
-# Kafka cluster.id generator (PreSync hook) — namespace: kafka
+# Kafka cluster.id generator — namespace: kafka
 # Creates/keeps Secret kafka-cluster-id (key: CLUSTER_ID)
+# (Ordered before Kafka via sync-wave, no hooks used)
 # ============================================================================
 ---
 apiVersion: v1
@@ -52,12 +59,16 @@ kind: ServiceAccount
 metadata:
   name: kafka-clusterid-gen
   namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: kafka-clusterid-secret-writer
   namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
@@ -68,6 +79,8 @@ kind: RoleBinding
 metadata:
   name: kafka-clusterid-secret-writer
   namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
 subjects:
   - kind: ServiceAccount
     name: kafka-clusterid-gen
@@ -83,9 +96,7 @@ metadata:
   name: gen-kafka-clusterid
   namespace: kafka
   annotations:
-    argocd.argoproj.io/hook: PreSync
-    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
-    argocd.argoproj.io/sync-wave: "0"
+    argocd.argoproj.io/sync-wave: "1"
 spec:
   backoffLimit: 0
   template:
@@ -100,14 +111,14 @@ spec:
             - |
               set -euo pipefail
               NS="kafka"
-              # If secret exists and has CLUSTER_ID, keep it
+              # Keep existing secret if it already has CLUSTER_ID
               if kubectl -n "$NS" get secret kafka-cluster-id >/dev/null 2>&1; then
                 if [ -n "$(kubectl -n "$NS" get secret kafka-cluster-id -o jsonpath='{.data.CLUSTER_ID}' 2>/dev/null || true)" ]; then
                   echo "kafka-cluster-id already present; nothing to do."
                   exit 0
                 fi
               fi
-              # Generate Base64URL 22 chars (16 bytes)
+              # Generate Base64URL 22 chars (Kafka-style)
               CID="$(head -c 16 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=[:space:]' | cut -c1-22)"
               echo "Generated cluster.id: ${CID}"
               kubectl -n "$NS" create secret generic kafka-cluster-id \
@@ -391,7 +402,7 @@ spec:
                 local cnt
                 cnt="$(PGPASSWORD="$PGPASSWORD" psql "host=$PGHOST port=$PGPORT dbname=$PGDATABASE user=$PGUSER sslmode=disable" -Atqc "SELECT COUNT(*) FROM ${sch}.${tbl};" || echo "0")"
                 if [ "$cnt" != "0" ] && [ -z "${ALLOW_NONEMPTY:-}" ]; then
-                  echo "non-empty"; exit 1
+                  exit 1
                 fi
               }
 
@@ -421,7 +432,7 @@ spec:
                 TBL="$(echo "$ROW_JSON" | jq -r '.table')"
                 CFG="$(echo "$ROW_JSON" | jq -c '.cfg // {}')"
                 BQ_TABLE="$(echo "$CFG" | jq -r '.bq // empty')"
-                [ -z "$BQ_TABLE" ] && { echo "missing bq"; exit 1; }
+                [ -z "$BQ_TABLE" ] && exit 1
                 PREFIX="$(echo "$CFG" | jq -r '.gcs_prefix // "'$TBL'"')"
                 FMT="$(echo "$CFG" | jq -r '.format // "CSV"')"
                 HDR="$(echo "$CFG" | jq -r '.header // true')"
@@ -480,7 +491,7 @@ spec:
               EOF
 
 # ============================================================================
-# Kafka (wave 1): single-broker KRaft — reads CLUSTER_ID from Secret
+# Kafka (wave 2): single-broker KRaft — reads CLUSTER_ID from Secret
 # ============================================================================
 ---
 apiVersion: v1
@@ -489,7 +500,7 @@ metadata:
   name: kafka
   namespace: kafka
   annotations:
-    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-wave: "2"
 spec:
   type: ClusterIP
   ports:
@@ -505,7 +516,7 @@ metadata:
   name: kafka-hs
   namespace: kafka
   annotations:
-    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-wave: "2"
 spec:
   clusterIP: None
   ports:
@@ -521,7 +532,7 @@ metadata:
   name: kafka
   namespace: kafka
   annotations:
-    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-wave: "2"
 spec:
   serviceName: kafka-hs
   replicas: 1
@@ -615,7 +626,7 @@ spec:
           emptyDir: {}
 
 # ============================================================================
-# Kafka Connect (wave 1)
+# Kafka Connect (wave 3)
 # ============================================================================
 ---
 apiVersion: v1
@@ -624,7 +635,7 @@ metadata:
   name: kafka-connect
   namespace: kafka
   annotations:
-    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-wave: "3"
 spec:
   type: ClusterIP
   ports:
@@ -640,7 +651,7 @@ metadata:
   name: kafka-connect
   namespace: kafka
   annotations:
-    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-wave: "3"
 spec:
   replicas: 1
   selector:
@@ -734,7 +745,7 @@ spec:
               mountPath: /plugins
 
 # ============================================================================
-# Registration Job (wave 3)
+# Registration Job (wave 5)
 # ============================================================================
 ---
 apiVersion: batch/v1
@@ -743,7 +754,7 @@ metadata:
   name: register-yb-to-bq
   namespace: kafka
   annotations:
-    argocd.argoproj.io/sync-wave: "3"
+    argocd.argoproj.io/sync-wave: "5"
 spec:
   template:
     metadata:
