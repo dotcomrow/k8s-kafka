@@ -253,14 +253,24 @@ resource "google_project_iam_audit_config" "pubsub_data_access" {
   audit_log_config { log_type = "DATA_WRITE" } # to see Publish logs
 }
 
+# ---------- inputs ----------
+variable "vault_sync_topic_name" { type = string } # e.g. "eventarc-us-east1-vault-add-version-topic"
+
+data "google_client_config" "cur" {}
+
+resource "google_project_iam_audit_config" "pubsub_data_access" {
+  project = var.secrets_project_id
+  service = "pubsub.googleapis.com"
+  audit_log_config { log_type = "DATA_WRITE" }
+}
+
 resource "null_resource" "notify_secret_version" {
   triggers = {
-    version        = google_secret_manager_secret_version.k8s_kafka_sa_json_v.name
-    secrets_proj   = var.secrets_project_id
-    secret_id      = google_secret_manager_secret.k8s_kafka_sa_json.secret_id
-    # include user-provided topic + region in triggers so we re-run if they change
-    trigger_topic  = var.vault_eventarc_trigger_topic_name
-    eventarc_reg   = var.eventarc_region
+    version      = google_secret_manager_secret_version.k8s_kafka_sa_json_v.name
+    secrets_proj = var.secrets_project_id
+    topic        = var.vault_sync_topic_name
+    secret_id    = google_secret_manager_secret.k8s_kafka_sa_json.secret_id
+    region       = var.region
   }
 
   provisioner "local-exec" {
@@ -268,113 +278,92 @@ resource "null_resource" "notify_secret_version" {
     command = <<-EOT
       set -euo pipefail
 
+      # ===== Inputs from TF env (non-sensitive) =====
       PROJECT="$SECRETS_PROJECT_ID"
+      TOPIC="${TOPIC_NAME:-}"
       SECRET_ID="$SECRET_ID"
+      REGION="$REGION"
+
+      # ===== Sensitive =====
       ACCESS_TOKEN="$ACCESS_TOKEN"
 
-      # Inputs for topic selection
-      PINNED_TOPIC="$EVENTARC_TRIGGER_TOPIC_NAME"   # may be empty
-      REGION_HINT="$EVENTARC_REGION"                # may be empty
-
-      pick_topic() {
-        # If caller pinned a topic, use it verbatim (and verify it exists)
-        if [ -n "$PINNED_TOPIC" ]; then
-          local code
-          code="$(curl -sS -o /dev/null -w '%%{http_code}' \
-                 -H "Authorization: Bearer $ACCESS_TOKEN" \
-                 "https://pubsub.googleapis.com/v1/projects/$PROJECT/topics/$PINNED_TOPIC")"
-          if [ "$code" = "200" ]; then
-            echo "$PINNED_TOPIC"
-            return 0
-          fi
-          echo "❌ Pinned topic not found: projects/$PROJECT/topics/$PINNED_TOPIC (HTTP $code)" >&2
-          return 1
-        fi
-
-        # Auto-discover: list topics and pick an Eventarc trigger topic
-        # Pattern: eventarc-<region>-vault-add-version-trigger-<suffix>
-        local list
-        list="$(curl -sS \
-          -H "Authorization: Bearer $ACCESS_TOKEN" \
+      # Auto-pick Eventarc topic if none provided (uses region hint)
+      if [ -z "$TOPIC" ]; then
+        echo "ℹ️  No topic provided; attempting to find default Eventarc topic in $PROJECT..."
+        LIST="$(curl -sS -H "Authorization: Bearer $ACCESS_TOKEN" \
           "https://pubsub.googleapis.com/v1/projects/$PROJECT/topics")"
-
-        # Pull names, strip full resource path
-        local names
-        names="$(echo "$list" | jq -r '.topics[].name' 2>/dev/null | sed 's#.*/topics/##' || true)"
-
-        # Filter to trigger topics for AddSecretVersion
-        local filtered
-        filtered="$(echo "$names" | grep -E '^eventarc-.*-vault-add-version-trigger-[0-9]+' || true)"
-
-        # If region hint is set, prefer those; otherwise keep as-is
-        if [ -n "$REGION_HINT" ]; then
-          local regional
-          regional="$(echo "$filtered" | grep -E "^eventarc-$REGION_HINT-.*-vault-add-version-trigger-[0-9]+" || true)"
-          if [ -n "$regional" ]; then
-            filtered="$regional"
-          fi
+        TOPIC="$(printf '%s' "$LIST" \
+          | jq -r --arg r "$REGION" \
+              '.topics[]?.name | split("/")[-1] | select(startswith("eventarc-"+$r+"-vault-add-version-topic"))' \
+          | head -n1 || true)"
+        if [ -z "$TOPIC" ]; then
+          echo "❌ Could not auto-detect Eventarc topic. Set var.vault_sync_topic_name." >&2
+          exit 1
         fi
-
-        # If exactly one match, use it; if none or many, print guidance
-        local count
-        count="$(printf '%s\n' "$filtered" | sed '/^$/d' | wc -l | tr -d ' ')"
-        if [ "$count" = "1" ]; then
-          echo "$filtered"
-          return 0
-        fi
-
-        echo "❌ Could not uniquely determine Eventarc trigger topic." >&2
-        echo "   Found ($count) candidates matching '*-vault-add-version-trigger-*'" >&2
-        if [ "$count" != "0" ]; then
-          echo "$filtered" >&2
-        fi
-        echo "   Set var.vault_eventarc_trigger_topic_name to the exact topic name," >&2
-        echo "   or set var.eventarc_region to prefer a specific region (e.g. us-east1)." >&2
-        return 1
-      }
-
-      TOPIC="$(pick_topic)"
+      fi
 
       echo "▶ Pub/Sub publish debug"
       echo "  project   = $PROJECT"
       echo "  topic     = $TOPIC"
       echo "  secret_id = $SECRET_ID"
 
-      # Build audit-style payload your sync service expects
-      RNAME="projects/$PROJECT/secrets/$SECRET_ID/versions/latest"
+      # ===== Body your service expects (top-level protoPayload) =====
       PAYLOAD_JSON="$(jq -nc \
-        --arg method 'google.cloud.secretmanager.v1.SecretManagerService.AddSecretVersion' \
-        --arg rname  "$RNAME" \
+        --arg method "google.cloud.secretmanager.v1.SecretManagerService.AddSecretVersion" \
+        --arg rname  "projects/$PROJECT/secrets/$SECRET_ID/versions/latest" \
         '{protoPayload:{serviceName:"secretmanager.googleapis.com", methodName:$method, resourceName:$rname}}')"
 
-      # Base64 encode WITHOUT newlines
-      BASE64_PAYLOAD="$(printf '%s' "$PAYLOAD_JSON" | base64 2>/dev/null | tr -d '\n\r')"
+      # ===== CloudEvents (binary) attrs so Eventarc passes body through =====
+      CE_ID="manual-$RANDOM-$(date +%s)"
+      CE_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-      # Assemble publish body
-      PUB_BODY="$(jq -nc --arg d "$BASE64_PAYLOAD" '{messages:[{data:$d}]}' )"
+      BASE64_PAYLOAD="$(printf '%s' "$PAYLOAD_JSON" | base64 | tr -d '\n')"
 
+      PUB_BODY="$(jq -nc \
+        --arg d   "$BASE64_PAYLOAD" \
+        --arg sv  "1.0" \
+        --arg ty  "google.cloud.audit.log.v1.written" \
+        --arg src "//secretmanager.googleapis.com/projects/$PROJECT" \
+        --arg id  "$CE_ID" \
+        --arg tm  "$CE_TIME" \
+        '{messages:[{data:$d, attributes:{
+          "ce-specversion":$sv,
+          "ce-type":$ty,
+          "ce-source":$src,
+          "ce-id":$id,
+          "ce-time":$tm,
+          "content-type":"application/json"
+        }}]}' )"
+
+      # Publish and capture status without using curl -w %{...}
       RESP_FILE="$(mktemp)"
-      HTTP_CODE="$(curl -sS -o "$RESP_FILE" -w '%%{http_code}' \
+      HDR_FILE="$(mktemp)"
+      curl -sS -D "$HDR_FILE" -o "$RESP_FILE" \
         -H "Authorization: Bearer $ACCESS_TOKEN" \
         -H "Content-Type: application/json" \
         "https://pubsub.googleapis.com/v1/projects/$PROJECT/topics/$TOPIC:publish" \
-        -d "$PUB_BODY")"
+        -d "$PUB_BODY"
 
+      HTTP_CODE="$(awk 'NR==1{print $2}' "$HDR_FILE")"
       echo "  publish_http_code = $HTTP_CODE"
       echo "  publish_response  = $(head -c 1000 "$RESP_FILE")"
-      rm -f "$RESP_FILE"
 
-      [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ] || { echo "❌ Publish failed"; exit 1; }
+      rm -f "$RESP_FILE" "$HDR_FILE"
+
+      if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+        echo "❌ Publish failed (HTTP $HTTP_CODE)" >&2
+        exit 1
+      fi
 
       echo "✅ Published manual sync event to Pub/Sub."
     EOT
 
     environment = {
-      ACCESS_TOKEN                = data.google_client_config.cur.access_token
-      SECRETS_PROJECT_ID          = var.secrets_project_id
-      SECRET_ID                   = google_secret_manager_secret.k8s_kafka_sa_json.secret_id
-      EVENTARC_TRIGGER_TOPIC_NAME = var.vault_eventarc_trigger_topic_name
-      EVENTARC_REGION             = var.eventarc_region
+      ACCESS_TOKEN       = data.google_client_config.cur.access_token
+      SECRETS_PROJECT_ID = var.secrets_project_id
+      TOPIC_NAME         = var.vault_sync_topic_name   # leave empty to auto-pick
+      SECRET_ID          = google_secret_manager_secret.k8s_kafka_sa_json.secret_id
+      REGION             = var.region
     }
   }
 }
