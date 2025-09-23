@@ -69,6 +69,13 @@ variable "eventarc_region" {
   description = "Region of the Eventarc trigger/topics."
 }
 
+variable "eventarc_add_version_trigger_topic_hint" {
+  type        = string
+  default     = "" # projects/<id>/topics/<name> OR just the topic name
+  description = "Override the Eventarc AddSecretVersion trigger Pub/Sub topic"
+}
+
+
 # Optional: grant publish to an identity on the existing topic
 variable "publisher_member" {
   type        = string
@@ -268,10 +275,11 @@ resource "null_resource" "notify_secret_version" {
     secrets_proj = var.secrets_project_id
     region       = var.region
     secret_id    = google_secret_manager_secret.k8s_kafka_sa_json.secret_id
+    topic_hint   = var.eventarc_add_version_trigger_topic_hint
   }
 
   provisioner "local-exec" {
-    interpreter = ["/bin/bash", "-c"]
+    interpreter = ["/bin/bash", "-C"]
     command = <<-EOT
       set -euo pipefail
 
@@ -279,45 +287,62 @@ resource "null_resource" "notify_secret_version" {
       REGION="$${REGION}"
       SECRET_ID="$${SECRET_ID}"
       ACCESS_TOKEN="$${ACCESS_TOKEN}"
+      TOPIC_HINT="$${TOPIC_HINT}"
 
       echo "▶ Pub/Sub publish debug"
       echo "  project   = $PROJECT"
       echo "  region    = $REGION"
       echo "  secret_id = $SECRET_ID"
 
-      # ===== Discover the EXACT Eventarc trigger topic via Eventarc API =====
-      METHOD="google.cloud.secretmanager.v1.SecretManagerService.AddSecretVersion"
-      SERVICE="secretmanager.googleapis.com"
+      # ---------- resolve trigger topic (override → discovery: prefer *trigger*, then *topic*) ----------
+      if [ -n "$TOPIC_HINT" ]; then
+        if [[ "$TOPIC_HINT" == projects/*/topics/* ]]; then
+          TOPIC_FQN="$TOPIC_HINT"
+        else
+          TOPIC_FQN="projects/$PROJECT/topics/$TOPIC_HINT"
+        fi
+        echo "✅ Using override topic: $TOPIC_FQN"
+      else
+        TOPICS_JSON="$(curl -sS -H "Authorization: Bearer $ACCESS_TOKEN" \
+          "https://pubsub.googleapis.com/v1/projects/$PROJECT/topics?pageSize=1000")"
 
-      TRIGGERS_JSON="$(curl -sS -H "Authorization: Bearer $ACCESS_TOKEN" \
-        "https://eventarc.googleapis.com/v1/projects/$PROJECT/locations/$REGION/triggers")"
+        # Prefer: eventarc-<region>-*add-version-trigger-<id>
+        TOPIC_FQN="$(printf '%s' "$TOPICS_JSON" | jq -r --arg region "$REGION" '
+          (.topics // []) | map(.name) | .[]
+          | select( test("projects/.+/topics/eventarc-" + $region + "-.*add-version-trigger-\\d+$") )
+        ' | head -n1 || true)"
 
-      TOPIC_FQN="$(printf '%s' "$TRIGGERS_JSON" \
-        | jq -r --arg m "$METHOD" --arg s "$SERVICE" '
-            .triggers[]? as $t
-            | select( ([$t.matchingCriteria[]? | select(.attribute=="serviceName") | .value] | index($s)) != null )
-            | select( ([$t.matchingCriteria[]? | select(.attribute=="methodName") | .value] | index($m)) != null )
-            | .transport.pubsub.topic // empty
-          ' \
-        | head -n1 || true)"
+        # Fallback: eventarc-<region>-*add-version-topic
+        if [ -z "$TOPIC_FQN" ]; then
+          TOPIC_FQN="$(printf '%s' "$TOPICS_JSON" | jq -r --arg region "$REGION" '
+            (.topics // []) | map(.name) | .[]
+            | select( test("projects/.+/topics/eventarc-" + $region + "-.*add-version-topic$") )
+          ' | head -n1 || true)"
+        fi
 
-      if [ -z "$TOPIC_FQN" ]; then
-        echo "❌ Could not find an Eventarc trigger topic for AddSecretVersion in $REGION."; exit 1
+        if [ -z "$TOPIC_FQN" ]; then
+          echo "❌ Could not find Eventarc AddSecretVersion trigger/topic in $REGION."; exit 1
+        fi
+
+        echo "✅ Using topic: $TOPIC_FQN"
       fi
-      echo "✅ Using trigger topic: $TOPIC_FQN"
 
-      # ===== Build payload expected by sync service (AuditLog-like) =====
+      # ---------- build payload expected by sync service (AuditLog-like fields) ----------
+      SERVICE="secretmanager.googleapis.com"
+      METHOD="google.cloud.secretmanager.v1.SecretManagerService.AddSecretVersion"
+      RESOURCE="projects/$PROJECT/secrets/$SECRET_ID/versions/latest"
+
       PAYLOAD_JSON="$(jq -nc \
-        --arg svc   "$SERVICE" \
+        --arg svc "$SERVICE" \
         --arg method "$METHOD" \
-        --arg rname "projects/$PROJECT/secrets/$SECRET_ID/versions/latest" \
+        --arg rname "$RESOURCE" \
         '{protoPayload:{serviceName:$svc, methodName:$method, resourceName:$rname}}')"
       echo "  payload_len = $(printf '%s' "$PAYLOAD_JSON" | wc -c | tr -d ' ') bytes"
 
       BASE64_PAYLOAD="$(printf '%s' "$PAYLOAD_JSON" | base64 | tr -d '\n')"
       PUB_BODY="$(jq -nc --arg d "$BASE64_PAYLOAD" '{messages:[{data:$d}]}' )"
 
-      # ===== Publish to the trigger topic =====
+      # ---------- publish ----------
       RESP_FILE="$(mktemp)"
       HTTP_CODE="$(curl -sS -o "$RESP_FILE" -w '%%{http_code}' \
         -H "Authorization: Bearer $ACCESS_TOKEN" \
@@ -337,10 +362,11 @@ resource "null_resource" "notify_secret_version" {
     EOT
 
     environment = {
-      ACCESS_TOKEN       = data.google_client_config.cur.access_token
+      ACCESS_TOKEN = data.google_client_config.cur.access_token
       SECRETS_PROJECT_ID = var.secrets_project_id
-      REGION             = var.region
-      SECRET_ID          = google_secret_manager_secret.k8s_kafka_sa_json.secret_id
+      REGION      = var.region
+      SECRET_ID   = google_secret_manager_secret.k8s_kafka_sa_json.secret_id
+      TOPIC_HINT  = var.eventarc_add_version_trigger_topic_hint
     }
   }
 }
