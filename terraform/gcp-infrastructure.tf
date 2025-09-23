@@ -24,6 +24,7 @@ provider "google" {
 }
 
 # ---------- Inputs ----------
+variable "secrets_project_id" { type = string }  # e.g. "tf-k8s-cluster-infra-9734"
 variable "project_name" { type = string }                  # e.g. "Data Pipeline"
 variable "billing_account" { type = string }               # e.g. "012345-6789AB-CDEF01"
 variable "gcp_org_id" {
@@ -209,7 +210,7 @@ resource "google_secret_manager_secret_version" "pipeline_key_v" {
 
 # Secret container (auto replication; provider v5 syntax)
 resource "google_secret_manager_secret" "k8s_kafka_sa_json" {
-  project   = google_project.this.project_id
+  project   = var.secrets_project_id
   secret_id = "k8s-kafka-gcp-sesrvice-account-json"
 
   replication {
