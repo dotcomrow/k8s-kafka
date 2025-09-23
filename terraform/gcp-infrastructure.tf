@@ -27,13 +27,22 @@ variable "secrets_project_id" { type = string }  # e.g. "tf-k8s-cluster-infra-97
 variable "project_name"       { type = string }  # e.g. "Data Pipeline"
 variable "billing_account"    { type = string }  # e.g. "012345-6789AB-CDEF01"
 variable "gcp_org_id"         { type = string }  # one of org_id or folder_id must be set (not both)
-variable "folder_id"          { type = string, default = "" } # e.g. "folders/123456789012"
+variable "folder_id" {
+  type    = string
+  default = ""
+} # e.g. "folders/123456789012"
 variable "region"             { type = string }  # e.g. "us-central1" (for provider)
 variable "bq_location"        { type = string }  # e.g. "US" or "EU"
 variable "dataset_id"         { type = string }  # e.g. "analytics"
 variable "bootstrap_bucket"   { type = string }  # globally-unique bucket name
-variable "sa_name"            { type = string, default = "bq-data-pipeline" }
-variable "secret_id"          { type = string, default = "bq-data-pipeline-key" }
+variable "sa_name" {
+  type    = string
+  default = "bq-data-pipeline"
+}
+variable "secret_id" {
+  type    = string
+  default = "bq-data-pipeline-key"
+}
 
 # Eventarc topic usage (existing topics)
 variable "vault_eventarc_topic_name" {
@@ -186,7 +195,9 @@ resource "google_service_account_key" "pipeline_key" {
 resource "google_secret_manager_secret" "pipeline_key" {
   project   = google_project.this.project_id
   secret_id = var.secret_id
-  replication { auto {} }
+  replication {
+    auto {}
+  }   # provider v5 syntax
   labels     = var.labels
   depends_on = [google_project_service.enable]
 }
@@ -202,7 +213,9 @@ resource "google_secret_manager_secret_version" "pipeline_key_v" {
 resource "google_secret_manager_secret" "k8s_kafka_sa_json" {
   project   = var.secrets_project_id
   secret_id = "k8s-kafka-gcp-service-account-json"
-  replication { auto {} }
+  replication {
+    auto {}
+  }   # provider v5 syntax
   depends_on = [google_project_service.pubsub] # ensure API on the target project
 }
 
