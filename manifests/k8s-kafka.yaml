@@ -58,41 +58,36 @@ roleRef:
 #   - No apt-get, no wget, no kubectl
 # ============================================================================
 
+# --- ServiceAccount + RBAC for cluster.id generator (namespace: kafka)
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: kafka-clusterid-gen
   namespace: kafka
-  annotations:
-    argocd.argoproj.io/sync-wave: "0"
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: kafka-clusterid-secret-writer
   namespace: kafka
-  annotations:
-    argocd.argoproj.io/sync-wave: "0"
 rules:
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["get","list","watch","create","update","patch"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get","create","patch","update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: kafka-clusterid-secret-writer
   namespace: kafka
-  annotations:
-    argocd.argoproj.io/sync-wave: "0"
 subjects:
-  - kind: ServiceAccount
-    name: kafka-clusterid-gen
-    namespace: kafka
+- kind: ServiceAccount
+  name: kafka-clusterid-gen
+  namespace: kafka
 roleRef:
-  apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: kafka-clusterid-secret-writer
+  apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: batch/v1
 kind: Job
@@ -100,68 +95,84 @@ metadata:
   name: gen-kafka-clusterid
   namespace: kafka
   annotations:
-    # Ensure SA/RBAC apply first
-    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/sync-wave: "0"
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
 spec:
   backoffLimit: 0
   template:
     spec:
       restartPolicy: Never
       serviceAccountName: kafka-clusterid-gen
+      volumes:
+      - name: work
+        emptyDir: {}
       containers:
-        - name: gen
-          image: curlimages/curl:8.9.1
-          imagePullPolicy: IfNotPresent
-          command: ["/bin/sh","-c"]
-          args:
-            - |
-              set -euo pipefail
-              API="https://kubernetes.default.svc"
-              NS="kafka"
-              NAME="kafka-cluster-id"
-              TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
-              CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+      # 1) Generate cluster.id with official Kafka image
+      - name: gen
+        image: apache/kafka:3.9.0
+        command: ["/bin/bash","-lc"]
+        args:
+          - |
+            set -eu
+            CID="$("/opt/kafka/bin/kafka-storage.sh" random-uuid)"
+            echo "Generated cluster.id: ${CID}"
+            printf '%s' "${CID}" > /work/cluster.id
+            # keep container alive briefly so the sidecar can read the file
+            sleep 5
+        volumeMounts:
+        - name: work
+          mountPath: /work
+      # 2) Create the Secret by calling the Kubernetes API with curl (no kubectl needed)
+      - name: apply
+        image: curlimages/curl:8.7.1
+        command: ["/bin/sh","-c"]
+        args:
+          - |
+            set -eu
+            NAMESPACE="kafka"
+            SECRET_NAME="kafka-cluster-id"
+            API="https://kubernetes.default.svc"
+            TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+            CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 
-              # Check if Secret already exists and has CLUSTER_ID
-              HTTP="$(curl -sS -w '%{http_code}' -o /tmp/get.json \
-                --cacert "${CACERT}" -H "Authorization: Bearer ${TOKEN}" \
-                "${API}/api/v1/namespaces/${NS}/secrets/${NAME}" || true)"
+            # wait for the generated file from the 'gen' container
+            i=0
+            while [ ! -s /work/cluster.id ]; do
+              i=$((i+1)); [ $i -gt 120 ] && echo "timeout waiting for /work/cluster.id" && exit 1
+              sleep 1
+            done
+            CID="$(cat /work/cluster.id)"
 
-              if [ "${HTTP}" = "200" ]; then
-                EXISTING_B64="$(sed -n 's/.*"CLUSTER_ID":"\([^"]*\)".*/\1/p' /tmp/get.json | head -n1 || true)"
-                if [ -n "${EXISTING_B64:-}" ] && [ "${EXISTING_B64}" != "null" ]; then
-                  echo "kafka-cluster-id already present; nothing to do."
-                  exit 0
-                fi
-              fi
+            # If the Secret already exists, do nothing
+            code="$(curl -s -o /tmp/existing.json -w '%{http_code}' \
+                     --cacert "$CACERT" -H "Authorization: Bearer $TOKEN" \
+                     "$API/api/v1/namespaces/$NAMESPACE/secrets/$SECRET_NAME")"
+            if [ "$code" = "200" ]; then
+              echo "Secret $SECRET_NAME already exists; nothing to do."
+              exit 0
+            fi
 
-              # Generate a Kafka-style base64url-ish 22-char ID
-              CID="$(head -c 16 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=[:space:]' | cut -c1-22)"
-              echo "Generated cluster.id: ${CID}"
+            # Create Secret (data values must be base64)
+            b64="$(printf '%s' "$CID" | base64 | tr -d '\n')"
+            cat >/tmp/newsecret.json <<JSON
+            {
+              "apiVersion": "v1",
+              "kind": "Secret",
+              "metadata": { "name": "$SECRET_NAME", "namespace": "$NAMESPACE" },
+              "type": "Opaque",
+              "data": { "CLUSTER_ID": "$b64" }
+            }
+            JSON
 
-              # base64 encode (remove newline for Secret.data)
-              ENC="$(printf '%s' "${CID}" | base64 | tr -d '\n')"
-
-              if [ "${HTTP}" = "200" ]; then
-                # Patch existing Secret
-                curl -sS -X PATCH \
-                  --cacert "${CACERT}" -H "Authorization: Bearer ${TOKEN}" \
-                  -H "Content-Type: application/merge-patch+json" \
-                  --data "$(printf '{"data":{"CLUSTER_ID":"%s"}}' "${ENC}")" \
-                  "${API}/api/v1/namespaces/${NS}/secrets/${NAME}" >/dev/null
-              else
-                # Create new Secret
-                cat > /tmp/secret.json <<EOF
-                {"apiVersion":"v1","kind":"Secret","metadata":{"name":"${NAME}","namespace":"${NS}"},
-                 "type":"Opaque","data":{"CLUSTER_ID":"${ENC}"}}
-                EOF
-                curl -sS -X POST \
-                  --cacert "${CACERT}" -H "Authorization: Bearer ${TOKEN}" \
-                  -H "Content-Type: application/json" \
-                  --data @/tmp/secret.json \
-                  "${API}/api/v1/namespaces/${NS}/secrets" >/dev/null
-              fi
-              echo "✅ kafka-cluster-id secret is ready."
+            curl -sS -X POST --cacert "$CACERT" \
+              -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+              --data-binary @/tmp/newsecret.json \
+              "$API/api/v1/namespaces/$NAMESPACE/secrets"
+            echo "Created secret $SECRET_NAME."
+        volumeMounts:
+        - name: work
+          mountPath: /work
 
 # ============================================================================
 # Vault CONFIG job — namespace: vault (static user + dynamic password via KV)
