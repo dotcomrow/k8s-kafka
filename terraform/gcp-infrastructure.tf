@@ -55,8 +55,14 @@ variable "labels" {
 
 # ---------- Validations ----------
 locals {
-  parent_provided = (var.gcp_org_id != "" ? 1 : 0) + (var.folder_id != "" ? 1 : 0)
-  project_id      = "${var.project_name}-${random_id.suffix_gcp.hex}"
+    parent_provided = (var.gcp_org_id != "" ? 1 : 0) + (var.folder_id != "" ? 1 : 0)
+    project_id      = "${var.project_name}-${random_id.suffix_gcp.hex}"
+    kafka_apis = toset([
+        "bigquery.googleapis.com",
+        "storage.googleapis.com",
+        "iam.googleapis.com",
+        "logging.googleapis.com",
+    ])
 }
 
 # Must set exactly one parent (org or folder)
@@ -84,21 +90,11 @@ resource "google_project" "this" {
   depends_on = [null_resource.validate_parent]
 }
 
-# Required services in the new project
-locals {
-  required_services = [
-    "bigquery.googleapis.com",
-    "bigquerystorage.googleapis.com",
-    "iam.googleapis.com",
-    "secretmanager.googleapis.com",
-    "storage.googleapis.com",
-  ]
-}
-
-resource "google_project_service" "enable" {
-  for_each           = toset(local.required_services)
-  project            = google_project.this.project_id
-  service            = each.key
+resource "google_project_service" "enable_kafka" {
+  provider           = google.kafka
+  for_each           = local.kafka_apis
+  project            = local.project_id
+  service            = each.value
   disable_on_destroy = false
 }
 
