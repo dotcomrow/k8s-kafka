@@ -327,7 +327,6 @@ resource "null_resource" "notify_secret_version" {
           "content-type":"application/json"
         }}]}' )"
 
-      # Publish and capture status without using curl -w %{...}
       RESP_FILE="$(mktemp)"
       HDR_FILE="$(mktemp)"
       curl -sS -D "$HDR_FILE" -o "$RESP_FILE" \
