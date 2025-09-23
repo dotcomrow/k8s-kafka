@@ -1,5 +1,5 @@
 # ============================================================================
-# Namespace & RBAC for data bootstrap pipeline (namespace: kafka)
+# Namespace & base RBAC (namespace: kafka)
 # ============================================================================
 apiVersion: v1
 kind: Namespace
@@ -43,7 +43,8 @@ roleRef:
 
 # ============================================================================
 # Kafka cluster.id generator (Argo CD PreSync) — namespace: kafka
-#   - Generates once and stores in Secret kafka-cluster-id (key: CLUSTER_ID)
+#   - SA/RBAC are also PreSync (wave 0) so the Job (wave 1) can run
+#   - Writes Secret kafka-cluster-id (key: CLUSTER_ID)
 # ============================================================================
 ---
 apiVersion: v1
@@ -51,12 +52,18 @@ kind: ServiceAccount
 metadata:
   name: kafka-clusterid-gen
   namespace: kafka
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/sync-wave: "0"
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: kafka-clusterid-secret-writer
   namespace: kafka
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/sync-wave: "0"
 rules:
 - apiGroups: [""]
   resources: ["secrets"]
@@ -67,6 +74,9 @@ kind: RoleBinding
 metadata:
   name: kafka-clusterid-secret-writer
   namespace: kafka
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/sync-wave: "0"
 subjects:
 - kind: ServiceAccount
   name: kafka-clusterid-gen
@@ -83,7 +93,7 @@ metadata:
   namespace: kafka
   annotations:
     argocd.argoproj.io/hook: PreSync
-    argocd.argoproj.io/sync-wave: "0"
+    argocd.argoproj.io/sync-wave: "1"
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
 spec:
   backoffLimit: 0
@@ -99,7 +109,7 @@ spec:
           - |
             set -euo pipefail
 
-            # Install kubectl (same trick used elsewhere)
+            # Install kubectl if missing
             if ! command -v kubectl >/dev/null 2>&1; then
               VER="$(curl -fsSL https://dl.k8s.io/release/stable.txt || echo v1.29.0)"
               curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/${VER}/bin/linux/amd64/kubectl" \
@@ -107,9 +117,9 @@ spec:
               chmod +x /usr/local/bin/kubectl
             fi
 
-            # If the secret already exists and has CLUSTER_ID, keep it
+            # If the secret already exists (and has CLUSTER_ID), keep it
             if kubectl -n kafka get secret kafka-cluster-id >/dev/null 2>&1 && \
-               kubectl -n kafka get secret kafka-cluster-id -o jsonpath='{.data.CLUSTER_ID}' >/dev/null 2>&1; then
+               [ -n "$(kubectl -n kafka get secret kafka-cluster-id -o jsonpath='{.data.CLUSTER_ID}' 2>/dev/null || true)" ]; then
               echo "kafka-cluster-id already present; nothing to do."
               exit 0
             fi
@@ -122,10 +132,10 @@ spec:
               --dry-run=client -o yaml | kubectl apply -f -
 
 # ============================================================================
-# Vault CONFIG job (wave 0) — RUNS IN NAMESPACE: vault
-# - Configures static DB username and dynamic password (from secret/<username>)
-# - No DB engine / dynamic role; just KV
-# - Requires Secret vault/vault-root-token with key VAULT_TOKEN
+# Vault CONFIG job (namespace: vault)
+# - Static DB username + dynamic password in KV (secret/<user>:value)
+# - Seeds KV with pg/bq config, binds k8s auth policy
+# - Requires Secret vault/vault-root-token (key: VAULT_TOKEN)
 # ============================================================================
 ---
 apiVersion: batch/v1
@@ -156,10 +166,8 @@ spec:
               value: "http://vault.vault.svc.cluster.local:8200"
             - name: AUTH_PATH
               value: "kubernetes"
-            # ---- static DB username you want apps/jobs to use ----
             - name: PG_USER
-              value: "vaultadmin"
-            # ------------------------------------------------------
+              value: "vaultadmin"   # static username
             - name: SA_NAME
               value: "bq-yb-bootstrap"
             - name: SA_NAMESPACE
@@ -181,10 +189,11 @@ spec:
             - |
               set -euo pipefail
 
+              # ---------------- config ----------------
               PG_HOST="${PG_HOST:-yb-tserver-service.yugabyte.svc.cluster.local}"
               PG_PORT="${PG_PORT:-5433}"
               PG_DATABASE="${PG_DATABASE:-kafka}"
-              PG_USER="${PG_USER:-vaultadmin}"               # static username
+              PG_USER="${PG_USER:-vaultadmin}"
               YB_MASTER_ADDRESSES="${YB_MASTER_ADDRESSES:-}"
 
               BQ_BOOTSTRAP_PROJECT="${BQ_BOOTSTRAP_PROJECT:-}"
@@ -193,9 +202,8 @@ spec:
 
               BQ_PROJECT="${BQ_PROJECT:-}"
               BQ_DEFAULT_DATASET="${BQ_DEFAULT_DATASET:-}"
-              BQ_SINK_VERSION="${BQ_SINK_VERSION:-2.6.1}"
 
-              # Tools
+              # ---------------- tools -----------------
               if command -v apk >/dev/null 2>&1; then
                 apk add --no-cache jq curl postgresql15-client netcat-openbsd >/dev/null
               else
@@ -204,19 +212,19 @@ spec:
                 rm -rf /var/lib/apt/lists/*
               fi
 
-              # Root token
+              # ---------------- auth ------------------
               until [ -s /vault-token/VAULT_TOKEN ]; do
                 echo "🔁 waiting for /vault-token/VAULT_TOKEN..."; sleep 2
               done
               export VAULT_TOKEN="$(cat /vault-token/VAULT_TOKEN)"
 
-              # Optional: read GCP SA JSON placed by sync service
+              # Optional GCP key (synced by your service)
               SYNCED="$(vault kv get -format=json "secret/k8s-kafka-gcp-service-account-json" 2>/dev/null || true)"
               BQ_SA_JSON="$(printf '%s' "$SYNCED" | jq -r '.data.data.value // empty')"
               : "${BQ_SA_JSON:=}"
               [ -n "$BQ_SA_JSON" ] && echo "ℹ️  Found GCP SA JSON (bytes: $(printf '%s' "$BQ_SA_JSON" | wc -c))"
 
-              # Wait for static user's password at secret/<PG_USER>:value
+              # ----------- fetch static user's password from KV -----------
               VAULTADMIN_USER="${PG_USER}"
               echo "🔐 Waiting for secret/${VAULTADMIN_USER}..."
               VAULTADMIN_PASS=""
@@ -230,7 +238,7 @@ spec:
               done
               export PGPASSWORD="$VAULTADMIN_PASS"
 
-              # Ensure DB reachable / exists
+              # ---------------- ensure DB exists ----------------
               until getent hosts "$PG_HOST" >/dev/null 2>&1; do echo "🔄 waiting for DNS $PG_HOST..."; sleep 3; done
               until nc -z -w1 "$PG_HOST" "$PG_PORT";        do echo "⏳ waiting for DB $PG_HOST:$PG_PORT..."; sleep 3; done
 
@@ -240,7 +248,7 @@ spec:
                 createdb -h "$PG_HOST" -p "$PG_PORT" -U "$VAULTADMIN_USER" -O "$VAULTADMIN_USER" "$PG_DATABASE"
               fi
 
-              # KV seeds
+              # ---------------- seed KV ----------------
               put_pgconfig() {
                 local args=""
                 [ -n "$PG_HOST" ] && args="$args host=$PG_HOST"
@@ -248,11 +256,7 @@ spec:
                 [ -n "$PG_DATABASE" ] && args="$args database=$PG_DATABASE"
                 [ -n "$PG_USER" ] && args="$args user=$PG_USER"
                 [ -n "$YB_MASTER_ADDRESSES" ] && args="$args master_addresses=$YB_MASTER_ADDRESSES"
-                if [ -n "$args" ]; then
-                  echo "➡️  Writing secret/kafka/pgconfig ($args)"
-                  # shellcheck disable=SC2086
-                  vault kv put secret/kafka/pgconfig $args >/dev/null
-                fi
+                [ -n "$args" ] && { echo "➡️  secret/kafka/pgconfig ($args)"; vault kv put secret/kafka/pgconfig $args >/dev/null; }
               }
 
               put_bq_bootstrap() {
@@ -260,7 +264,7 @@ spec:
                 [ -n "$BQ_BOOTSTRAP_BUCKET" ]   && args="$args bucket=$BQ_BOOTSTRAP_BUCKET"
                 [ -n "$BQ_BOOTSTRAP_PROJECT" ]  && args="$args project=$BQ_BOOTSTRAP_PROJECT"
                 [ -n "$BQ_BOOTSTRAP_LOCATION" ] && args="$args location=$BQ_BOOTSTRAP_LOCATION"
-                [ -n "$args" ] && vault kv put secret/kafka/bq/bootstrap $args >/dev/null
+                [ -n "$args" ] && { echo "➡️  secret/kafka/bq/bootstrap ($args)"; vault kv put secret/kafka/bq/bootstrap $args >/dev/null; }
               }
 
               put_bq_config() {
@@ -271,12 +275,13 @@ spec:
                   printf '%s' "$BQ_SA_JSON" > /tmp/sa.json
                   args="$args sa_json=@/tmp/sa.json"
                 fi
-                [ -n "$args" ] && vault kv put secret/kafka/bq/config $args >/dev/null
+                [ -n "$args" ] && { echo "➡️  secret/kafka/bq/config ($args)"; vault kv put secret/kafka/bq/config $args >/dev/null; }
               }
 
               put_bq_exporter_key() {
                 if [ -n "${BQ_SA_JSON:-}" ]; then
                   printf '%s' "$BQ_SA_JSON" > /tmp/bq-exporter.json
+                  echo "➡️  secret/kafka/bq/exporter (sa_json)"
                   vault kv put secret/kafka/bq/exporter sa_json=@/tmp/bq-exporter.json >/dev/null
                 fi
               }
@@ -286,23 +291,22 @@ spec:
               put_bq_config
               put_bq_exporter_key
 
-              # Policy for kafka SA
+              # ---------------- policy & k8s auth ----------------
               vault policy write "data-bootstrap" - <<EOP
-              path "secret/data/kafka/pgconfig"            { capabilities = ["read"] }
-              path "secret/data/kafka/bq/bootstrap"        { capabilities = ["read"] }
-              path "secret/data/kafka/bq/config"           { capabilities = ["read"] }
-              path "secret/data/kafka/bq/exporter"         { capabilities = ["read"] }
-              path "secret/data/${PG_USER}"                { capabilities = ["read"] }
+              path "secret/data/kafka/pgconfig"     { capabilities = ["read"] }
+              path "secret/data/kafka/bq/bootstrap" { capabilities = ["read"] }
+              path "secret/data/kafka/bq/config"    { capabilities = ["read"] }
+              path "secret/data/kafka/bq/exporter"  { capabilities = ["read"] }
+              path "secret/data/${PG_USER}"         { capabilities = ["read"] }
               EOP
 
-              # Bind SA in kafka namespace
               vault write auth/${AUTH_PATH}/role/data-bootstrap \
                 bound_service_account_names="${SA_NAME}" \
                 bound_service_account_namespaces="${SA_NAMESPACE}" \
                 policies="data-bootstrap" \
                 ttl="24h" >/dev/null
 
-              echo "🎉 Static-username + dynamic-password (KV) configured; k8s auth bound."
+              echo "🎉 Static DB user + KV password wired; policy bound."
           volumeMounts:
             - name: root-token
               mountPath: /vault-token
@@ -334,14 +338,12 @@ spec:
         vault.hashicorp.com/agent-inject: "enabled"
         vault.hashicorp.com/role: "data-bootstrap"
 
-        # ---- GCP SA key (raw JSON from secret/kafka/bq/exporter.sa_json) ----
         vault.hashicorp.com/agent-inject-secret-gcp-key.json: "secret/data/kafka/bq/exporter"
         vault.hashicorp.com/agent-inject-template-gcp-key.json: |
           {{- with secret "secret/data/kafka/bq/exporter" -}}
           {{ .Data.data.sa_json }}
           {{- end -}}
 
-        # ---- Bootstrap env (BUCKET/PROJECT/LOCATION) ---
         vault.hashicorp.com/agent-inject-secret-bootstrap.env: "secret/data/kafka/bq/bootstrap"
         vault.hashicorp.com/agent-inject-template-bootstrap.env: |
           {{- with secret "secret/data/kafka/bq/bootstrap" -}}
@@ -350,7 +352,6 @@ spec:
           {{ with .Data.data.location }}LOCATION={{ . }}{{ end }}
           {{- end -}}
 
-        # ---- DB config (PGHOST/PGPORT/PGDATABASE/PGUSER) ---
         vault.hashicorp.com/agent-inject-secret-pg.env: "secret/data/kafka/pgconfig"
         vault.hashicorp.com/agent-inject-template-pg.env: |
           {{- with secret "secret/data/kafka/pgconfig" -}}
@@ -361,7 +362,6 @@ spec:
           {{ with .Data.data.master_addresses }}YB_MASTER_ADDRESSES={{ . }}{{ end }}
           {{- end -}}
 
-        # ---- Static username's password (single-value at secret/<user>:value) ----------
         vault.hashicorp.com/agent-inject-secret-pg-admin.env: "secret/data/vaultadmin"
         vault.hashicorp.com/agent-inject-template-pg-admin.env: |
           {{- with secret "secret/data/vaultadmin" -}}
@@ -370,7 +370,6 @@ spec:
     spec:
       serviceAccountName: bq-yb-bootstrap
       restartPolicy: Never
-      # NOTE: allow apt-get inside google/cloud-sdk by running as root (no runAsNonRoot here)
       containers:
       - name: runner
         image: google/cloud-sdk:latest
@@ -395,13 +394,11 @@ spec:
               done
             done
 
-            # Load env from Vault
             . /vault/secrets/bootstrap.env
             . /vault/secrets/pg.env
             . /vault/secrets/pg-admin.env
             export PGPASSWORD
 
-            # Safe defaults
             : "${PGHOST:=yb-tserver-service.yugabyte.svc.cluster.local}"
             : "${PGPORT:=5433}"
             : "${PGDATABASE:=kafka}"
@@ -409,12 +406,10 @@ spec:
 
             echo "✅ Secrets loaded. PROJECT=${PROJECT:-unset} BUCKET=${BUCKET:-unset} PGHOST=${PGHOST}"
 
-            # Tools (need jq)
             apt-get update >/dev/null
             apt-get install -y --no-install-recommends postgresql-client jq >/dev/null
             apt-get clean; rm -rf /var/lib/apt/lists/*
 
-            # Helpers
             get_columns() {
               local sch="$1" tbl="$2"
               PGPASSWORD="$PGPASSWORD" \
@@ -434,7 +429,6 @@ spec:
               fi
             }
 
-            # Discover flagged tables (COMMENT JSON)
             SQL_DISCOVER="
             WITH c AS (
               SELECT n.nspname AS schema, c.relname AS table, d.description
@@ -499,7 +493,6 @@ spec:
               echo "✅ Imported ${SCH}.${TBL}"
             done
 
-            # Completion flag
             kubectl -n kafka apply -f - <<'EOF'
             apiVersion: v1
             kind: ConfigMap
@@ -521,8 +514,7 @@ spec:
           emptyDir: {}
 
 # ============================================================================
-# Kafka (wave 1): single-broker KRaft — official Apache image (namespace: kafka)
-#   - Reads CLUSTER_ID from Secret generated above
+# Kafka (wave 1): single-broker KRaft — reads CLUSTER_ID from Secret
 # ============================================================================
 ---
 apiVersion: v1
@@ -585,9 +577,7 @@ spec:
                 secretKeyRef:
                   name: kafka-cluster-id
                   key: CLUSTER_ID
-          command:
-            - bash
-            - -lc
+          command: ["bash","-lc"]
           args:
             - |
               set -euo pipefail
@@ -654,7 +644,7 @@ spec:
           emptyDir: {}
 
 # ============================================================================
-# Kafka Connect (wave 1): installs BigQuery Sink + Debezium YB gRPC (namespace: kafka)
+# Kafka Connect (wave 1): BigQuery Sink + Debezium YB gRPC (namespace: kafka)
 # ============================================================================
 ---
 apiVersion: v1
@@ -693,9 +683,8 @@ spec:
       initContainers:
         - name: install-plugins
           image: confluentinc/cp-kafka-connect:7.6.1
-          command:
-            - bash
-            - -lc
+          command: ["bash","-lc"]
+          args:
             - |
               mkdir -p /plugins
               apt-get update >/dev/null 2>&1 || true
@@ -718,8 +707,6 @@ spec:
         - name: connect
           image: confluentinc/cp-kafka-connect:7.6.1
           imagePullPolicy: IfNotPresent
-          ports:
-            - containerPort: 8083
           env:
             - name: CONNECT_BOOTSTRAP_SERVERS
               value: "kafka.kafka.svc.cluster.local:9092"
@@ -753,6 +740,8 @@ spec:
               value: "/plugins"
             - name: KAFKA_HEAP_OPTS
               value: "-Xms256m -Xmx512m"
+          ports:
+            - containerPort: 8083
           readinessProbe:
             httpGet: { path: /connectors, port: 8083 }
             initialDelaySeconds: 20
@@ -768,8 +757,8 @@ spec:
           emptyDir: {}
 
 # ============================================================================
-# Registration Job (wave 3): Yugabyte→Kafka (Debezium) + Kafka→BigQuery (namespace: kafka)
-#   - Uses static DB user w/ dynamic password
+# Registration Job (wave 3): Yugabyte→Kafka (Debezium) + Kafka→BigQuery
+#   - Static DB user, dynamic password from Vault KV
 # ============================================================================
 ---
 apiVersion: batch/v1
@@ -782,7 +771,6 @@ metadata:
     vault.hashicorp.com/agent-inject: "true"
     vault.hashicorp.com/role: "data-bootstrap"
 
-    # ---- Yugabyte PG config (multi-key from secret/kafka/pgconfig) ----
     vault.hashicorp.com/agent-inject-secret-yb: "secret/data/kafka/pgconfig"
     vault.hashicorp.com/agent-inject-template-yb: |
       {{- with secret "secret/data/kafka/pgconfig" -}}
@@ -793,7 +781,6 @@ metadata:
       {{ with .Data.data.master_addresses }}YB_MASTER_ADDRESSES={{ . }}{{ end }}
       {{- end }}
 
-    # ---- BigQuery config (multi-key from secret/kafka/bq/config) ----
     vault.hashicorp.com/agent-inject-secret-bq: "secret/data/kafka/bq/config"
     vault.hashicorp.com/agent-inject-template-bq: |
       {{- with secret "secret/data/kafka/bq/config" -}}
@@ -802,7 +789,6 @@ metadata:
       {{ with .Data.data.sa_json }}BQ_KEY_JSON={{ . | toJSON }}{{ end }}
       {{- end }}
 
-    # ---- DB password (single-value secret/<user>:value) ----
     vault.hashicorp.com/agent-inject-secret-pgpass.env: "secret/data/vaultadmin"
     vault.hashicorp.com/agent-inject-template-pgpass.env: |
       {{- with secret "secret/data/vaultadmin" -}}
@@ -821,9 +807,8 @@ spec:
       containers:
         - name: registrar
           image: yugabytedb/yugabyte:2024.2.2.0-b105
-          command:
-            - bash
-            - -lc
+          command: ["bash","-lc"]
+          args:
             - |
               set -euo pipefail
 
