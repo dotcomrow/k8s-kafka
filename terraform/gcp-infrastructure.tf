@@ -70,6 +70,11 @@ locals {
     ])
 }
 
+resource "google_project_service" "pubsub" {
+  project = var.secrets_project_id
+  service = "pubsub.googleapis.com"
+}
+
 # Must set exactly one parent (org or folder)
 resource "null_resource" "validate_parent" {
   lifecycle { ignore_changes = all }
