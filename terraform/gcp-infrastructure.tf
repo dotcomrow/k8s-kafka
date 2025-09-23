@@ -29,13 +29,22 @@ variable "secrets_project_id" { type = string }
 variable "project_name"       { type = string }
 variable "billing_account"    { type = string }
 variable "gcp_org_id"         { type = string }
-variable "folder_id"          { type = string, default = "" }
+variable "folder_id" {
+  type    = string
+  default = ""
+}
 variable "region"             { type = string }
 variable "bq_location"        { type = string }
 variable "dataset_id"         { type = string }
 variable "bootstrap_bucket"   { type = string }
-variable "sa_name"            { type = string, default = "bq-data-pipeline" }
-variable "secret_id"          { type = string, default = "bq-data-pipeline-key" }
+variable "sa_name" {
+  type    = string
+  default = "bq-data-pipeline"
+}
+variable "secret_id" {
+  type    = string
+  default = "bq-data-pipeline-key"
+}
 
 # Eventarc region (where triggers live)
 variable "eventarc_region" {
