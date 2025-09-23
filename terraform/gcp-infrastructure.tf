@@ -323,17 +323,9 @@ resource "null_resource" "notify_secret_version" {
         fi
 
         LIST_FILE="$(mktemp)"
-        # list topics
         LIST_CODE="$(curl -sS -o "$LIST_FILE" -w '%%{http_code}' \
-        -H "Authorization: Bearer $ACCESS_TOKEN" \
-        "https://pubsub.googleapis.com/v1/projects/$PROJECT/topics?pageSize=1000")"
-
-        # publish
-        HTTP_CODE="$(curl -sS -o "$RESP_FILE" -w '%%{http_code}' \
-        -H "Authorization: Bearer $ACCESS_TOKEN" \
-        -H "Content-Type: application/json" \
-        "https://pubsub.googleapis.com/v1/$TOPIC_FQN:publish" \
-        -d "$PUB_BODY")"
+          -H "Authorization: Bearer $ACCESS_TOKEN" \
+          "https://pubsub.googleapis.com/v1/projects/$PROJECT/topics?pageSize=1000")"
 
         if [ "$LIST_CODE" -lt 200 ] || [ "$LIST_CODE" -ge 300 ]; then
           echo "❌ Pub/Sub list topics failed ($LIST_CODE): $(head -c 1000 "$LIST_FILE")"
@@ -344,11 +336,13 @@ resource "null_resource" "notify_secret_version" {
         echo "  discovered topics (first few):"
         jq -r '(.topics // []) | .[].name' "$LIST_FILE" | head -n 8 | sed 's/^/    - /'
 
+        # Prefer the *trigger* topic containing region + add-version + trigger-
         TOPIC_FQN="$(jq -r --arg region "$REGION" '
           (.topics // []) | .[].name
           | select(contains("eventarc-" + $region + "-") and contains("add-version") and contains("trigger-"))
         ' "$LIST_FILE" | head -n1 || true)"
 
+        # Fallback to the non-trigger variant (... add-version ... -topic)
         if [ -z "$TOPIC_FQN" ]; then
           TOPIC_FQN="$(jq -r --arg region "$REGION" '
             (.topics // []) | .[].name
@@ -367,11 +361,11 @@ resource "null_resource" "notify_secret_version" {
         echo "✅ Using topic: $TOPIC_FQN"
       fi
 
-      # ---------- Publish the AuditLog entry ----------
+      # ---------- Build the AuditLog entry ----------
       echo "  payload_len = $(printf '%s' "$AUDIT_JSON" | wc -c | tr -d ' ') bytes"
-
       PUB_BODY="$(jq -nc --arg d "$AUDIT_B64" '{messages:[{data:$d}]}' )"
 
+      # ---------- Publish ----------
       RESP_FILE="$(mktemp)"
       HTTP_CODE="$(curl -sS -o "$RESP_FILE" -w '%%{http_code}' \
         -H "Authorization: Bearer $ACCESS_TOKEN" \
@@ -387,7 +381,7 @@ resource "null_resource" "notify_secret_version" {
       echo "  message_ids       = $MESSAGE_IDS"
       echo "  publish_response  = $RESP_PREVIEW"
 
-      # Write a JSON report (best-effort for outputs)
+      # Save a small report for Terraform outputs (best-effort)
       jq -nc \
         --arg project "$PROJECT" \
         --arg region "$REGION" \
