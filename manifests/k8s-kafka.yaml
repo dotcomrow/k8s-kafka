@@ -128,10 +128,13 @@ spec:
               BQ_DEFAULT_DATASET="${BQ_DEFAULT_DATASET:-}"  # e.g. analytics
               # Raw JSON for a SA key that needs BigQuery & GCS perms (optional)
               # inside yb-vault-config before put_bq_config/put_bq_exporter_key
+              # Read the synced SA key from Vault (if present)
               SYNCED="$(vault kv get -format=json "secret/k8s-kafka-gcp-service-account-json" 2>/dev/null || true)"
-              if [ -n "$SYNCED" ]; then
-                BQ_SA_JSON="$(echo "$SYNCED" | jq -r '.data.data.value')"
-              fi
+              BQ_SA_JSON="$(printf '%s' "$SYNCED" | jq -r '.data.data.value // empty')"
+              : "${BQ_SA_JSON:=}"    # ensure defined even if empty
+
+              # Optional debug
+              [ -n "$BQ_SA_JSON" ] && echo "ℹ️  Found GCP SA JSON (bytes: $(printf '%s' "$BQ_SA_JSON" | wc -c))"
 
               # BigQuery sink version / misc knobs you may want to surface later
               BQ_SINK_VERSION="${BQ_SINK_VERSION:-2.6.1}"
@@ -251,9 +254,9 @@ spec:
 
               put_bq_config() {
                 local args=""
-                [ -n "$BQ_PROJECT" ]         && args="$args project=$BQ_PROJECT"
-                [ -n "$BQ_DEFAULT_DATASET" ] && args="$args dataset=$BQ_DEFAULT_DATASET"
-                if [ -n "$BQ_SA_JSON" ]; then
+                [ -n "${BQ_PROJECT:-}" ]         && args="$args project=$BQ_PROJECT"
+                [ -n "${BQ_DEFAULT_DATASET:-}" ] && args="$args dataset=$BQ_DEFAULT_DATASET"
+                if [ -n "${BQ_SA_JSON:-}" ]; then
                   printf '%s' "$BQ_SA_JSON" > /tmp/sa.json
                   args="$args sa_json=@/tmp/sa.json"
                 fi
@@ -267,7 +270,7 @@ spec:
               }
 
               put_bq_exporter_key() {
-                if [ -n "$BQ_SA_JSON" ]; then
+                if [ -n "${BQ_SA_JSON:-}" ]; then
                   printf '%s' "$BQ_SA_JSON" > /tmp/bq-exporter.json
                   echo "➡️  Writing secret/kafka/bq/exporter (sa_json)"
                   vault kv put secret/kafka/bq/exporter sa_json=@/tmp/bq-exporter.json >/dev/null
