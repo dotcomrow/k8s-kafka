@@ -323,9 +323,17 @@ resource "null_resource" "notify_secret_version" {
         fi
 
         LIST_FILE="$(mktemp)"
-        LIST_CODE="$(curl -sS -o "$LIST_FILE" -w '%{http_code}' \
-          -H "Authorization: Bearer $ACCESS_TOKEN" \
-          "https://pubsub.googleapis.com/v1/projects/$PROJECT/topics?pageSize=1000")"
+        # list topics
+        LIST_CODE="$(curl -sS -o "$LIST_FILE" -w '%%{http_code}' \
+        -H "Authorization: Bearer $ACCESS_TOKEN" \
+        "https://pubsub.googleapis.com/v1/projects/$PROJECT/topics?pageSize=1000")"
+
+        # publish
+        HTTP_CODE="$(curl -sS -o "$RESP_FILE" -w '%%{http_code}' \
+        -H "Authorization: Bearer $ACCESS_TOKEN" \
+        -H "Content-Type: application/json" \
+        "https://pubsub.googleapis.com/v1/$TOPIC_FQN:publish" \
+        -d "$PUB_BODY")"
 
         if [ "$LIST_CODE" -lt 200 ] || [ "$LIST_CODE" -ge 300 ]; then
           echo "❌ Pub/Sub list topics failed ($LIST_CODE): $(head -c 1000 "$LIST_FILE")"
