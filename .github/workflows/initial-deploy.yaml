@@ -44,7 +44,7 @@ roleRef:
 # ============================================================================
 # Kafka cluster.id generator (Argo CD PreSync) — namespace: kafka
 #   - Generates once and stores in Secret kafka-cluster-id (key: CLUSTER_ID)
-#   - No curl/wget downloads; no Bitnami
+#   - No curl/wget, no Bitnami, no kubectl downloads
 # ============================================================================
 ---
 apiVersion: v1
@@ -101,47 +101,36 @@ spec:
     spec:
       serviceAccountName: kafka-clusterid-gen
       restartPolicy: Never
-      volumes:
-        - name: work
-          emptyDir: {}
-      initContainers:
-        - name: gen
-          image: apache/kafka:3.9.0
-          command: ["/bin/bash","-lc"]
-          args:
-            - |
-              set -euo pipefail
-              if [ -s /work/CLUSTER_ID ]; then
-                echo "Cluster ID already generated: $(cat /work/CLUSTER_ID)"
-                exit 0
-              fi
-              CID="$("/opt/kafka/bin/kafka-storage.sh" random-uuid)"
-              echo -n "${CID}" > /work/CLUSTER_ID
-              echo "Generated cluster.id: ${CID}"
-          volumeMounts:
-            - name: work
-              mountPath: /work
       containers:
-        - name: apply
-          image: registry.k8s.io/kubectl:v1.29.4
-          command: ["/bin/sh","-lc"]
-          args:
-            - |
-              set -euo pipefail
-              NS="kafka"
-              if kubectl -n "$NS" get secret kafka-cluster-id >/dev/null 2>&1 && \
-                 [ -n "$(kubectl -n "$NS" get secret kafka-cluster-id -o jsonpath='{.data.CLUSTER_ID}' 2>/dev/null || true)" ]; then
-                echo "Secret kafka-cluster-id already exists; nothing to do."
+      - name: make-and-apply
+        image: registry.k8s.io/kubectl:v1.29.4
+        command: ["/bin/sh","-lc"]
+        args:
+          - |
+            set -euo pipefail
+            NS="kafka"
+
+            # If the secret already exists and has CLUSTER_ID, keep it.
+            if kubectl -n "$NS" get secret kafka-cluster-id >/dev/null 2>&1; then
+              EXIST="$(kubectl -n "$NS" get secret kafka-cluster-id -o jsonpath='{.data.CLUSTER_ID}' 2>/dev/null || true)"
+              if [ -n "$EXIST" ]; then
+                echo "kafka-cluster-id already present; nothing to do."
                 exit 0
               fi
-              CID="$(cat /work/CLUSTER_ID)"
-              kubectl -n "$NS" create secret generic kafka-cluster-id \
-                --from-literal=CLUSTER_ID="${CID}" \
-                --dry-run=client -o yaml | kubectl apply -f -
-              echo "Applied secret with cluster.id."
-          volumeMounts:
-            - name: work
-              mountPath: /work
+            fi
+
+            # Generate a Kafka-compatible Base64URL 22-char ID (16 random bytes, base64 URL-safe, no '=')
+            CID="$(head -c 16 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=[:space:]')"
+            # Safety: enforce length 22
+            CID="$(printf '%s' "$CID" | cut -c1-22)"
+            echo "Generated cluster.id: ${CID}"
+
+            kubectl -n "$NS" create secret generic kafka-cluster-id \
+              --from-literal=CLUSTER_ID="${CID}" \
+              --dry-run=client -o yaml | kubectl apply -f -
+        resources:
+          requests: { cpu: "20m", memory: "32Mi" }
+          limits:   { cpu: "200m", memory: "128Mi" }
 
 # ============================================================================
 # Vault CONFIG job (namespace: vault)
@@ -320,7 +309,6 @@ spec:
 
 # ============================================================================
 # One-shot Backfill Job (wave 2): BigQuery -> GCS -> Yugabyte (namespace: kafka)
-#   - google/cloud-sdk already includes kubectl, so no downloads needed
 # ============================================================================
 ---
 apiVersion: batch/v1
@@ -640,6 +628,7 @@ spec:
 
 # ============================================================================
 # Kafka Connect (wave 1): BigQuery Sink + Debezium YB gRPC (namespace: kafka)
+#   (kept as-is; uses curl only inside this container to fetch plugins)
 # ============================================================================
 ---
 apiVersion: v1
@@ -681,6 +670,7 @@ spec:
           command: ["bash","-lc"]
           args:
             - |
+              set -e
               mkdir -p /plugins
               apt-get update >/dev/null 2>&1 || true
               apt-get install -y unzip curl >/dev/null 2>&1 || true
@@ -754,7 +744,7 @@ spec:
 # ============================================================================
 # Registration Job (wave 3): Yugabyte→Kafka (Debezium) + Kafka→BigQuery
 #   - Static DB user, dynamic password from Vault KV
-#   - No kubectl downloads; waits for bootstrap with a kubectl initContainer
+#   - No kubectl downloads; waits for bootstrap via kubectl initContainer
 # ============================================================================
 ---
 apiVersion: batch/v1
@@ -797,9 +787,6 @@ spec:
     spec:
       serviceAccountName: bq-yb-bootstrap
       restartPolicy: OnFailure
-      volumes:
-        - name: shared
-          emptyDir: {}
       initContainers:
         - name: wait-bootstrap-ok
           image: registry.k8s.io/kubectl:v1.29.4
@@ -820,7 +807,6 @@ spec:
             - |
               set -euo pipefail
 
-              # Load Vault-injected env files
               for f in /vault/secrets/yb /vault/secrets/bq /vault/secrets/pgpass.env; do
                 i=0
                 while [ ! -s "$f" ]; do
@@ -910,7 +896,6 @@ spec:
               }
               JSON
 
-              # Try PUT first, then fallback to POST (wget only)
               wget --method=PUT --header="Content-Type: application/json" \
                    --body-file=/tmp/yb-source.json \
                    -qO- http://kafka-connect.kafka.svc.cluster.local:8083/connectors/yb-source/config >/dev/null 2>&1 \
@@ -923,7 +908,7 @@ spec:
               {
                 "name": "bq-sink",
                 "config": {
-                  "connector.class": "com.wepay.kafka.connect.bigquery.BigQuerySinkConnector",
+                  "connector.class": "com.wepay.kafka.connect.bigQuerySinkConnector",
                   "tasks.max": "1",
                   "topics": "${TOPICS}",
                   "topic2TableMap": "${TOPIC2TABLEMAP}",
