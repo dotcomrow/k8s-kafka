@@ -95,7 +95,7 @@ resource "google_project" "this" {
   depends_on = [null_resource.validate_parent]
 }
 
-resource "google_project_service" "enable_kafka" {
+resource "google_project_service" "enable" {
   for_each           = local.kafka_apis
   project            = local.project_id
   service            = each.value
