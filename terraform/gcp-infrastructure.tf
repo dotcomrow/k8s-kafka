@@ -292,7 +292,7 @@ resource "null_resource" "notify_secret_version" {
       if [ -n "$TOPIC_HINT" ]; then
         TOPIC_FQN="projects/$PROJECT/topics/$TOPIC_HINT"
       else
-        PREFIX="projects/$PROJECT/topics/eventarc-${REGION}-vault-add-version-trigger-"
+        PREFIX="projects/$PROJECT/topics/eventarc-$REGION-vault-add-version-trigger-"
         LIST_JSON="$(curl -sS -H "Authorization: Bearer $ACCESS_TOKEN" \
           "https://pubsub.googleapis.com/v1/projects/$PROJECT/topics")"
         TOPIC_FQN="$(printf '%s' "$LIST_JSON" | jq -r --arg p "$PREFIX" '.topics[]?.name | select(startswith($p))' | head -n1 || true)"
