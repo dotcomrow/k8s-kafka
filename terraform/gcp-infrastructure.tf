@@ -250,42 +250,43 @@ resource "null_resource" "notify_secret_version" {
   provisioner "local-exec" {
   interpreter = ["/bin/bash", "-c"]
   command = <<-EOT
-    set -euo pipefail
+            set -euo pipefail
 
-    PROJECT="$${SECRETS_PROJECT_ID}"
-    TOPIC="$${TOPIC_NAME}"
-    SECRET_ID="$${SECRET_ID}"
-    ACCESS_TOKEN="$${ACCESS_TOKEN}"
+            PROJECT="$${SECRETS_PROJECT_ID}"
+            TOPIC="$${TOPIC_NAME}"
+            SECRET_ID="$${SECRET_ID}"
+            ACCESS_TOKEN="$${ACCESS_TOKEN}"
 
-    PAYLOAD="$(cat <<EOF
-    {
-      "event": "secret.version.added",
-      "gcp_project": "${PROJECT}",
-      "secret_id": "${SECRET_ID}",
-      "version": "latest",
-      "vault_path": "secret/${SECRET_ID}",
-      "timestamp": "$(date -u +%FT%TZ)"
+            PAYLOAD="$(cat <<EOF
+            {
+            "event": "secret.version.added",
+            "gcp_project": "${PROJECT}",
+            "secret_id": "${SECRET_ID}",
+            "version": "latest",
+            "vault_path": "secret/${SECRET_ID}",
+            "timestamp": "$(date -u +%FT%TZ)"
+            }
+            EOF
+            )"
+
+            BASE64_PAYLOAD="$(printf '%s' "$PAYLOAD" | base64 | tr -d '\n')"
+
+            curl -sS -X POST \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "https://pubsub.googleapis.com/v1/projects/${PROJECT}/topics/${TOPIC}:publish" \
+            -d "{\"messages\":[{\"data\":\"${BASE64_PAYLOAD}\"}]}" >/dev/null
+
+            echo "Published manual sync event to Pub/Sub topic: ${TOPIC}"
+        EOT
+
+        environment = {
+            ACCESS_TOKEN       = data.google_client_config.cur.access_token
+            SECRETS_PROJECT_ID = var.secrets_project_id
+            TOPIC_NAME         = var.vault_sync_topic_name
+            SECRET_ID          = google_secret_manager_secret.k8s_kafka_sa_json.secret_id
+        }
     }
-    EOF
-    )"
-
-    BASE64_PAYLOAD="$(printf '%s' "$PAYLOAD" | base64 | tr -d '\n')"
-
-    curl -sS -X POST \
-      -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-      -H "Content-Type: application/json" \
-      "https://pubsub.googleapis.com/v1/projects/${PROJECT}/topics/${TOPIC}:publish" \
-      -d "{\"messages\":[{\"data\":\"${BASE64_PAYLOAD}\"}]}" >/dev/null
-
-    echo "Published manual sync event to Pub/Sub topic: ${TOPIC}"
-  EOT
-
-  environment = {
-    ACCESS_TOKEN       = data.google_client_config.cur.access_token
-    SECRETS_PROJECT_ID = var.secrets_project_id
-    TOPIC_NAME         = var.vault_sync_topic_name
-    SECRET_ID          = google_secret_manager_secret.k8s_kafka_sa_json.secret_id
-  }
 }
 
 # Make sure Pub/Sub is enabled in the project that owns the topic (if you manage it here)
