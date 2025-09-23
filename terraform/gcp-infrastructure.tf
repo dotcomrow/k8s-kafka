@@ -269,6 +269,13 @@ resource "google_project_iam_audit_config" "pubsub_data_access" {
 # ---------- inputs ----------
 variable "vault_sync_topic_name" { type = string } # e.g. "eventarc-us-east1-vault-add-version-topic"
 
+# Optional override (leave empty to auto-discover)
+variable "eventarc_add_version_trigger_topic_hint" {
+  type        = string
+  default     = "" # projects/<id>/topics/<name> OR just <name>
+  description = "Override the Eventarc AddSecretVersion trigger Pub/Sub topic"
+}
+
 resource "null_resource" "notify_secret_version" {
   triggers = {
     version      = google_secret_manager_secret_version.k8s_kafka_sa_json_v.name
@@ -279,15 +286,15 @@ resource "null_resource" "notify_secret_version" {
   }
 
   provisioner "local-exec" {
-    interpreter = ["/bin/bash", "-C"]
+    interpreter = ["/bin/bash", "-c"]
     command = <<-EOT
       set -euo pipefail
 
-      PROJECT="$${SECRETS_PROJECT_ID}"
-      REGION="$${REGION}"
-      SECRET_ID="$${SECRET_ID}"
-      ACCESS_TOKEN="$${ACCESS_TOKEN}"
-      TOPIC_HINT="$${TOPIC_HINT}"
+      PROJECT="$SECRETS_PROJECT_ID"
+      REGION="$REGION"
+      SECRET_ID="$SECRET_ID"
+      ACCESS_TOKEN="$ACCESS_TOKEN"
+      TOPIC_HINT="$TOPIC_HINT"
 
       echo "▶ Pub/Sub publish debug"
       echo "  project   = $PROJECT"
@@ -303,20 +310,23 @@ resource "null_resource" "notify_secret_version" {
         fi
         echo "✅ Using override topic: $TOPIC_FQN"
       else
+        if ! command -v jq >/dev/null 2>&1; then
+          echo "❌ jq is required in the runner"; exit 1
+        fi
         TOPICS_JSON="$(curl -sS -H "Authorization: Bearer $ACCESS_TOKEN" \
           "https://pubsub.googleapis.com/v1/projects/$PROJECT/topics?pageSize=1000")"
 
         # Prefer: eventarc-<region>-*add-version-trigger-<id>
         TOPIC_FQN="$(printf '%s' "$TOPICS_JSON" | jq -r --arg region "$REGION" '
           (.topics // []) | map(.name) | .[]
-          | select( test("projects/.+/topics/eventarc-" + $region + "-.*add-version-trigger-\\d+$") )
+          | select( test("^projects/.+/topics/eventarc-" + $region + "-.*add-version-trigger-\\d+$") )
         ' | head -n1 || true)"
 
         # Fallback: eventarc-<region>-*add-version-topic
         if [ -z "$TOPIC_FQN" ]; then
           TOPIC_FQN="$(printf '%s' "$TOPICS_JSON" | jq -r --arg region "$REGION" '
             (.topics // []) | map(.name) | .[]
-            | select( test("projects/.+/topics/eventarc-" + $region + "-.*add-version-topic$") )
+            | select( test("^projects/.+/topics/eventarc-" + $region + "-.*add-version-topic$") )
           ' | head -n1 || true)"
         fi
 
@@ -327,22 +337,18 @@ resource "null_resource" "notify_secret_version" {
         echo "✅ Using topic: $TOPIC_FQN"
       fi
 
-      # ---------- build payload expected by sync service (AuditLog-like fields) ----------
+      # ---------- payload (AuditLog-like) ----------
       SERVICE="secretmanager.googleapis.com"
       METHOD="google.cloud.secretmanager.v1.SecretManagerService.AddSecretVersion"
       RESOURCE="projects/$PROJECT/secrets/$SECRET_ID/versions/latest"
 
-      PAYLOAD_JSON="$(jq -nc \
-        --arg svc "$SERVICE" \
-        --arg method "$METHOD" \
-        --arg rname "$RESOURCE" \
+      PAYLOAD_JSON="$(jq -nc --arg svc "$SERVICE" --arg method "$METHOD" --arg rname "$RESOURCE" \
         '{protoPayload:{serviceName:$svc, methodName:$method, resourceName:$rname}}')"
       echo "  payload_len = $(printf '%s' "$PAYLOAD_JSON" | wc -c | tr -d ' ') bytes"
 
       BASE64_PAYLOAD="$(printf '%s' "$PAYLOAD_JSON" | base64 | tr -d '\n')"
       PUB_BODY="$(jq -nc --arg d "$BASE64_PAYLOAD" '{messages:[{data:$d}]}' )"
 
-      # ---------- publish ----------
       RESP_FILE="$(mktemp)"
       HTTP_CODE="$(curl -sS -o "$RESP_FILE" -w '%%{http_code}' \
         -H "Authorization: Bearer $ACCESS_TOKEN" \
