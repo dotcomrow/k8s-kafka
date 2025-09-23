@@ -50,7 +50,8 @@ roleRef:
 
 # ============================================================================
 # Kafka cluster.id generator — namespace: kafka
-# Creates/keeps Secret kafka-cluster-id (key: CLUSTER_ID)
+#   Creates/keeps Secret kafka-cluster-id (key: CLUSTER_ID)
+#   Uses Alpine + Kubernetes API (no kubectl, no internet fetches)
 # ============================================================================
 ---
 apiVersion: v1
@@ -71,7 +72,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get","create","patch","update","list","watch"]
+    verbs: ["get","list","watch","create","update","patch","delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -103,32 +104,66 @@ spec:
       restartPolicy: Never
       serviceAccountName: kafka-clusterid-gen
       containers:
-        - name: make-and-apply
-          # NOTE: this image has /bin/sh AND kubectl
-          image: lachlanevenson/k8s-kubectl:v1.29.4
+        - name: gen
+          image: alpine:3.19
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh","-lc"]
           args:
             - |
               set -euo pipefail
+              API="https://kubernetes.default.svc"
               NS="kafka"
-              # Keep existing secret if it already has CLUSTER_ID
-              if kubectl -n "$NS" get secret kafka-cluster-id >/dev/null 2>&1; then
-                if [ -n "$(kubectl -n "$NS" get secret kafka-cluster-id -o jsonpath='{.data.CLUSTER_ID}' 2>/dev/null || true)" ]; then
-                  echo "kafka-cluster-id already present; nothing to do."
-                  exit 0
+              NAME="kafka-cluster-id"
+              TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+              CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+
+              # GET existing secret (if any)
+              JSON="$(wget -qO- --header="Authorization: Bearer ${TOKEN}" --ca-certificate="${CACERT}" \
+                     "${API}/api/v1/namespaces/${NS}/secrets/${NAME}" || true)"
+
+              # If it exists and has non-empty data.CLUSTER_ID, keep it and exit
+              if [ -n "${JSON}" ] && echo "${JSON}" | grep -q '"kind":"Secret"'; then
+                if echo "${JSON}" | grep -q '"CLUSTER_ID":"'; then
+                  B64="$(echo "${JSON}" | sed -n 's/.*"CLUSTER_ID":"\([^"]*\)".*/\1/p' | head -n1)"
+                  if [ -n "${B64}" ] && [ "${B64}" != "null" ]; then
+                    echo "kafka-cluster-id already present; nothing to do."
+                    exit 0
+                  fi
                 fi
               fi
-              # Generate Kafka-style base64url (22 chars from 16 random bytes)
+
+              # Generate Kafka-style base64url id (22 chars)
               CID="$(head -c 16 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=[:space:]' | cut -c1-22)"
               echo "Generated cluster.id: ${CID}"
-              kubectl -n "$NS" create secret generic kafka-cluster-id \
-                --from-literal=CLUSTER_ID="${CID}" \
-                --dry-run=client -o yaml | kubectl apply -f -
+
+              # Build Secret JSON (data must be base64-encoded)
+              if base64 --help 2>&1 | grep -q -- "-w"; then
+                ENC="$(printf '%s' "${CID}" | base64 -w0)"
+              else
+                ENC="$(printf '%s' "${CID}" | base64)"
+              fi
+              cat > /tmp/secret.json <<EOF
+              {
+                "apiVersion": "v1",
+                "kind": "Secret",
+                "metadata": { "name": "${NAME}", "namespace": "${NS}" },
+                "type": "Opaque",
+                "data": { "CLUSTER_ID": "${ENC}" }
+              }
+              EOF
+
+              # Create or replace (delete then create if it already exists without value)
+              if [ -n "${JSON}" ] && echo "${JSON}" | grep -q '"kind":"Secret"'; then
+                wget -qO- --method=DELETE --header="Authorization: Bearer ${TOKEN}" --ca-certificate="${CACERT}" \
+                  "${API}/api/v1/namespaces/${NS}/secrets/${NAME}" >/dev/null 2>&1 || true
+              fi
+              wget -qO- --header="Authorization: Bearer ${TOKEN}" --header="Content-Type: application/json" \
+                --post-file=/tmp/secret.json --ca-certificate="${CACERT}" \
+                "${API}/api/v1/namespaces/${NS}/secrets" >/dev/null
 
 # ============================================================================
 # Vault CONFIG job — namespace: vault
-# Static DB username; password read from secret/<user>:value in Vault KV
+#   Static DB username; password read from secret/<user>:value in Vault KV
 # ============================================================================
 ---
 apiVersion: batch/v1
@@ -224,7 +259,7 @@ spec:
               export PGPASSWORD="$VAULTADMIN_PASS"
 
               # Ensure DB exists
-              until getent hosts "$PG_HOST" >/dev/null 2>&1; do sleep 3; done
+              until getent hosts "$PG_HOST" >/dev/null 2>&1; do sleep 3; end
               until nc -z -w1 "$PG_HOST" "$PG_PORT"; do sleep 3; done
               DB_EXISTS="$(psql -h "$PG_HOST" -p "$PG_PORT" -U "$VAULTADMIN_USER" -d postgres -Atc \
                 "SELECT 1 FROM pg_database WHERE datname='${PG_DATABASE}'" || true)"
@@ -290,12 +325,8 @@ spec:
               mountPath: /vault-token
               readOnly: true
           resources:
-            requests:
-              cpu: "50m"
-              memory: "64Mi"
-            limits:
-              cpu: "200m"
-              memory: "256Mi"
+            requests: { cpu: "50m", memory: "64Mi" }
+            limits:   { cpu: "200m", memory: "256Mi" }
 
 # ============================================================================
 # One-shot Backfill Job (wave 2) — namespace: kafka
@@ -306,8 +337,7 @@ kind: Job
 metadata:
   name: bq-to-yb-bootstrap
   namespace: kafka
-  labels:
-    app: bq-yb-bootstrap
+  labels: { app: bq-yb-bootstrap }
   annotations:
     argocd.argoproj.io/sync-wave: "2"
 spec:
@@ -315,8 +345,7 @@ spec:
   ttlSecondsAfterFinished: 86400
   template:
     metadata:
-      labels:
-        app: bq-yb-bootstrap
+      labels: { app: bq-yb-bootstrap }
       annotations:
         linkerd.io/inject: "disabled"
         vault.hashicorp.com/agent-inject: "enabled"
@@ -353,8 +382,6 @@ spec:
       volumes:
         - name: vault-secrets
           emptyDir: {}
-        - name: work
-          emptyDir: {}
       containers:
         - name: runner
           image: google/cloud-sdk:latest
@@ -365,8 +392,6 @@ spec:
           volumeMounts:
             - name: vault-secrets
               mountPath: /vault/secrets
-            - name: work
-              mountPath: /work
           command: ["/bin/sh","-lc"]
           args:
             - |
@@ -378,12 +403,10 @@ spec:
               . /vault/secrets/pg.env
               . /vault/secrets/pg-admin.env
               export PGPASSWORD
-
               : "${PGHOST:=yb-tserver-service.yugabyte.svc.cluster.local}"
               : "${PGPORT:=5433}"
               : "${PGDATABASE:=kafka}"
               : "${PGUSER:=vaultadmin}"
-
               apt-get update >/dev/null
               apt-get install -y --no-install-recommends postgresql-client jq >/dev/null
               apt-get clean; rm -rf /var/lib/apt/lists/*
@@ -397,14 +420,11 @@ spec:
                    WHERE table_schema=$$${sch}$$ AND table_name=$$${tbl}$$
                    ORDER BY ordinal_position;" | tr -d '\n'
               }
-
               check_empty() {
                 local sch="$1" tbl="$2"
                 local cnt
                 cnt="$(PGPASSWORD="$PGPASSWORD" psql "host=$PGHOST port=$PGPORT dbname=$PGDATABASE user=$PGUSER sslmode=disable" -Atqc "SELECT COUNT(*) FROM ${sch}.${tbl};" || echo "0")"
-                if [ "$cnt" != "0" ] && [ -z "${ALLOW_NONEMPTY:-}" ]; then
-                  exit 1
-                fi
+                if [ "$cnt" != "0" ] && [ -z "${ALLOW_NONEMPTY:-}" ]; then exit 1; fi
               }
 
               SQL_DISCOVER="
@@ -425,7 +445,6 @@ spec:
                WHERE jdesc ? 'bootstrap'
                  AND COALESCE( (jdesc->'bootstrap'->>'enabled')::boolean, false ) = true;
               "
-
               DISCOVERED="$(PGPASSWORD="$PGPASSWORD" psql "host=$PGHOST port=$PGPORT dbname=$PGDATABASE user=$PGUSER sslmode=disable" -Atqc "$SQL_DISCOVER" || true)"
               echo "$DISCOVERED" | while read -r ROW_JSON; do
                 [ -z "$ROW_JSON" ] && continue
@@ -443,53 +462,20 @@ spec:
                 else
                   COLS="$(echo "$COLS_OVERRIDE" | awk -F',' '{for(i=1;i<=NF;i++){gsub(/^ +| +$/,"",$i); printf "%s\"%s\"", (i>1?",":""), $i}}')"
                 fi
-
                 DEST_URI="gs://${BUCKET}/bootstrap/${PREFIX}/${PREFIX}-*.csv"
                 if [ -n "${LOCATION:-}" ]; then BQ_LOC_FLAG="--location=${LOCATION}"; else BQ_LOC_FLAG=""; fi
-
                 bq ${BQ_LOC_FLAG} --project_id="${PROJECT}" extract \
                   --destination_format="${FMT}" \
                   --field_delimiter="," \
                   --print_header="${HDR}" \
                   "${BQ_TABLE}" \
                   "${DEST_URI}"
-
                 check_empty "$SCH" "$TBL"
                 gsutil cat "gs://${BUCKET}/bootstrap/${PREFIX}/${PREFIX}-*.csv" \
                 | PGPASSWORD="$PGPASSWORD" psql "host=$PGHOST port=$PGPORT dbname=$PGDATABASE user=$PGUSER sslmode=disable" \
                     -v ON_ERROR_STOP=1 \
                     -c "\copy ${SCH}.${TBL} (${COLS}) from stdin with (format csv, header ${HDR})"
               done
-
-              date -Is > /work/done
-        - name: flag-bootstrap-ok
-          image: lachlanevenson/k8s-kubectl:v1.29.4
-          imagePullPolicy: IfNotPresent
-          volumeMounts:
-            - name: work
-              mountPath: /work
-          command: ["/bin/sh","-lc"]
-          args:
-            - |
-              set -e
-              i=0
-              while [ ! -s /work/done ]; do
-                i=$((i+1)); [ $i -gt 360 ] && exit 1
-                sleep 2
-              done
-              TS="$(cat /work/done)"
-              cat <<EOF | kubectl -n kafka apply -f -
-              apiVersion: v1
-              kind: ConfigMap
-              metadata:
-                name: bootstrap.ok
-                namespace: kafka
-                labels:
-                  app: bq-yb-bootstrap
-              data:
-                status: "complete"
-                completedAt: "${TS}"
-              EOF
 
 # ============================================================================
 # Kafka (wave 2): single-broker KRaft — reads CLUSTER_ID from Secret
@@ -538,12 +524,10 @@ spec:
   serviceName: kafka-hs
   replicas: 1
   selector:
-    matchLabels:
-      app: kafka
+    matchLabels: { app: kafka }
   template:
     metadata:
-      labels:
-        app: kafka
+      labels: { app: kafka }
       annotations:
         linkerd.io/inject: "disabled"
     spec:
@@ -557,7 +541,7 @@ spec:
                 secretKeyRef:
                   name: kafka-cluster-id
                   key: CLUSTER_ID
-          command: ["bash","-lc"]
+          command: ["/bin/sh","-lc"]
           args:
             - |
               set -euo pipefail
@@ -579,12 +563,8 @@ spec:
         - name: broker
           image: apache/kafka:3.9.0
           imagePullPolicy: IfNotPresent
+          # NOTE: do NOT set CLUSTER_ID here; only initContainer formats storage.
           env:
-            - name: CLUSTER_ID
-              valueFrom:
-                secretKeyRef:
-                  name: kafka-cluster-id
-                  key: CLUSTER_ID
             - name: KAFKA_NODE_ID
               value: "1"
             - name: KAFKA_PROCESS_ROLES
@@ -616,12 +596,8 @@ spec:
             - name: kafka-logs
               mountPath: /tmp/kraft-combined-logs
           resources:
-            requests:
-              cpu: "250m"
-              memory: "512Mi"
-            limits:
-              cpu: "1000m"
-              memory: "1Gi"
+            requests: { cpu: "250m", memory: "512Mi" }
+            limits:   { cpu: "1000m", memory: "1Gi" }
       volumes:
         - name: kafka-logs
           emptyDir: {}
@@ -656,12 +632,10 @@ metadata:
 spec:
   replicas: 1
   selector:
-    matchLabels:
-      app: kafka-connect
+    matchLabels: { app: kafka-connect }
   template:
     metadata:
-      labels:
-        app: kafka-connect
+      labels: { app: kafka-connect }
       annotations:
         linkerd.io/inject: "disabled"
     spec:
@@ -671,7 +645,7 @@ spec:
       initContainers:
         - name: install-plugins
           image: confluentinc/cp-kafka-connect:7.6.1
-          command: ["bash","-lc"]
+          command: ["/bin/sh","-lc"]
           args:
             - |
               set -e
@@ -729,18 +703,12 @@ spec:
           ports:
             - containerPort: 8083
           readinessProbe:
-            httpGet:
-              path: /connectors
-              port: 8083
+            httpGet: { path: /connectors, port: 8083 }
             initialDelaySeconds: 20
             periodSeconds: 5
           resources:
-            requests:
-              cpu: "250m"
-              memory: "512Mi"
-            limits:
-              cpu: "1000m"
-              memory: "1Gi"
+            requests: { cpu: "250m", memory: "512Mi" }
+            limits:   { cpu: "1000m", memory: "1Gi" }
           volumeMounts:
             - name: plugins
               mountPath: /plugins
@@ -756,46 +724,50 @@ metadata:
   namespace: kafka
   annotations:
     argocd.argoproj.io/sync-wave: "5"
+    vault.hashicorp.com/agent-inject: "true"
+    vault.hashicorp.com/role: "data-bootstrap"
+    vault.hashicorp.com/agent-inject-secret-yb: "secret/data/kafka/pgconfig"
+    vault.hashicorp.com/agent-inject-template-yb: |
+      {{- with secret "secret/data/kafka/pgconfig" -}}
+      {{ with .Data.data.host }}PGHOST={{ . }}{{ end }}
+      {{ with .Data.data.port }}PGPORT={{ . }}{{ end }}
+      {{ with .Data.data.database }}PGDATABASE={{ . }}{{ end }}
+      {{ with .Data.data.user }}PGUSER={{ . }}{{ end }}
+      {{ with .Data.data.master_addresses }}YB_MASTER_ADDRESSES={{ . }}{{ end }}
+      {{- end }}
+    vault.hashicorp.com/agent-inject-secret-bq: "secret/data/kafka/bq/config"
+    vault.hashicorp.com/agent-inject-template-bq: |
+      {{- with secret "secret/data/kafka/bq/config" -}}
+      {{ with .Data.data.project }}BQ_PROJECT={{ . }}{{ end }}
+      {{ with .Data.data.dataset }}BQ_DEFAULT_DATASET={{ . }}{{ end }}
+      {{ with .Data.data.sa_json }}BQ_KEY_JSON={{ . | toJSON }}{{ end }}
+      {{- end }}
+    vault.hashicorp.com/agent-inject-secret-pgpass.env: "secret/data/vaultadmin"
+    vault.hashicorp.com/agent-inject-template-pgpass.env: |
+      {{- with secret "secret/data/vaultadmin" -}}
+      PGPASSWORD={{ .Data.data.value }}
+      {{- end }}
 spec:
   template:
     metadata:
       annotations:
         linkerd.io/inject: "disabled"
-        vault.hashicorp.com/agent-inject: "true"
-        vault.hashicorp.com/role: "data-bootstrap"
-        vault.hashicorp.com/agent-inject-secret-yb: "secret/data/kafka/pgconfig"
-        vault.hashicorp.com/agent-inject-template-yb: |
-          {{- with secret "secret/data/kafka/pgconfig" -}}
-          {{ with .Data.data.host }}PGHOST={{ . }}{{ end }}
-          {{ with .Data.data.port }}PGPORT={{ . }}{{ end }}
-          {{ with .Data.data.database }}PGDATABASE={{ . }}{{ end }}
-          {{ with .Data.data.user }}PGUSER={{ . }}{{ end }}
-          {{ with .Data.data.master_addresses }}YB_MASTER_ADDRESSES={{ . }}{{ end }}
-          {{- end }}
-        vault.hashicorp.com/agent-inject-secret-bq: "secret/data/kafka/bq/config"
-        vault.hashicorp.com/agent-inject-template-bq: |
-          {{- with secret "secret/data/kafka/bq/config" -}}
-          {{ with .Data.data.project }}BQ_PROJECT={{ . }}{{ end }}
-          {{ with .Data.data.dataset }}BQ_DEFAULT_DATASET={{ . }}{{ end }}
-          {{ with .Data.data.sa_json }}BQ_KEY_JSON={{ . | toJSON }}{{ end }}
-          {{- end }}
-        vault.hashicorp.com/agent-inject-secret-pgpass.env: "secret/data/vaultadmin"
-        vault.hashicorp.com/agent-inject-template-pgpass.env: |
-          {{- with secret "secret/data/vaultadmin" -}}
-          PGPASSWORD={{ .Data.data.value }}
-          {{- end }}
     spec:
       serviceAccountName: bq-yb-bootstrap
       restartPolicy: OnFailure
       initContainers:
         - name: wait-bootstrap-ok
-          image: lachlanevenson/k8s-kubectl:v1.29.4
-          imagePullPolicy: IfNotPresent
+          image: alpine:3.19
           command: ["/bin/sh","-lc"]
           args:
             - |
               set -e
-              until [ "$(kubectl -n kafka get configmap bootstrap.ok -o jsonpath='{.data.status}' 2>/dev/null || true)" = "complete" ]; do
+              API="https://kubernetes.default.svc"
+              TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+              CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+              until [ "$(wget -qO- --header="Authorization: Bearer ${TOKEN}" --ca-certificate="${CACERT}" \
+                "${API}/api/v1/namespaces/kafka/configmaps/bootstrap.ok" \
+                | sed -n 's/.*"status":"\([^"]*\)".*/\1/p')" = "complete" ]; do
                 sleep 5
               done
       containers:
@@ -832,7 +804,6 @@ spec:
                     and ((comment::jsonb -> 'bootstrap' ->> 'enabled')::boolean is true);
                 "
               )
-
               if [ ${#ROWS[@]} -eq 0 ]; then
                 echo "No flagged tables found; exiting."
                 exit 0
@@ -911,15 +882,10 @@ spec:
               JSON
               wget --method=PUT --header="Content-Type: application/json" \
                    --body-file=/tmp/bq-sink.json \
-                   -qO- http://kafka-connect.kafka.svc.cluster.local:8083/connectors/bq-sink/config >/dev/null 2>&1 \
+                   -qO- http://kafka-connect.kafka.svc.cluster.local:8083/connectors/bq-sink/config >/devnull 2>&1 \
               || wget --header="Content-Type: application/json" \
                       --post-file=/tmp/bq-sink.json \
                       -qO- http://kafka-connect.kafka.svc.cluster.local:8083/connectors >/dev/null
-
           resources:
-            requests:
-              cpu: "200m"
-              memory: "256Mi"
-            limits:
-              cpu: "1000m"
-              memory: "512Mi"
+            requests: { cpu: "200m", memory: "256Mi" }
+            limits:   { cpu: "1000m", memory: "512Mi" }
