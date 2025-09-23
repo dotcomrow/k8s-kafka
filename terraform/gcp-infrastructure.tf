@@ -251,59 +251,86 @@ resource "google_project_iam_audit_config" "pubsub_data_access" {
 }
 
 
+# Who is calling Pub/Sub? This supplies the OAuth2 access token for curl.
+data "google_client_config" "cur" {}
+
 resource "null_resource" "notify_secret_version" {
+  # Re-run when a new version is created
   triggers = {
-    version = google_secret_manager_secret_version.k8s_kafka_sa_json_v.name
+    version        = google_secret_manager_secret_version.k8s_kafka_sa_json_v.name
+    topic          = var.vault_sync_topic_name
+    secrets_proj   = var.secrets_project_id
+    secret_id      = google_secret_manager_secret.k8s_kafka_sa_json.secret_id
   }
 
   provisioner "local-exec" {
-  interpreter = ["/bin/bash", "-c"]
-  command = <<-EOT
-            set -euo pipefail
+    interpreter = ["/bin/bash", "-c"]
+    command = <<-EOT
+        set -euo pipefail
 
-            PROJECT="$${SECRETS_PROJECT_ID}"
-            TOPIC="$${TOPIC_NAME}"
-            SECRET_ID="$${SECRET_ID}"
-            ACCESS_TOKEN="$${ACCESS_TOKEN}"
+        # -------- Inputs from Terraform (non-sensitive) ----------
+        PROJECT="$${SECRETS_PROJECT_ID}"
+        TOPIC="$${TOPIC_NAME}"
+        SECRET_ID="$${SECRET_ID}"
 
-            PAYLOAD="$(cat <<EOF
-            {
-            "event": "secret.version.added",
-            "gcp_project": "$PROJECT",
-            "secret_id": "$SECRET_ID",
-            "version": "latest",
-            "vault_path": "secret/$SECRET_ID",
-            "timestamp": "$(date -u +%FT%TZ)"
-            }
-            EOF
-            )"
+        # -------- Access token (sensitive) ----------
+        ACCESS_TOKEN="$${ACCESS_TOKEN}"
 
-            BASE64_PAYLOAD="$(printf '%s' "$PAYLOAD" | base64 | tr -d '\n')"
+        # Print non-sensitive diagnostics
+        echo "▶ Pub/Sub publish debug"
+        echo "  project        = $PROJECT"
+        echo "  topic          = $TOPIC"
+        echo "  secret_id      = $SECRET_ID"
+        # Print a token fingerprint only (no secrets in logs)
+        if command -v sha256sum >/dev/null 2>&1; then
+            echo "  access_token_sha256 = $(printf '%s' "$${ACCESS_TOKEN}" | sha256sum | cut -d' ' -f1)"
+        else
+            echo "  access_token_present = $([ -n "$${ACCESS_TOKEN}" ] && echo yes || echo no)"
+        fi
 
-            curl -sS -X POST \
-            -H "Authorization: Bearer $ACCESS_TOKEN" \
-            -H "Content-Type: application/json" \
-            "https://pubsub.googleapis.com/v1/projects/$PROJECT/topics/$TOPIC:publish" \
-            -d "{\"messages\":[{\"data\":\"$BASE64_PAYLOAD\"}]}" >/dev/null
+        # Build an audit-style payload your Cloud Run expects
+        # (Matches your sync service which looks at protoPayload.methodName/resourceName)
+        PAYLOAD_JSON="$(jq -nc \
+            --arg method  "google.cloud.secretmanager.v1.SecretManagerService.AddSecretVersion" \
+            --arg rname   "projects/$${PROJECT}/secrets/$${SECRET_ID}/versions/latest" \
+            '{protoPayload:{serviceName:"secretmanager.googleapis.com", methodName:$method, resourceName:$rname}}')"
 
-            echo "Published manual sync event to Pub/Sub topic: $TOPIC"
-        EOT
+        # Show payload sizes, not contents
+        echo "  payload_len    = $(printf '%s' "$${PAYLOAD_JSON}" | wc -c | tr -d ' ') bytes"
 
-        environment = {
-            ACCESS_TOKEN       = data.google_client_config.cur.access_token
-            SECRETS_PROJECT_ID = var.secrets_project_id
-            TOPIC_NAME         = var.vault_sync_topic_name
-            SECRET_ID          = google_secret_manager_secret.k8s_kafka_sa_json.secret_id
-        }
+        # Base64 encode for Pub/Sub
+        payload_b64_len="$(printf '%s' "$${BASE64_PAYLOAD}" | wc -c | tr -d ' ')"
+        echo "  payload_b64_len= $payload_b64_len bytes"
+
+        PUB_BODY="$(jq -nc --arg d "$${BASE64_PAYLOAD}" '{messages:[{data:$d}]}' )"
+
+        RESP_FILE="$(mktemp)"
+        HTTP_CODE="$(curl -sS -o "$${RESP_FILE}" -w '%{http_code}' \
+        -H "Authorization: Bearer $${ACCESS_TOKEN}" \
+        -H "Content-Type: application/json" \
+        "https://pubsub.googleapis.com/v1/projects/$${PROJECT}/topics/$${TOPIC}:publish" \
+        -d "$${PUB_BODY}")"
+
+        echo "  http_code      = $${HTTP_CODE}"
+        echo "  response_body  = $(head -c 1000 "$${RESP_FILE}")"
+        rm -f "$${RESP_FILE}"
+
+        if [ "$${HTTP_CODE}" -lt 200 ] || [ "$${HTTP_CODE}" -ge 300 ]; then
+        echo "❌ Publish failed (HTTP $${HTTP_CODE})" >&2
+        exit 1
+        fi
+
+      echo "✅ Published manual sync event to Pub/Sub: topic=$${TOPIC}"
+    EOT
+
+    environment = {
+      ACCESS_TOKEN       = data.google_client_config.cur.access_token   # sensitive (don’t echo raw)
+      SECRETS_PROJECT_ID = var.secrets_project_id                       # non-sensitive
+      TOPIC_NAME         = var.vault_sync_topic_name                    # non-sensitive
+      SECRET_ID          = google_secret_manager_secret.k8s_kafka_sa_json.secret_id
     }
+  }
 }
-
-# Make sure Pub/Sub is enabled in the project that owns the topic (if you manage it here)
-resource "google_project_service" "pubsub" {
-  project = var.secrets_project_id
-  service = "pubsub.googleapis.com"
-}
-
 
 ########################################
 # Outputs (wire these into your Vault config job)
