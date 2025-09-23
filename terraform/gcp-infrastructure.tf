@@ -373,7 +373,7 @@ resource "null_resource" "notify_secret_version" {
       PUB_BODY="$(jq -nc --arg d "$AUDIT_B64" '{messages:[{data:$d}]}' )"
 
       RESP_FILE="$(mktemp)"
-      HTTP_CODE="$(curl -sS -o "$RESP_FILE" -w '%{http_code}' \
+      HTTP_CODE="$(curl -sS -o "$RESP_FILE" -w '%%{http_code}' \
         -H "Authorization: Bearer $ACCESS_TOKEN" \
         -H "Content-Type: application/json" \
         "https://pubsub.googleapis.com/v1/$TOPIC_FQN:publish" \
