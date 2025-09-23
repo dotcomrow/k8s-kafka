@@ -95,10 +95,13 @@ spec:
             - name: BQ_BOOTSTRAP_LOCATION
               value: "US"
             - name: BQ_BOOTSTRAP_PROJECT
-              value: "<path:secret/data/k8s-kafka-gcp-project-id#value>"
+              value: "k8s-kafka-774d"
             - name: BQ_PROJECT
-              value: "<path:secret/data/k8s-kafka-gcp-project-id#value>"
-
+              value: "k8s-kafka-774d"
+            - name: BQ_BOOTSTRAP_BUCKET
+              value: "suncoast-systems-yb-bootstrap"
+            - name: BQ_DEFAULT_DATASET
+              value: "yugabyte_backup"
           command: ["/bin/sh","-c"]
           args: |
             set -euo pipefail
