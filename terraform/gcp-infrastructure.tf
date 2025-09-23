@@ -281,101 +281,121 @@ resource "null_resource" "notify_secret_version" {
   provisioner "local-exec" {
     interpreter = ["/bin/bash", "-c"]
     command = <<-EOT
-      set -euo pipefail
+        set -euo pipefail
 
-      PROJECT="$SECRETS_PROJECT_ID"
-      REGION="$REGION"
-      SECRET_ID="$SECRET_ID"
-      ACCESS_TOKEN="$ACCESS_TOKEN"
-      TOPIC_HINT="$TOPIC_HINT"
+        PROJECT="$SECRETS_PROJECT_ID"
+        REGION="$REGION"
+        SECRET_ID="$SECRET_ID"
+        ACCESS_TOKEN="$ACCESS_TOKEN"
+        TOPIC_HINT="$TOPIC_HINT"
 
-      echo "▶ Pub/Sub publish debug"
-      echo "  project   = $PROJECT"
-      echo "  region    = $REGION"
-      echo "  secret_id = $SECRET_ID"
+        echo "▶ Pub/Sub publish debug"
+        echo "  project   = $PROJECT"
+        echo "  region    = $REGION"
+        echo "  secret_id = $SECRET_ID"
 
-      # ---------- Resolve Eventarc trigger topic ----------
-      if [ -n "$TOPIC_HINT" ]; then
-        if [[ "$TOPIC_HINT" == projects/*/topics/* ]]; then
-          TOPIC_FQN="$TOPIC_HINT"
+        # ---------- Resolve Eventarc trigger topic ----------
+        if [ -n "$TOPIC_HINT" ]; then
+            if [[ "$TOPIC_HINT" == projects/*/topics/* ]]; then
+            TOPIC_FQN="$TOPIC_HINT"
+            else
+            TOPIC_FQN="projects/$PROJECT/topics/$TOPIC_HINT"
+            fi
+            echo "✅ Using override topic: $TOPIC_FQN"
         else
-          TOPIC_FQN="projects/$PROJECT/topics/$TOPIC_HINT"
-        fi
-        echo "✅ Using override topic: $TOPIC_FQN"
-      else
-        # Need jq for discovery
-        if ! command -v jq >/dev/null 2>&1; then
-          echo "❌ jq is required in the runner"; exit 1
-        fi
+            # Need jq for discovery
+            if ! command -v jq >/dev/null 2>&1; then
+            echo "❌ jq is required in the runner"; exit 1
+            fi
 
-        # List topics with status check
-        LIST_FILE="$(mktemp)"
-        LIST_CODE="$(curl -sS -o "$LIST_FILE" -w '%%{http_code}' \
-          -H "Authorization: Bearer $ACCESS_TOKEN" \
-          "https://pubsub.googleapis.com/v1/projects/$PROJECT/topics?pageSize=1000")"
+            # List topics with status check
+            LIST_FILE="$(mktemp)"
+            LIST_CODE="$(curl -sS -o "$LIST_FILE" -w '%%{http_code}' \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            "https://pubsub.googleapis.com/v1/projects/$PROJECT/topics?pageSize=1000")"
 
-        if [ "$LIST_CODE" -lt 200 ] || [ "$LIST_CODE" -ge 300 ]; then
-          echo "❌ Pub/Sub list topics failed ($LIST_CODE): $(head -c 1000 "$LIST_FILE")"
-          rm -f "$LIST_FILE"
-          exit 1
-        fi
+            if [ "$LIST_CODE" -lt 200 ] || [ "$LIST_CODE" -ge 300 ]; then
+            echo "❌ Pub/Sub list topics failed ($LIST_CODE): $(head -c 1000 "$LIST_FILE")"
+            rm -f "$LIST_FILE"
+            exit 1
+            fi
 
-        # Show a quick sample of discovered names (first 8) for debugging
-        echo "  discovered topics (first few):"
-        jq -r '(.topics // []) | .[].name' "$LIST_FILE" | head -n 8 | sed 's/^/    - /'
+            # Show a quick sample of discovered names (first 8) for debugging
+            echo "  discovered topics (first few):"
+            jq -r '(.topics // []) | .[].name' "$LIST_FILE" | head -n 8 | sed 's/^/    - /'
 
-        # Prefer names that contain: eventarc-<region>- … add-version … trigger-
-        TOPIC_FQN="$(jq -r --arg region "$REGION" '
-          (.topics // []) | .[].name
-          | select(contains("eventarc-" + $region + "-") and contains("add-version") and contains("trigger-"))
-        ' "$LIST_FILE" | head -n1 || true)"
-
-        # Fallback to the non-trigger variant (… add-version … topic)
-        if [ -z "$TOPIC_FQN" ]; then
-          TOPIC_FQN="$(jq -r --arg region "$REGION" '
+            # Prefer names that contain: eventarc-<region>- … add-version … trigger-
+            TOPIC_FQN="$(jq -r --arg region "$REGION" '
             (.topics // []) | .[].name
-            | select(contains("eventarc-" + $region + "-") and contains("add-version") and contains("-topic"))
-          ' "$LIST_FILE" | head -n1 || true)"
+            | select(contains("eventarc-" + $region + "-") and contains("add-version") and contains("trigger-"))
+            ' "$LIST_FILE" | head -n1 || true)"
+
+            # Fallback to the non-trigger variant (… add-version … topic)
+            if [ -z "$TOPIC_FQN" ]; then
+            TOPIC_FQN="$(jq -r --arg region "$REGION" '
+                (.topics // []) | .[].name
+                | select(contains("eventarc-" + $region + "-") and contains("add-version") and contains("-topic"))
+            ' "$LIST_FILE" | head -n1 || true)"
+            fi
+
+            rm -f "$LIST_FILE"
+
+            if [ -z "$TOPIC_FQN" ]; then
+            echo "❌ Could not find *any* Eventarc AddSecretVersion topic in region $REGION."
+            echo "   Tip: set var.eventarc_add_version_trigger_topic_hint to the exact topic FQN."
+            exit 1
+            fi
+
+            echo "✅ Using topic: $TOPIC_FQN"
         fi
 
-        rm -f "$LIST_FILE"
+        # ---------- Build a Cloud Logging AuditLog entry (what Eventarc expects) ----------
+        NOW_UTC="$(date -u +%FT%TZ)"
+        SERVICE="secretmanager.googleapis.com"
+        METHOD="google.cloud.secretmanager.v1.SecretManagerService.AddSecretVersion"
+        RESOURCE="projects/$PROJECT/secrets/$SECRET_ID/versions/latest"
+        LOGNAME="projects/$PROJECT/logs/cloudaudit.googleapis.com%2Factivity"
 
-        if [ -z "$TOPIC_FQN" ]; then
-          echo "❌ Could not find *any* Eventarc AddSecretVersion topic in region $REGION."
-          echo "   Tip: set var.eventarc_add_version_trigger_topic_hint to the exact topic FQN."
-          exit 1
-        fi
+        LOG_ENTRY_JSON="$(
+        jq -nc \
+            --arg logName "$LOGNAME" \
+            --arg ts "$NOW_UTC" \
+            --arg svc "$SERVICE" \
+            --arg m "$METHOD" \
+            --arg rn "$RESOURCE" \
+            '{
+            logName: $logName,
+            resource: { type: "audited_resource" },
+            timestamp: $ts,
+            protoPayload: {
+                "@type": "type.googleapis.com/google.cloud.audit.AuditLog",
+                serviceName: $svc,
+                methodName:  $m,
+                resourceName:$rn
+            }
+            }'
+        )"
 
-        echo "✅ Using topic: $TOPIC_FQN"
-      fi
+        echo "  payload_len = $(printf '%s' "$LOG_ENTRY_JSON" | wc -c | tr -d ' ') bytes"
 
-      # ---------- Build an AuditLog-shaped payload (what your sync service expects) ----------
-      SERVICE="secretmanager.googleapis.com"
-      METHOD="google.cloud.secretmanager.v1.SecretManagerService.AddSecretVersion"
-      RESOURCE="projects/$PROJECT/secrets/$SECRET_ID/versions/latest"
+        BASE64_PAYLOAD="$(printf '%s' "$LOG_ENTRY_JSON" | base64 | tr -d '\n')"
+        PUB_BODY="$(jq -nc --arg d "$BASE64_PAYLOAD" '{messages:[{data:$d}]}' )"
 
-      PAYLOAD_JSON="$(jq -nc --arg svc "$SERVICE" --arg m "$METHOD" --arg rn "$RESOURCE" \
-        '{protoPayload:{serviceName:$svc, methodName:$m, resourceName:$rn}}')"
-      echo "  payload_len = $(printf '%s' "$PAYLOAD_JSON" | wc -c | tr -d ' ') bytes"
-
-      BASE64_PAYLOAD="$(printf '%s' "$PAYLOAD_JSON" | base64 | tr -d '\n')"
-      PUB_BODY="$(jq -nc --arg d "$BASE64_PAYLOAD" '{messages:[{data:$d}]}' )"
-
-      # ---------- Publish ----------
-      RESP_FILE="$(mktemp)"
-      HTTP_CODE="$(curl -sS -o "$RESP_FILE" -w '%%{http_code}' \
+        # ---------- Publish to the resolved trigger topic FQN in $TOPIC_FQN ----------
+        RESP_FILE="$(mktemp)"
+        HTTP_CODE="$(curl -sS -o "$RESP_FILE" -w '%%{http_code}' \
         -H "Authorization: Bearer $ACCESS_TOKEN" \
         -H "Content-Type: application/json" \
         "https://pubsub.googleapis.com/v1/$TOPIC_FQN:publish" \
         -d "$PUB_BODY")"
 
-      echo "  publish_http_code = $HTTP_CODE"
-      echo "  publish_response  = $(head -c 1000 "$RESP_FILE")"
-      rm -f "$RESP_FILE"
+        echo "  publish_http_code = $HTTP_CODE"
+        echo "  publish_response  = $(head -c 1000 "$RESP_FILE")"
+        rm -f "$RESP_FILE"
 
-      if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+        if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
         echo "❌ Publish failed (HTTP $HTTP_CODE)"; exit 1
-      fi
+        fi
 
       echo "✅ Published manual sync event to Pub/Sub."
     EOT
