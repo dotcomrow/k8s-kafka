@@ -331,7 +331,7 @@ resource "null_resource" "notify_secret_version" {
         ' "$LIST_FILE" | head -n1 || true)"
 
         # Fallback to the non-trigger variant (… add-version … topic)
-        if [ -z "${TOPIC_FQN:-}" ]; then
+        if [ -z "$TOPIC_FQN" ]; then
           TOPIC_FQN="$(jq -r --arg region "$REGION" '
             (.topics // []) | .[].name
             | select(contains("eventarc-" + $region + "-") and contains("add-version") and contains("-topic"))
@@ -340,7 +340,7 @@ resource "null_resource" "notify_secret_version" {
 
         rm -f "$LIST_FILE"
 
-        if [ -z "${TOPIC_FQN:-}" ]; then
+        if [ -z "$TOPIC_FQN" ]; then
           echo "❌ Could not find *any* Eventarc AddSecretVersion topic in region $REGION."
           echo "   Tip: set var.eventarc_add_version_trigger_topic_hint to the exact topic FQN."
           exit 1
