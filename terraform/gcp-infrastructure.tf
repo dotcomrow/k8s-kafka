@@ -256,14 +256,6 @@ resource "google_project_iam_audit_config" "pubsub_data_access" {
 # ---------- inputs ----------
 variable "vault_sync_topic_name" { type = string } # e.g. "eventarc-us-east1-vault-add-version-topic"
 
-data "google_client_config" "cur" {}
-
-resource "google_project_iam_audit_config" "pubsub_data_access" {
-  project = var.secrets_project_id
-  service = "pubsub.googleapis.com"
-  audit_log_config { log_type = "DATA_WRITE" }
-}
-
 resource "null_resource" "notify_secret_version" {
   triggers = {
     version      = google_secret_manager_secret_version.k8s_kafka_sa_json_v.name
@@ -280,7 +272,7 @@ resource "null_resource" "notify_secret_version" {
 
       # ===== Inputs from TF env (non-sensitive) =====
       PROJECT="$SECRETS_PROJECT_ID"
-      TOPIC="${TOPIC_NAME:-}"
+      TOPIC="$TOPIC_NAME"
       SECRET_ID="$SECRET_ID"
       REGION="$REGION"
 
