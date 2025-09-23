@@ -51,7 +51,6 @@ roleRef:
 # ============================================================================
 # Kafka cluster.id generator — namespace: kafka
 # Creates/keeps Secret kafka-cluster-id (key: CLUSTER_ID)
-# (Ordered before Kafka via sync-wave, no hooks used)
 # ============================================================================
 ---
 apiVersion: v1
@@ -105,7 +104,9 @@ spec:
       serviceAccountName: kafka-clusterid-gen
       containers:
         - name: make-and-apply
-          image: registry.k8s.io/kubectl:v1.29.4
+          # NOTE: this image has /bin/sh AND kubectl
+          image: lachlanevenson/k8s-kubectl:v1.29.4
+          imagePullPolicy: IfNotPresent
           command: ["/bin/sh","-lc"]
           args:
             - |
@@ -118,7 +119,7 @@ spec:
                   exit 0
                 fi
               fi
-              # Generate Base64URL 22 chars (Kafka-style)
+              # Generate Kafka-style base64url (22 chars from 16 random bytes)
               CID="$(head -c 16 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=[:space:]' | cut -c1-22)"
               echo "Generated cluster.id: ${CID}"
               kubectl -n "$NS" create secret generic kafka-cluster-id \
@@ -462,7 +463,7 @@ spec:
 
               date -Is > /work/done
         - name: flag-bootstrap-ok
-          image: registry.k8s.io/kubectl:v1.29.4
+          image: lachlanevenson/k8s-kubectl:v1.29.4
           imagePullPolicy: IfNotPresent
           volumeMounts:
             - name: work
@@ -788,7 +789,8 @@ spec:
       restartPolicy: OnFailure
       initContainers:
         - name: wait-bootstrap-ok
-          image: registry.k8s.io/kubectl:v1.29.4
+          image: lachlanevenson/k8s-kubectl:v1.29.4
+          imagePullPolicy: IfNotPresent
           command: ["/bin/sh","-lc"]
           args:
             - |
