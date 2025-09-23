@@ -267,7 +267,6 @@ resource "null_resource" "notify_secret_version" {
     version      = google_secret_manager_secret_version.k8s_kafka_sa_json_v.name
     secrets_proj = var.secrets_project_id
     secret_id    = google_secret_manager_secret.k8s_kafka_sa_json.secret_id
-    topic_hint   = var.vault_sync_topic_name  # optional, may be empty
   }
 
   provisioner "local-exec" {
@@ -279,7 +278,6 @@ resource "null_resource" "notify_secret_version" {
       PROJECT="$${SECRETS_PROJECT_ID}"
       REGION="$${REGION}"
       SECRET_ID="$${SECRET_ID}"
-      TOPIC_HINT="$${TOPIC_NAME}"          # may be empty
       ACCESS_TOKEN="$${ACCESS_TOKEN}"
 
       echo "▶ Pub/Sub publish debug"
@@ -287,23 +285,31 @@ resource "null_resource" "notify_secret_version" {
       echo "  region    = $REGION"
       echo "  secret_id = $SECRET_ID"
 
-      # -------- Resolve topic FQN ----------
-      TOPIC_FQN=""
-      if [ -n "$TOPIC_HINT" ]; then
-        TOPIC_FQN="projects/$PROJECT/topics/$TOPIC_HINT"
-      else
-        PREFIX="projects/$PROJECT/topics/eventarc-$REGION-vault-add-version-trigger-"
-        LIST_JSON="$(curl -sS -H "Authorization: Bearer $ACCESS_TOKEN" \
-          "https://pubsub.googleapis.com/v1/projects/$PROJECT/topics")"
-        TOPIC_FQN="$(printf '%s' "$LIST_JSON" | jq -r --arg p "$PREFIX" '.topics[]?.name | select(startswith($p))' | head -n1 || true)"
+      # -------- Auto-discover Eventarc trigger topic ----------
+      # Prefer the *trigger* topic, fallback to the plain "topic" if present.
+      TRIGGER_PREFIX="projects/$PROJECT/topics/eventarc-$REGION-vault-add-version-trigger-"
+      PLAIN_NAME="projects/$PROJECT/topics/eventarc-$REGION-vault-add-version-topic"
+
+      LIST_JSON="$(curl -sS -H "Authorization: Bearer $ACCESS_TOKEN" \
+        "https://pubsub.googleapis.com/v1/projects/$PROJECT/topics")"
+
+      TOPIC_FQN="$(printf '%s' "$LIST_JSON" \
+        | jq -r --arg p "$TRIGGER_PREFIX" '.topics[]?.name | select(startswith($p))' \
+        | head -n1 || true)"
+
+      if [ -z "$TOPIC_FQN" ]; then
+        # Check the plain (non-trigger) Eventarc topic as a fallback
+        TOPIC_FQN="$(printf '%s' "$LIST_JSON" \
+          | jq -r --arg name "$PLAIN_NAME" '(.topics[]?.name // empty) | select(. == $name)' \
+          | head -n1 || true)"
       fi
 
       if [ -z "$TOPIC_FQN" ]; then
-        echo "❌ No Eventarc trigger topic found (and no TOPIC_HINT provided)"; exit 1
+        echo "❌ No Eventarc topic found (neither trigger nor plain)."; exit 1
       fi
       echo "✅ Using topic: $TOPIC_FQN"
 
-      # -------- Build payload (what your sync service expects) ----------
+      # -------- Build payload expected by sync service ----------
       PAYLOAD_JSON="$(jq -nc \
         --arg method  "google.cloud.secretmanager.v1.SecretManagerService.AddSecretVersion" \
         --arg svc     "secretmanager.googleapis.com" \
@@ -337,7 +343,6 @@ resource "null_resource" "notify_secret_version" {
       ACCESS_TOKEN       = data.google_client_config.cur.access_token
       SECRETS_PROJECT_ID = var.secrets_project_id
       REGION             = var.region
-      TOPIC_NAME         = var.vault_sync_topic_name   # leave empty to auto-discover
       SECRET_ID          = google_secret_manager_secret.k8s_kafka_sa_json.secret_id
     }
   }
