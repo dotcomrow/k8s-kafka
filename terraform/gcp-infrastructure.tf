@@ -251,30 +251,30 @@ resource "null_resource" "notify_secret_version" {
     interpreter = ["/bin/bash", "-c"]
     command = <<EOT
             set -euo pipefail
-            PROJECT="${SECRETS_PROJECT_ID}"
-            TOPIC="${TOPIC_NAME}"
-            SECRET_ID="${SECRET_ID}"
+            PROJECT="$${SECRETS_PROJECT_ID}"
+            TOPIC="$${TOPIC_NAME}"
+            SECRET_ID="$${SECRET_ID}"
 
             # Build payload your Cloud Run sync expects
             read -r -d '' PAYLOAD <<JSON
             {
             "event": "secret.version.added",
-            "gcp_project": "${PROJECT}",
-            "secret_id": "${SECRET_ID}",
+            "gcp_project": "$${PROJECT}",
+            "secret_id": "$${SECRET_ID}",
             "version": "latest",
-            "vault_path": "secret/${SECRET_ID}",
+            "vault_path": "secret/$${SECRET_ID}",
             "timestamp": "$(date -u +%FT%TZ)"
             }
             JSON
 
             # Publish (Pub/Sub requires base64-encoded data)
             curl -sS -X POST \
-            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -H "Authorization: Bearer $${ACCESS_TOKEN}" \
             -H "Content-Type: application/json" \
-            "https://pubsub.googleapis.com/v1/projects/${PROJECT}/topics/${TOPIC}:publish" \
-            -d "$(jq -nc --arg d "$(echo -n "$PAYLOAD" | base64)" '{messages:[{data:$d}]}' )" > /dev/null
+            "https://pubsub.googleapis.com/v1/projects/$${PROJECT}/topics/$${TOPIC}:publish" \
+            -d "$(jq -nc --arg d "$(echo -n "$${PAYLOAD}" | base64)" '{messages:[{data:$d}]}' )" > /dev/null
 
-            echo "Published manual sync event to Pub/Sub topic: ${TOPIC}"
+            echo "Published manual sync event to Pub/Sub topic: $${TOPIC}"
     EOT
     environment = {
       ACCESS_TOKEN       = data.google_client_config.cur.access_token
