@@ -397,7 +397,7 @@ spec:
       containers:
         # 1) importer: discovers tables, waits for CSVs, imports into YB
         - name: importer
-          image: yugabytedb/yugabyte:2024.2.2.0-b105
+          image: yugabytedb/yugabyte:latest
           imagePullPolicy: IfNotPresent
           env:
             - name: CLOUDSDK_CORE_DISABLE_PROMPTS
@@ -826,8 +826,6 @@ spec:
     metadata:
       annotations:
         linkerd.io/inject: "disabled"
-
-        # Vault injector MUST be on the pod template:
         vault.hashicorp.com/agent-inject: "true"
         vault.hashicorp.com/role: "data-bootstrap"
 
@@ -877,7 +875,7 @@ spec:
               done
       containers:
         - name: registrar
-          image: yugabytedb/yugabyte:2024.2.2.0-b105
+          image: yugabytedb/yugabyte:latest
           command: ["/bin/bash","-lc"]
           args:
             - |
