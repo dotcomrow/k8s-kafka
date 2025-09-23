@@ -121,7 +121,7 @@ spec:
               # BigQuery / GCS for bootstrap export
               BQ_BOOTSTRAP_PROJECT="${BQ_BOOTSTRAP_PROJECT:-}"  # e.g. my-gcp-project
               BQ_BOOTSTRAP_BUCKET="${BQ_BOOTSTRAP_BUCKET:-}"    # e.g. my-bootstrap-bucket
-              BQ_BOOTSTRAP_LOCATION="${BQ_BOOTSTRAP_LOCATION:-}"# optional, e.g. US
+              BQ_BOOTSTRAP_LOCATION="${BQ_BOOTSTRAP_LOCATION:-}" # optional, e.g. US
 
               # BigQuery defaults for registrar / Connect
               BQ_PROJECT="${BQ_PROJECT:-}"            # e.g. my-gcp-project
