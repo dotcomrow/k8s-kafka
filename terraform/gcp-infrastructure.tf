@@ -299,6 +299,16 @@ resource "null_resource" "notify_secret_version" {
         # Show payload sizes, not contents
         echo "  payload_len    = $(printf '%s' "$${PAYLOAD_JSON}" | wc -c | tr -d ' ') bytes"
 
+        # Base64 encode for Pub/Sub (define it *before* using it)
+        BASE64_PAYLOAD="$(printf '%s' "$${PAYLOAD_JSON}" | base64 | tr -d '\n')"
+        echo "  payload_b64_len= $(printf '%s' "$${BASE64_PAYLOAD}" | wc -c | tr -d ' ') bytes"
+
+        # Assemble publish body
+        PUB_BODY="$(jq -nc --arg d "$${BASE64_PAYLOAD}" '{messages:[{data:$d}]}' )"
+
+        # Show payload sizes, not contents
+        echo "  payload_len    = $(printf '%s' "$${PAYLOAD_JSON}" | wc -c | tr -d ' ') bytes"
+
         # Base64 encode for Pub/Sub
         payload_b64_len="$(printf '%s' "$${BASE64_PAYLOAD}" | wc -c | tr -d ' ')"
         echo "  payload_b64_len= $payload_b64_len bytes"
