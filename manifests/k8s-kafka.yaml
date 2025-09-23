@@ -344,7 +344,7 @@ metadata:
     argocd.argoproj.io/sync-wave: "2"
 spec:
   backoffLimit: 0
-  ttlSecondsAfterFinished: 86400
+  activeDeadlineSeconds: 7200
   template:
     metadata:
       labels:
@@ -353,11 +353,15 @@ spec:
         linkerd.io/inject: "disabled"
         vault.hashicorp.com/agent-inject: "enabled"
         vault.hashicorp.com/role: "data-bootstrap"
+
+        # ---- GCP SA key (raw JSON from secret/kafka/bq/exporter.sa_json) ----
         vault.hashicorp.com/agent-inject-secret-gcp-key.json: "secret/data/kafka/bq/exporter"
         vault.hashicorp.com/agent-inject-template-gcp-key.json: |
           {{- with secret "secret/data/kafka/bq/exporter" -}}
           {{ .Data.data.sa_json }}
           {{- end -}}
+
+        # ---- Bootstrap env (BUCKET/PROJECT/LOCATION) ---
         vault.hashicorp.com/agent-inject-secret-bootstrap.env: "secret/data/kafka/bq/bootstrap"
         vault.hashicorp.com/agent-inject-template-bootstrap.env: |
           {{- with secret "secret/data/kafka/bq/bootstrap" -}}
@@ -365,6 +369,8 @@ spec:
           {{ with .Data.data.project }}PROJECT={{ . }}{{ end }}
           {{ with .Data.data.location }}LOCATION={{ . }}{{ end }}
           {{- end -}}
+
+        # ---- DB config (PGHOST/PGPORT/PGDATABASE/PGUSER/YB masters) ---
         vault.hashicorp.com/agent-inject-secret-pg.env: "secret/data/kafka/pgconfig"
         vault.hashicorp.com/agent-inject-template-pg.env: |
           {{- with secret "secret/data/kafka/pgconfig" -}}
@@ -374,6 +380,8 @@ spec:
           {{ with .Data.data.user }}PGUSER={{ . }}{{ end }}
           {{ with .Data.data.master_addresses }}YB_MASTER_ADDRESSES={{ . }}{{ end }}
           {{- end -}}
+
+        # ---- Static username's password (single-value at secret/<user>:value) ----------
         vault.hashicorp.com/agent-inject-secret-pg-admin.env: "secret/data/vaultadmin"
         vault.hashicorp.com/agent-inject-template-pg-admin.env: |
           {{- with secret "secret/data/vaultadmin" -}}
@@ -382,104 +390,120 @@ spec:
     spec:
       serviceAccountName: bq-yb-bootstrap
       restartPolicy: Never
+      terminationGracePeriodSeconds: 30
       volumes:
-        - name: vault-secrets
+        - name: work
           emptyDir: {}
       containers:
-        - name: runner
-          image: google/cloud-sdk:latest
+        # ------------------------------------------------------------
+        # 1) planner+importer: discovers tables & imports after data is ready
+        # ------------------------------------------------------------
+        - name: importer
+          image: yugabytedb/yugabyte:2024.2.2.0-b105
           imagePullPolicy: IfNotPresent
           env:
-            - name: GOOGLE_APPLICATION_CREDENTIALS
-              value: /vault/secrets/gcp-key.json
+            - name: CLOUDSDK_CORE_DISABLE_PROMPTS
+              value: "1"
           volumeMounts:
-            - name: vault-secrets
-              mountPath: /vault/secrets
-          command: ["/bin/sh","-lc"]
+            - name: work
+              mountPath: /work
+          command: ["/bin/bash","-lc"]
           args:
             - |
-              set -eu
-              for f in /vault/secrets/bootstrap.env /vault/secrets/pg.env /vault/secrets/pg-admin.env /vault/secrets/gcp-key.json; do
-                i=0; while [ ! -s "$f" ]; do i=$((i+1)); [ $i -gt 120 ] && exit 1; sleep 2; done
+              set -euo pipefail
+
+              # Load Vault env
+              for f in /vault/secrets/bootstrap.env /vault/secrets/pg.env /vault/secrets/pg-admin.env; do
+                i=0; while [ ! -s "$f" ]; do i=$((i+1)); [ $i -gt 120 ] && echo "❌ Timeout waiting for $f" && exit 1; echo "⏳ waiting for $f..."; sleep 2; done
+                . "$f"
               done
-              . /vault/secrets/bootstrap.env
-              . /vault/secrets/pg.env
-              . /vault/secrets/pg-admin.env
               export PGPASSWORD
+
               : "${PGHOST:=yb-tserver-service.yugabyte.svc.cluster.local}"
               : "${PGPORT:=5433}"
               : "${PGDATABASE:=kafka}"
               : "${PGUSER:=vaultadmin}"
 
-              apt-get update >/dev/null
-              apt-get install -y --no-install-recommends postgresql-client jq >/dev/null
-              apt-get clean; rm -rf /var/lib/apt/lists/*
+              PGURL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}?sslmode=disable"
 
-              get_columns() {
-                local sch="$1" tbl="$2"
-                PGPASSWORD="$PGPASSWORD" \
-                psql "host=$PGHOST port=$PGPORT dbname=$PGDATABASE user=$PGUSER sslmode=disable" -Atqc \
-                  "SELECT string_agg(quote_ident(column_name), ',')
-                   FROM information_schema.columns
-                   WHERE table_schema=$$${sch}$$ AND table_name=$$${tbl}$$
-                   ORDER BY ordinal_position;" | tr -d '\n'
-              }
-              check_empty() {
-                local sch="$1" tbl="$2"
-                local cnt
-                cnt="$(PGPASSWORD="$PGPASSWORD" psql "host=$PGHOST port=$PGPORT dbname=$PGDATABASE user=$PGUSER sslmode=disable" -Atqc "SELECT COUNT(*) FROM ${sch}.${tbl};" || echo "0")"
-                if [ "$cnt" != "0" ] && [ -z "${ALLOW_NONEMPTY:-}" ]; then exit 1; fi
-              }
-
-              SQL_DISCOVER="
-              WITH c AS (
+              echo "🔎 Discovering bootstrap tables from comments..."
+              /home/yugabyte/bin/ysqlsh "${PGURL}" -A -t -F '|' -c "
+              WITH t AS (
                 SELECT n.nspname AS schema, c.relname AS table, d.description
                   FROM pg_class c
                   JOIN pg_namespace n ON n.oid = c.relnamespace
                   LEFT JOIN pg_description d ON d.objoid = c.oid AND d.objsubid = 0
-                WHERE c.relkind IN ('r','p') AND d.description IS NOT NULL
+                 WHERE c.relkind IN ('r','p') AND d.description IS NOT NULL
               ),
               j AS (
-                SELECT schema, \"table\",
-                       CASE WHEN left(description,1)='{' THEN description::jsonb ELSE NULL END AS jdesc
-                FROM c
+                SELECT schema, \"table\", CASE WHEN left(description,1)='{' THEN description::jsonb ELSE NULL END AS jdesc
+                  FROM t
+              ),
+              b AS (
+                SELECT schema, \"table\", jdesc->'bootstrap' AS b
+                  FROM j WHERE jdesc ? 'bootstrap'
               )
-              SELECT json_build_object('schema', schema, 'table',  \"table\", 'cfg', jdesc -> 'bootstrap')
-                FROM j
-               WHERE jdesc ? 'bootstrap'
-                 AND COALESCE( (jdesc->'bootstrap'->>'enabled')::boolean, false ) = true;
-              "
-              DISCOVERED="$(PGPASSWORD="$PGPASSWORD" psql "host=$PGHOST port=$PGPORT dbname=$PGDATABASE user=$PGUSER sslmode=disable" -Atqc "$SQL_DISCOVER" || true)"
-              echo "$DISCOVERED" | while read -r ROW_JSON; do
-                [ -z "$ROW_JSON" ] && continue
-                SCH="$(echo "$ROW_JSON" | jq -r '.schema')"
-                TBL="$(echo "$ROW_JSON" | jq -r '.table')"
-                CFG="$(echo "$ROW_JSON" | jq -c '.cfg // {}')"
-                BQ_TABLE="$(echo "$CFG" | jq -r '.bq // empty')"
-                [ -z "$BQ_TABLE" ] && exit 1
-                PREFIX="$(echo "$CFG" | jq -r '.gcs_prefix // "'$TBL'"')"
-                FMT="$(echo "$CFG" | jq -r '.format // "CSV"')"
-                HDR="$(echo "$CFG" | jq -r '.header // true')"
-                COLS_OVERRIDE="$(echo "$CFG" | jq -r '.columns // empty')"
-                if [ -z "$COLS_OVERRIDE" ] || [ "$COLS_OVERRIDE" = "null" ]; then
-                  COLS="$(get_columns "$SCH" "$TBL")"
-                else
-                  COLS="$(echo "$COLS_OVERRIDE" | awk -F',' '{for(i=1;i<=NF;i++){gsub(/^ +| +$/,"",$i); printf "%s\"%s\"", (i>1?",":""), $i}}')"
+              SELECT schema,
+                     \"table\",
+                     COALESCE(b->>'bq','')                                    AS bq,
+                     COALESCE(b->>'gcs_prefix', \"table\")                      AS gcs_prefix,
+                     COALESCE(b->>'format','CSV')                              AS format,
+                     COALESCE(b->>'header','true')                             AS header,
+                     COALESCE(b->>'columns','')                                AS columns
+                FROM b
+               WHERE COALESCE( (b->>'enabled')::boolean, false ) = true;
+              " > /work/plan.tsv
+
+              if [ ! -s /work/plan.tsv ]; then
+                echo "ℹ️  No flagged tables. Creating bootstrap.ok and exiting."
+                API="https://kubernetes.default.svc"
+                TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+                CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+                DATA='{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"bootstrap.ok","namespace":"kafka","labels":{"app":"bq-yb-bootstrap"}},"data":{"status":"complete","completedAt":"__NOW__"}}'
+                curl -sS -X POST --cacert "$CACERT" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+                  --data-binary "$DATA" "$API/api/v1/namespaces/kafka/configmaps" >/dev/null || true
+                exit 0
+              fi
+
+              echo "📝 Plan:"
+              cat /work/plan.tsv
+
+              # Helper to compute column list if not overridden
+              get_columns() {
+                local sch="$1" tbl="$2"
+                /home/yugabyte/bin/ysqlsh "${PGURL}" -A -t -c "
+                  SELECT string_agg(quote_ident(column_name), ',')
+                  FROM information_schema.columns
+                  WHERE table_schema='${sch}' AND table_name='${tbl}'
+                  ORDER BY ordinal_position;
+                " | tr -d '\n'
+              }
+
+              # Import loop – wait for READY marker from cloudsdk container
+              while IFS='|' read -r SCH TBL BQMAP PREFIX FMT HDR COLS; do
+                [ -z "${SCH}" ] && continue
+                [ -n "${BQMAP}" ] || { echo "❌ ${SCH}.${TBL} missing BQ mapping"; exit 1; }
+                : "${PREFIX:=${TBL}}"
+                : "${FMT:=CSV}"
+                : "${HDR:=true}"
+
+                INDIR="/work/in/${PREFIX}"
+                READY="${INDIR}/READY"
+                echo "⏳ Waiting for data files for ${SCH}.${TBL} at ${INDIR}..."
+                i=0; while [ ! -f "${READY}" ]; do
+                  i=$((i+1)); [ $i -gt 360 ] && echo "❌ Timeout waiting for ${READY}" && exit 1
+                  sleep 2
+                done
+
+                if [ -z "${COLS}" ] || [ "${COLS}" = "null" ]; then
+                  COLS="$(get_columns "${SCH}" "${TBL}")"
                 fi
-                DEST_URI="gs://${BUCKET}/bootstrap/${PREFIX}/${PREFIX}-*.csv"
-                if [ -n "${LOCATION:-}" ]; then BQ_LOC_FLAG="--location=${LOCATION}"; else BQ_LOC_FLAG=""; fi
-                bq ${BQ_LOC_FLAG} --project_id="${PROJECT}" extract \
-                  --destination_format="${FMT}" \
-                  --field_delimiter="," \
-                  --print_header="${HDR}" \
-                  "${BQ_TABLE}" \
-                  "${DEST_URI}"
-                check_empty "$SCH" "$TBL"
-                gsutil cat "gs://${BUCKET}/bootstrap/${PREFIX}/${PREFIX}-*.csv" \
-                | PGPASSWORD="$PGPASSWORD" psql "host=$PGHOST port=$PGPORT dbname=$PGDATABASE user=$PGUSER sslmode=disable" \
-                    -v ON_ERROR_STOP=1 \
-                    -c "\copy ${SCH}.${TBL} (${COLS}) from stdin with (format csv, header ${HDR})"
-              done
+
+                echo "➡️  Importing ${SCH}.${TBL} from ${INDIR}"
+                cat ${INDIR}/*.csv \
+                  | /home/yugabyte/bin/ysqlsh "${PGURL}" -v ON_ERROR_STOP=1 -c "\copy ${SCH}.${TBL} (${COLS}) from stdin with (format csv, header ${HDR});"
+                echo "✅ Imported ${SCH}.${TBL}"
+              done < /work/plan.tsv
 
               # Flag completion via API (no kubectl dependency)
               API="https://kubernetes.default.svc"
@@ -494,6 +518,68 @@ spec:
                 curl -sS -X POST --cacert "$CACERT" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
                   --data-binary "$DATA" "$API/api/v1/namespaces/kafka/configmaps" >/dev/null
               fi
+              echo "🎉 Bootstrap import complete."
+
+        # ------------------------------------------------------------
+        # 2) cloudsdk: runs BigQuery extract and copies CSVs locally
+        # ------------------------------------------------------------
+        - name: cloudsdk
+          image: google/cloud-sdk:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /vault/secrets/gcp-key.json
+            - name: CLOUDSDK_CORE_DISABLE_PROMPTS
+              value: "1"
+          volumeMounts:
+            - name: work
+              mountPath: /work
+          command: ["/bin/bash","-lc"]
+          args:
+            - |
+              set -euo pipefail
+
+              # Wait for Vault files we need (bucket/project/location, creds)
+              for f in /vault/secrets/bootstrap.env /vault/secrets/gcp-key.json; do
+                i=0; while [ ! -s "$f" ]; do i=$((i+1)); [ $i -gt 120 ] && echo "❌ Timeout waiting for $f" && exit 1; echo "⏳ waiting for $f..."; sleep 2; done
+              done
+              . /vault/secrets/bootstrap.env
+              : "${PROJECT:?missing PROJECT in bootstrap.env}"
+              : "${BUCKET:?missing BUCKET in bootstrap.env}"
+              : "${LOCATION:=}"
+
+              # Wait for the plan from the importer container
+              i=0; while [ ! -s /work/plan.tsv ]; do i=$((i+1)); [ $i -gt 180 ] && echo "❌ Timeout waiting for /work/plan.tsv" && exit 1; echo "⏳ waiting for /work/plan.tsv..."; sleep 2; done
+
+              if [ -n "${LOCATION}" ]; then
+                BQ_LOC_FLAG=(--location="${LOCATION}")
+              else
+                BQ_LOC_FLAG=()
+              fi
+
+              while IFS='|' read -r SCH TBL BQMAP PREFIX FMT HDR COLS; do
+                [ -z "${SCH}" ] && continue
+                : "${PREFIX:=${TBL}}"
+                : "${FMT:=CSV}"
+                : "${HDR:=true}"
+
+                DEST_URI="gs://${BUCKET}/bootstrap/${PREFIX}/${PREFIX}-*.csv"
+                echo "➡️  Export BigQuery ${BQMAP} → ${DEST_URI}"
+                bq "${BQ_LOC_FLAG[@]}" --project_id="${PROJECT}" extract \
+                  --destination_format="${FMT}" \
+                  --field_delimiter="," \
+                  --print_header="${HDR}" \
+                  "${BQMAP}" \
+                  "${DEST_URI}"
+
+                OUTDIR="/work/in/${PREFIX}"
+                mkdir -p "${OUTDIR}"
+                echo "⬇️  Copy GCS → ${OUTDIR}"
+                gsutil -m cp "gs://${BUCKET}/bootstrap/${PREFIX}/${PREFIX}-*.csv" "${OUTDIR}/"
+
+                # signal ready for importer
+                touch "${OUTDIR}/READY"
+              done < /work/plan.tsv
 
 # ============================================================================
 # Kafka (wave 3): single-broker KRaft — reads CLUSTER_ID from Secret
