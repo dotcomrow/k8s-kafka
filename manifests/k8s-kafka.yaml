@@ -195,11 +195,18 @@ spec:
               value: "http://vault.vault.svc.cluster.local:8200"
             - name: AUTH_PATH
               value: "kubernetes"
+            # static DB username (password is in secret/<PG_USER>:value)
             - name: PG_USER
               value: "vaultadmin"
             - name: SA_NAME
               value: "bq-yb-bootstrap"
             - name: SA_NAMESPACE
+              value: "kafka"
+            - name: PG_HOST
+              value: "yb-tserver-service.yugabyte.svc.cluster.local"
+            - name: PG_PORT
+              value: "5433"
+            - name: PG_DATABASE
               value: "kafka"
             - name: YB_MASTER_ADDRESSES
               value: "yb-master-0.yugabyte.svc.cluster.local:7100,yb-master-1.yugabyte.svc.cluster.local:7100,yb-master-2.yugabyte.svc.cluster.local:7100"
@@ -213,115 +220,114 @@ spec:
               value: "suncoast-systems-yb-bootstrap"
             - name: BQ_DEFAULT_DATASET
               value: "yugabyte_backup"
-          command: ["/bin/sh", "-lc"]
+          command: ["/bin/sh","-c"]
           args:
             - |
               set -euo pipefail
-              PG_HOST="${PG_HOST:-yb-tserver-service.yugabyte.svc.cluster.local}"
-              PG_PORT="${PG_PORT:-5433}"
-              PG_DATABASE="${PG_DATABASE:-kafka}"
-              PG_USER="${PG_USER:-vaultadmin}"
-              YB_MASTER_ADDRESSES="${YB_MASTER_ADDRESSES:-}"
-              BQ_BOOTSTRAP_PROJECT="${BQ_BOOTSTRAP_PROJECT:-}"
-              BQ_BOOTSTRAP_BUCKET="${BQ_BOOTSTRAP_BUCKET:-}"
-              BQ_BOOTSTRAP_LOCATION="${BQ_BOOTSTRAP_LOCATION:-}"
-              BQ_PROJECT="${BQ_PROJECT:-}"
-              BQ_DEFAULT_DATASET="${BQ_DEFAULT_DATASET:-}"
 
-              # Tools (Debian in this image)
-              apt-get update -y >/dev/null
-              apt-get install -y jq curl postgresql-client netcat-openbsd >/dev/null
-              rm -rf /var/lib/apt/lists/*
-
-              # Vault token
-              until [ -s /vault-token/VAULT_TOKEN ]; do sleep 2; done
+              # ---- auth to Vault with root token (mounted secret) ----
+              until [ -s /vault-token/VAULT_TOKEN ]; do
+                echo "waiting for /vault-token/VAULT_TOKEN..."; sleep 2
+              done
               export VAULT_TOKEN="$(cat /vault-token/VAULT_TOKEN)"
 
-              # Optional GCP SA JSON from KV
-              SYNCED="$(vault kv get -format=json "secret/k8s-kafka-gcp-service-account-json" 2>/dev/null || true)"
-              BQ_SA_JSON="$(printf '%s' "$SYNCED" | jq -r '.data.data.value // empty')"
-              : "${BQ_SA_JSON:=}"
+              # ---- inputs ----
+              : "${PG_HOST:=yb-tserver-service.yugabyte.svc.cluster.local}"
+              : "${PG_PORT:=5433}"
+              : "${PG_DATABASE:=kafka}"
+              : "${PG_USER:=vaultadmin}"
+              : "${YB_MASTER_ADDRESSES:=}"
 
-              # Wait for static user's password in KV: secret/<PG_USER>:value
-              VAULTADMIN_PASS=""
-              while :; do
-                OUT="$(vault kv get -format=json "secret/${PG_USER}" 2>/dev/null || true)"
-                if [ -n "${OUT}" ]; then
-                  VAULTADMIN_PASS="$(printf '%s' "$OUT" | jq -r '.data.data.value // empty')"
-                  [ -n "${VAULTADMIN_PASS}" ] && break
-                fi
-                sleep 5
-              done
-              export PGPASSWORD="$VAULTADMIN_PASS"
+              : "${BQ_BOOTSTRAP_PROJECT:=}"
+              : "${BQ_BOOTSTRAP_BUCKET:=}"
+              : "${BQ_BOOTSTRAP_LOCATION:=}"
+              : "${BQ_PROJECT:=}"
+              : "${BQ_DEFAULT_DATASET:=}"
 
-              # Ensure DB exists
-              until getent hosts "$PG_HOST" >/dev/null 2>&1; do sleep 3; done
-              until nc -z -w1 "$PG_HOST" "$PG_PORT"; do sleep 3; done
-              DB_EXISTS="$(psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d postgres -Atc \
-                "SELECT 1 FROM pg_database WHERE datname='${PG_DATABASE}'" || true)"
-              if [ "${DB_EXISTS}" != "1" ]; then
-                createdb -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -O "$PG_USER" "$PG_DATABASE"
+              # ---- read optional GCP SA JSON placed by your sync service ----
+              # get the 'value' field directly, no jq
+              BQ_SA_JSON="$(vault kv get -field=value secret/k8s-kafka-gcp-service-account-json 2>/dev/null || true)"
+              if [ -n "${BQ_SA_JSON}" ]; then
+                # write to a file for kv put with @file syntax
+                printf '%s' "${BQ_SA_JSON}" > /tmp/sa.json
+                echo "found GCP SA JSON (bytes: $(wc -c </tmp/sa.json | tr -d ' '))"
+              else
+                echo "no GCP SA JSON found at secret/k8s-kafka-gcp-service-account-json (optional)"
               fi
 
-              # KV seeds
-              put_pgconfig() {
-                local args=""
-                [ -n "$PG_HOST" ] && args="$args host=$PG_HOST"
-                [ -n "$PG_PORT" ] && args="$args port=$PG_PORT"
-                [ -n "$PG_DATABASE" ] && args="$args database=$PG_DATABASE"
-                [ -n "$PG_USER" ] && args="$args user=$PG_USER"
-                [ -n "$YB_MASTER_ADDRESSES" ] && args="$args master_addresses=$YB_MASTER_ADDRESSES"
-                [ -n "$args" ] && vault kv put secret/kafka/pgconfig $args >/dev/null
-              }
-              put_bq_bootstrap() {
-                local args=""
-                [ -n "$BQ_BOOTSTRAP_BUCKET" ]   && args="$args bucket=$BQ_BOOTSTRAP_BUCKET"
-                [ -n "$BQ_BOOTSTRAP_PROJECT" ]  && args="$args project=$BQ_BOOTSTRAP_PROJECT"
-                [ -n "$BQ_BOOTSTRAP_LOCATION" ] && args="$args location=$BQ_BOOTSTRAP_LOCATION"
-                [ -n "$args" ] && vault kv put secret/kafka/bq/bootstrap $args >/dev/null
-              }
-              put_bq_config() {
-                local args=""
-                [ -n "$BQ_PROJECT" ]         && args="$args project=$BQ_PROJECT"
-                [ -n "$BQ_DEFAULT_DATASET" ] && args="$args dataset=$BQ_DEFAULT_DATASET"
-                if [ -n "$BQ_SA_JSON" ]; then
-                  printf '%s' "$BQ_SA_JSON" > /tmp/sa.json
-                  args="$args sa_json=@/tmp/sa.json"
+              # ---- ensure the static user's password exists in Vault KV ----
+              echo "waiting for secret/${PG_USER} (field=value)..."
+              while :; do
+                if PASS="$(vault kv get -field=value "secret/${PG_USER}" 2>/dev/null)"; then
+                  [ -n "${PASS}" ] && break
                 fi
-                [ -n "$args" ] && vault kv put secret/kafka/bq/config $args >/dev/null
-              }
-              put_bq_exporter_key() {
-                if [ -n "$BQ_SA_JSON" ]; then
-                  printf '%s' "$BQ_SA_JSON" > /tmp/bq-exporter.json
-                  vault kv put secret/kafka/bq/exporter sa_json=@/tmp/bq-exporter.json >/dev/null
-                fi
-              }
-              put_pgconfig
-              put_bq_bootstrap
-              put_bq_config
-              put_bq_exporter_key
+                echo "  not ready yet; retrying in 5s..."
+                sleep 5
+              done
+              echo "password for ${PG_USER} is present in Vault."
 
-              # Policy & K8s auth
-              vault policy write "data-bootstrap" - <<EOP
+              # ---- seed multi-key KV entries used by workloads ----
+              PG_ARGS=""
+              [ -n "${PG_HOST}" ] && PG_ARGS="${PG_ARGS} host=${PG_HOST}"
+              [ -n "${PG_PORT}" ] && PG_ARGS="${PG_ARGS} port=${PG_PORT}"
+              [ -n "${PG_DATABASE}" ] && PG_ARGS="${PG_ARGS} database=${PG_DATABASE}"
+              [ -n "${PG_USER}" ] && PG_ARGS="${PG_ARGS} user=${PG_USER}"
+              [ -n "${YB_MASTER_ADDRESSES}" ] && PG_ARGS="${PG_ARGS} master_addresses=${YB_MASTER_ADDRESSES}"
+              if [ -n "${PG_ARGS}" ]; then
+                # shellcheck disable=SC2086
+                vault kv put secret/kafka/pgconfig ${PG_ARGS} >/dev/null
+                echo "wrote secret/kafka/pgconfig"
+              fi
+
+              BOOT_ARGS=""
+              [ -n "${BQ_BOOTSTRAP_BUCKET}" ]   && BOOT_ARGS="${BOOT_ARGS} bucket=${BQ_BOOTSTRAP_BUCKET}"
+              [ -n "${BQ_BOOTSTRAP_PROJECT}" ]  && BOOT_ARGS="${BOOT_ARGS} project=${BQ_BOOTSTRAP_PROJECT}"
+              [ -n "${BQ_BOOTSTRAP_LOCATION}" ] && BOOT_ARGS="${BOOT_ARGS} location=${BQ_BOOTSTRAP_LOCATION}"
+              if [ -n "${BOOT_ARGS}" ]; then
+                # shellcheck disable=SC2086
+                vault kv put secret/kafka/bq/bootstrap ${BOOT_ARGS} >/dev/null
+                echo "wrote secret/kafka/bq/bootstrap"
+              fi
+
+              CFG_ARGS=""
+              [ -n "${BQ_PROJECT}" ]         && CFG_ARGS="${CFG_ARGS} project=${BQ_PROJECT}"
+              [ -n "${BQ_DEFAULT_DATASET}" ] && CFG_ARGS="${CFG_ARGS} dataset=${BQ_DEFAULT_DATASET}"
+              if [ -s /tmp/sa.json ]; then
+                CFG_ARGS="${CFG_ARGS} sa_json=@/tmp/sa.json"
+              fi
+              if [ -n "${CFG_ARGS}" ]; then
+                # shellcheck disable=SC2086
+                vault kv put secret/kafka/bq/config ${CFG_ARGS} >/dev/null
+                echo "wrote secret/kafka/bq/config"
+              fi
+
+              if [ -s /tmp/sa.json ]; then
+                vault kv put secret/kafka/bq/exporter sa_json=@/tmp/sa.json >/dev/null
+                echo "wrote secret/kafka/bq/exporter"
+              fi
+
+              # ---- policy + k8s auth role binding for the kafka SA ----
+              vault policy write data-bootstrap - <<'EOP'
               path "secret/data/kafka/pgconfig"     { capabilities = ["read"] }
               path "secret/data/kafka/bq/bootstrap" { capabilities = ["read"] }
               path "secret/data/kafka/bq/config"    { capabilities = ["read"] }
               path "secret/data/kafka/bq/exporter"  { capabilities = ["read"] }
-              path "secret/data/${PG_USER}"         { capabilities = ["read"] }
+              path "secret/data/vaultadmin"         { capabilities = ["read"] }
               EOP
+
               vault write auth/${AUTH_PATH}/role/data-bootstrap \
                 bound_service_account_names="${SA_NAME}" \
                 bound_service_account_namespaces="${SA_NAMESPACE}" \
                 policies="data-bootstrap" \
                 ttl="24h" >/dev/null
 
-              echo "✅ Vault seeds and policy configured."
+              echo "✅ Vault KV seeded, policy written, k8s auth role bound."
           volumeMounts:
             - name: root-token
               mountPath: /vault-token
               readOnly: true
           resources:
-            requests: { cpu: "50m", memory: "64Mi" }
+            requests: { cpu: "50m",  memory: "64Mi" }
             limits:   { cpu: "200m", memory: "256Mi" }
 
 # ============================================================================
