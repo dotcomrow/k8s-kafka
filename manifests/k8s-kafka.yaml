@@ -30,7 +30,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["configmaps"]
-    verbs: ["get","list","create","update","patch"]
+    verbs: ["get", "list", "create", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -51,7 +51,7 @@ roleRef:
 # ============================================================================
 # Kafka cluster.id generator — namespace: kafka
 #   Creates/keeps Secret kafka-cluster-id (key: CLUSTER_ID)
-#   Uses Alpine + Kubernetes API (no kubectl, no internet fetches)
+#   Uses curl to call K8s API (no kubectl, no external downloads)
 # ============================================================================
 ---
 apiVersion: v1
@@ -72,7 +72,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get","list","watch","create","update","patch","delete"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -105,9 +105,9 @@ spec:
       serviceAccountName: kafka-clusterid-gen
       containers:
         - name: gen
-          image: alpine:3.19
+          image: curlimages/curl:8.8.0
           imagePullPolicy: IfNotPresent
-          command: ["/bin/sh","-lc"]
+          command: ["/bin/sh", "-lc"]
           args:
             - |
               set -euo pipefail
@@ -117,54 +117,54 @@ spec:
               TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
               CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 
-              # GET existing secret (if any)
-              JSON="$(wget -qO- --header="Authorization: Bearer ${TOKEN}" --ca-certificate="${CACERT}" \
-                     "${API}/api/v1/namespaces/${NS}/secrets/${NAME}" || true)"
+              # Try to fetch existing Secret
+              HTTP="$(curl -sS -w '%{http_code}' -o /tmp/get.json \
+                --cacert "${CACERT}" -H "Authorization: Bearer ${TOKEN}" \
+                "${API}/api/v1/namespaces/${NS}/secrets/${NAME}" || true)"
 
-              # If it exists and has non-empty data.CLUSTER_ID, keep it and exit
-              if [ -n "${JSON}" ] && echo "${JSON}" | grep -q '"kind":"Secret"'; then
-                if echo "${JSON}" | grep -q '"CLUSTER_ID":"'; then
-                  B64="$(echo "${JSON}" | sed -n 's/.*"CLUSTER_ID":"\([^"]*\)".*/\1/p' | head -n1)"
-                  if [ -n "${B64}" ] && [ "${B64}" != "null" ]; then
-                    echo "kafka-cluster-id already present; nothing to do."
-                    exit 0
-                  fi
+              if [ "${HTTP}" = "200" ]; then
+                # Extract existing value (if any) without jq
+                EXISTING_B64="$(sed -n 's/.*"CLUSTER_ID":"\([^"]*\)".*/\1/p' /tmp/get.json | head -n1 || true)"
+                if [ -n "${EXISTING_B64:-}" ] && [ "${EXISTING_B64}" != "null" ]; then
+                  echo "kafka-cluster-id already present; nothing to do."
+                  exit 0
                 fi
               fi
 
-              # Generate Kafka-style base64url id (22 chars)
+              # Generate a Kafka-style base64url id (22 chars)
               CID="$(head -c 16 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=[:space:]' | cut -c1-22)"
               echo "Generated cluster.id: ${CID}"
 
-              # Build Secret JSON (data must be base64-encoded)
-              if base64 --help 2>&1 | grep -q -- "-w"; then
+              # Base64 encode value for Secret.data
+              if base64 --help 2>/dev/null | grep -q -- "-w"; then
                 ENC="$(printf '%s' "${CID}" | base64 -w0)"
               else
                 ENC="$(printf '%s' "${CID}" | base64)"
               fi
-              cat > /tmp/secret.json <<EOF
-              {
-                "apiVersion": "v1",
-                "kind": "Secret",
-                "metadata": { "name": "${NAME}", "namespace": "${NS}" },
-                "type": "Opaque",
-                "data": { "CLUSTER_ID": "${ENC}" }
-              }
-              EOF
 
-              # Create or replace (delete then create if it already exists without value)
-              if [ -n "${JSON}" ] && echo "${JSON}" | grep -q '"kind":"Secret"'; then
-                wget -qO- --method=DELETE --header="Authorization: Bearer ${TOKEN}" --ca-certificate="${CACERT}" \
-                  "${API}/api/v1/namespaces/${NS}/secrets/${NAME}" >/dev/null 2>&1 || true
+              # If the Secret exists, PATCH it; otherwise, POST a new Secret
+              if [ "${HTTP}" = "200" ]; then
+                curl -sS -X PATCH \
+                  --cacert "${CACERT}" -H "Authorization: Bearer ${TOKEN}" \
+                  -H "Content-Type: application/merge-patch+json" \
+                  --data "$(printf '{"data":{"CLUSTER_ID":"%s"}}' "${ENC}")" \
+                  "${API}/api/v1/namespaces/${NS}/secrets/${NAME}" >/dev/null
+              else
+                cat > /tmp/secret.json <<EOF
+                {"apiVersion":"v1","kind":"Secret","metadata":{"name":"${NAME}","namespace":"${NS}"},
+                 "type":"Opaque","data":{"CLUSTER_ID":"${ENC}"}}
+                EOF
+                curl -sS -X POST \
+                  --cacert "${CACERT}" -H "Authorization: Bearer ${TOKEN}" \
+                  -H "Content-Type: application/json" \
+                  --data @/tmp/secret.json \
+                  "${API}/api/v1/namespaces/${NS}/secrets" >/dev/null
               fi
-              wget -qO- --header="Authorization: Bearer ${TOKEN}" --header="Content-Type: application/json" \
-                --post-file=/tmp/secret.json --ca-certificate="${CACERT}" \
-                "${API}/api/v1/namespaces/${NS}/secrets" >/dev/null
+              echo "✅ kafka-cluster-id secret is ready."
 
 # ============================================================================
 # Vault CONFIG job — namespace: vault
 #   Static DB username; password read from secret/<user>:value in Vault KV
-#   (Fixed: `done` typo + prefer apt-get for tools)
 # ============================================================================
 ---
 apiVersion: batch/v1
@@ -213,114 +213,113 @@ spec:
               value: "suncoast-systems-yb-bootstrap"
             - name: BQ_DEFAULT_DATASET
               value: "yugabyte_backup"
-          command: ["/bin/sh","-c"]
-          args:
-            - |
-              set -euo pipefail
-              PG_HOST="${PG_HOST:-yb-tserver-service.yugabyte.svc.cluster.local}"
-              PG_PORT="${PG_PORT:-5433}"
-              PG_DATABASE="${PG_DATABASE:-kafka}"
-              PG_USER="${PG_USER:-vaultadmin}"
-              YB_MASTER_ADDRESSES="${YB_MASTER_ADDRESSES:-}"
-              BQ_BOOTSTRAP_PROJECT="${BQ_BOOTSTRAP_PROJECT:-}"
-              BQ_BOOTSTRAP_BUCKET="${BQ_BOOTSTRAP_BUCKET:-}"
-              BQ_BOOTSTRAP_LOCATION="${BQ_BOOTSTRAP_LOCATION:-}"
-              BQ_PROJECT="${BQ_PROJECT:-}"
-              BQ_DEFAULT_DATASET="${BQ_DEFAULT_DATASET:-}"
+          command: ["/bin/sh", "-c"]
+          args: |
+            set -euo pipefail
+            PG_HOST="${PG_HOST:-yb-tserver-service.yugabyte.svc.cluster.local}"
+            PG_PORT="${PG_PORT:-5433}"
+            PG_DATABASE="${PG_DATABASE:-kafka}"
+            PG_USER="${PG_USER:-vaultadmin}"
+            YB_MASTER_ADDRESSES="${YB_MASTER_ADDRESSES:-}"
+            BQ_BOOTSTRAP_PROJECT="${BQ_BOOTSTRAP_PROJECT:-}"
+            BQ_BOOTSTRAP_BUCKET="${BQ_BOOTSTRAP_BUCKET:-}"
+            BQ_BOOTSTRAP_LOCATION="${BQ_BOOTSTRAP_LOCATION:-}"
+            BQ_PROJECT="${BQ_PROJECT:-}"
+            BQ_DEFAULT_DATASET="${BQ_DEFAULT_DATASET:-}"
 
-              # Tools (prefer apt-get on Vault's Debian base)
-              if command -v apt-get >/dev/null 2>&1; then
-                apt-get update -y >/dev/null
-                apt-get install -y jq curl postgresql-client netcat-openbsd >/dev/null
-                rm -rf /var/lib/apt/lists/*
-              elif command -v apk >/dev/null 2>&1; then
-                apk add --no-cache jq curl postgresql-client netcat-openbsd >/dev/null
+            # Tools (Vault image is Debian-based)
+            if command -v apt-get >/dev/null 2>&1; then
+              apt-get update -y >/dev/null
+              apt-get install -y jq curl postgresql-client netcat-openbsd >/dev/null
+              rm -rf /var/lib/apt/lists/*
+            elif command -v apk >/dev/null 2>&1; then
+              apk add --no-cache jq curl postgresql-client netcat-openbsd >/dev/null
+            fi
+
+            # Vault root token
+            until [ -s /vault-token/VAULT_TOKEN ]; do sleep 2; done
+            export VAULT_TOKEN="$(cat /vault-token/VAULT_TOKEN)"
+
+            # Optional GCP SA JSON
+            SYNCED="$(vault kv get -format=json "secret/k8s-kafka-gcp-service-account-json" 2>/dev/null || true)"
+            BQ_SA_JSON="$(printf '%s' "$SYNCED" | jq -r '.data.data.value // empty')"
+            : "${BQ_SA_JSON:=}"
+
+            # Wait for password in Vault KV (secret/<PG_USER>:value)
+            VAULTADMIN_USER="${PG_USER}"
+            VAULTADMIN_PASS=""
+            while :; do
+              OUT="$(vault kv get -format=json "secret/${VAULTADMIN_USER}" 2>/dev/null || true)"
+              if [ -n "${OUT}" ]; then
+                VAULTADMIN_PASS="$(printf '%s' "$OUT" | jq -r '.data.data.value // empty')"
+                [ -n "${VAULTADMIN_PASS}" ] && break
               fi
+              sleep 5
+            done
+            export PGPASSWORD="$VAULTADMIN_PASS"
 
-              # Vault root token
-              until [ -s /vault-token/VAULT_TOKEN ]; do sleep 2; done
-              export VAULT_TOKEN="$(cat /vault-token/VAULT_TOKEN)"
+            # Ensure DB exists
+            until getent hosts "$PG_HOST" >/dev/null 2>&1; do sleep 3; done
+            until nc -z -w1 "$PG_HOST" "$PG_PORT"; do sleep 3; done
+            DB_EXISTS="$(psql -h "$PG_HOST" -p "$PG_PORT" -U "$VAULTADMIN_USER" -d postgres -Atc \
+              "SELECT 1 FROM pg_database WHERE datname='${PG_DATABASE}'" || true)"
+            if [ "${DB_EXISTS}" != "1" ]; then
+              createdb -h "$PG_HOST" -p "$PG_PORT" -U "$VAULTADMIN_USER" -O "$VAULTADMIN_USER" "$PG_DATABASE"
+            fi
 
-              # Optional: GCP SA JSON synced into Vault
-              SYNCED="$(vault kv get -format=json "secret/k8s-kafka-gcp-service-account-json" 2>/dev/null || true)"
-              BQ_SA_JSON="$(printf '%s' "$SYNCED" | jq -r '.data.data.value // empty')"
-              : "${BQ_SA_JSON:=}"
-
-              # Wait for static user's password in Vault KV (secret/<PG_USER>: value)
-              VAULTADMIN_USER="${PG_USER}"
-              VAULTADMIN_PASS=""
-              while :; do
-                OUT="$(vault kv get -format=json "secret/${VAULTADMIN_USER}" 2>/dev/null || true)"
-                if [ -n "${OUT}" ]; then
-                  VAULTADMIN_PASS="$(printf '%s' "$OUT" | jq -r '.data.data.value // empty')"
-                  [ -n "${VAULTADMIN_PASS}" ] && break
-                fi
-                sleep 5
-              done
-              export PGPASSWORD="$VAULTADMIN_PASS"
-
-              # Ensure DB exists
-              until getent hosts "$PG_HOST" >/dev/null 2>&1; do sleep 3; done
-              until nc -z -w1 "$PG_HOST" "$PG_PORT"; do sleep 3; done
-              DB_EXISTS="$(psql -h "$PG_HOST" -p "$PG_PORT" -U "$VAULTADMIN_USER" -d postgres -Atc \
-                "SELECT 1 FROM pg_database WHERE datname='${PG_DATABASE}'" || true)"
-              if [ "${DB_EXISTS}" != "1" ]; then
-                createdb -h "$PG_HOST" -p "$PG_PORT" -U "$VAULTADMIN_USER" -O "$VAULTADMIN_USER" "$PG_DATABASE"
+            # KV seeds
+            put_pgconfig() {
+              local args=""
+              [ -n "$PG_HOST" ] && args="$args host=$PG_HOST"
+              [ -n "$PG_PORT" ] && args="$args port=$PG_PORT"
+              [ -n "$PG_DATABASE" ] && args="$args database=$PG_DATABASE"
+              [ -n "$PG_USER" ] && args="$args user=$PG_USER"
+              [ -n "$YB_MASTER_ADDRESSES" ] && args="$args master_addresses=$YB_MASTER_ADDRESSES"
+              [ -n "$args" ] && vault kv put secret/kafka/pgconfig $args >/dev/null
+            }
+            put_bq_bootstrap() {
+              local args=""
+              [ -n "$BQ_BOOTSTRAP_BUCKET" ]   && args="$args bucket=$BQ_BOOTSTRAP_BUCKET"
+              [ -n "$BQ_BOOTSTRAP_PROJECT" ]  && args="$args project=$BQ_BOOTSTRAP_PROJECT"
+              [ -n "$BQ_BOOTSTRAP_LOCATION" ] && args="$args location=$BQ_BOOTSTRAP_LOCATION"
+              [ -n "$args" ] && vault kv put secret/kafka/bq/bootstrap $args >/dev/null
+            }
+            put_bq_config() {
+              local args=""
+              [ -n "$BQ_PROJECT" ]         && args="$args project=$BQ_PROJECT"
+              [ -n "$BQ_DEFAULT_DATASET" ] && args="$args dataset=$BQ_DEFAULT_DATASET"
+              if [ -n "$BQ_SA_JSON" ]; then
+                printf '%s' "$BQ_SA_JSON" > /tmp/sa.json
+                args="$args sa_json=@/tmp/sa.json"
               fi
+              [ -n "$args" ] && vault kv put secret/kafka/bq/config $args >/dev/null
+            }
+            put_bq_exporter_key() {
+              if [ -n "$BQ_SA_JSON" ]; then
+                printf '%s' "$BQ_SA_JSON" > /tmp/bq-exporter.json
+                vault kv put secret/kafka/bq/exporter sa_json=@/tmp/bq-exporter.json >/dev/null
+              fi
+            }
+            put_pgconfig
+            put_bq_bootstrap
+            put_bq_config
+            put_bq_exporter_key
 
-              # KV seeds
-              put_pgconfig() {
-                local args=""
-                [ -n "$PG_HOST" ] && args="$args host=$PG_HOST"
-                [ -n "$PG_PORT" ] && args="$args port=$PG_PORT"
-                [ -n "$PG_DATABASE" ] && args="$args database=$PG_DATABASE"
-                [ -n "$PG_USER" ] && args="$args user=$PG_USER"
-                [ -n "$YB_MASTER_ADDRESSES" ] && args="$args master_addresses=$YB_MASTER_ADDRESSES"
-                [ -n "$args" ] && vault kv put secret/kafka/pgconfig $args >/dev/null
-              }
-              put_bq_bootstrap() {
-                local args=""
-                [ -n "$BQ_BOOTSTRAP_BUCKET" ]   && args="$args bucket=$BQ_BOOTSTRAP_BUCKET"
-                [ -n "$BQ_BOOTSTRAP_PROJECT" ]  && args="$args project=$BQ_BOOTSTRAP_PROJECT"
-                [ -n "$BQ_BOOTSTRAP_LOCATION" ] && args="$args location=$BQ_BOOTSTRAP_LOCATION"
-                [ -n "$args" ] && vault kv put secret/kafka/bq/bootstrap $args >/dev/null
-              }
-              put_bq_config() {
-                local args=""
-                [ -n "$BQ_PROJECT" ]         && args="$args project=$BQ_PROJECT"
-                [ -n "$BQ_DEFAULT_DATASET" ] && args="$args dataset=$BQ_DEFAULT_DATASET"
-                if [ -n "$BQ_SA_JSON" ]; then
-                  printf '%s' "$BQ_SA_JSON" > /tmp/sa.json
-                  args="$args sa_json=@/tmp/sa.json"
-                fi
-                [ -n "$args" ] && vault kv put secret/kafka/bq/config $args >/dev/null
-              }
-              put_bq_exporter_key() {
-                if [ -n "$BQ_SA_JSON" ]; then
-                  printf '%s' "$BQ_SA_JSON" > /tmp/bq-exporter.json
-                  vault kv put secret/kafka/bq/exporter sa_json=@/tmp/bq-exporter.json >/dev/null
-                fi
-              }
-              put_pgconfig
-              put_bq_bootstrap
-              put_bq_config
-              put_bq_exporter_key
+            # Policy & K8s auth
+            vault policy write "data-bootstrap" - <<EOP
+            path "secret/data/kafka/pgconfig"     { capabilities = ["read"] }
+            path "secret/data/kafka/bq/bootstrap" { capabilities = ["read"] }
+            path "secret/data/kafka/bq/config"    { capabilities = ["read"] }
+            path "secret/data/kafka/bq/exporter"  { capabilities = ["read"] }
+            path "secret/data/${PG_USER}"         { capabilities = ["read"] }
+            EOP
+            vault write auth/${AUTH_PATH}/role/data-bootstrap \
+              bound_service_account_names="${SA_NAME}" \
+              bound_service_account_namespaces="${SA_NAMESPACE}" \
+              policies="data-bootstrap" \
+              ttl="24h" >/dev/null
 
-              # Policy & K8s auth
-              vault policy write "data-bootstrap" - <<EOP
-              path "secret/data/kafka/pgconfig"     { capabilities = ["read"] }
-              path "secret/data/kafka/bq/bootstrap" { capabilities = ["read"] }
-              path "secret/data/kafka/bq/config"    { capabilities = ["read"] }
-              path "secret/data/kafka/bq/exporter"  { capabilities = ["read"] }
-              path "secret/data/${PG_USER}"         { capabilities = ["read"] }
-              EOP
-              vault write auth/${AUTH_PATH}/role/data-bootstrap \
-                bound_service_account_names="${SA_NAME}" \
-                bound_service_account_namespaces="${SA_NAMESPACE}" \
-                policies="data-bootstrap" \
-                ttl="24h" >/dev/null
-
-              echo "Configured Vault seeds and policy."
+            echo "✅ Vault seeds and policy configured."
           volumeMounts:
             - name: root-token
               mountPath: /vault-token
@@ -338,7 +337,8 @@ kind: Job
 metadata:
   name: bq-to-yb-bootstrap
   namespace: kafka
-  labels: { app: bq-yb-bootstrap }
+  labels:
+    app: bq-yb-bootstrap
   annotations:
     argocd.argoproj.io/sync-wave: "2"
 spec:
@@ -346,7 +346,8 @@ spec:
   ttlSecondsAfterFinished: 86400
   template:
     metadata:
-      labels: { app: bq-yb-bootstrap }
+      labels:
+        app: bq-yb-bootstrap
       annotations:
         linkerd.io/inject: "disabled"
         vault.hashicorp.com/agent-inject: "enabled"
@@ -393,90 +394,103 @@ spec:
           volumeMounts:
             - name: vault-secrets
               mountPath: /vault/secrets
-          command: ["/bin/sh","-lc"]
-          args:
-            - |
-              set -eu
-              for f in /vault/secrets/bootstrap.env /vault/secrets/pg.env /vault/secrets/pg-admin.env /vault/secrets/gcp-key.json; do
-                i=0; while [ ! -s "$f" ]; do i=$((i+1)); [ $i -gt 120 ] && exit 1; sleep 2; done
-              done
-              . /vault/secrets/bootstrap.env
-              . /vault/secrets/pg.env
-              . /vault/secrets/pg-admin.env
-              export PGPASSWORD
-              : "${PGHOST:=yb-tserver-service.yugabyte.svc.cluster.local}"
-              : "${PGPORT:=5433}"
-              : "${PGDATABASE:=kafka}"
-              : "${PGUSER:=vaultadmin}"
-              apt-get update >/dev/null
-              apt-get install -y --no-install-recommends postgresql-client jq >/dev/null
-              apt-get clean; rm -rf /var/lib/apt/lists/*
+          command: ["/bin/sh", "-lc"]
+          args: |
+            set -eu
+            for f in /vault/secrets/bootstrap.env /vault/secrets/pg.env /vault/secrets/pg-admin.env /vault/secrets/gcp-key.json; do
+              i=0; while [ ! -s "$f" ]; do i=$((i+1)); [ $i -gt 120 ] && exit 1; sleep 2; done
+            done
+            . /vault/secrets/bootstrap.env
+            . /vault/secrets/pg.env
+            . /vault/secrets/pg-admin.env
+            export PGPASSWORD
+            : "${PGHOST:=yb-tserver-service.yugabyte.svc.cluster.local}"
+            : "${PGPORT:=5433}"
+            : "${PGDATABASE:=kafka}"
+            : "${PGUSER:=vaultadmin}"
+            apt-get update >/dev/null
+            apt-get install -y --no-install-recommends postgresql-client jq >/dev/null
+            apt-get clean; rm -rf /var/lib/apt/lists/*
 
-              get_columns() {
-                local sch="$1" tbl="$2"
-                PGPASSWORD="$PGPASSWORD" \
-                psql "host=$PGHOST port=$PGPORT dbname=$PGDATABASE user=$PGUSER sslmode=disable" -Atqc \
-                  "SELECT string_agg(quote_ident(column_name), ',')
-                   FROM information_schema.columns
-                   WHERE table_schema=$$${sch}$$ AND table_name=$$${tbl}$$
-                   ORDER BY ordinal_position;" | tr -d '\n'
-              }
-              check_empty() {
-                local sch="$1" tbl="$2"
-                local cnt
-                cnt="$(PGPASSWORD="$PGPASSWORD" psql "host=$PGHOST port=$PGPORT dbname=$PGDATABASE user=$PGUSER sslmode=disable" -Atqc "SELECT COUNT(*) FROM ${sch}.${tbl};" || echo "0")"
-                if [ "$cnt" != "0" ] && [ -z "${ALLOW_NONEMPTY:-}" ]; then exit 1; fi
-              }
+            get_columns() {
+              local sch="$1" tbl="$2"
+              PGPASSWORD="$PGPASSWORD" \
+              psql "host=$PGHOST port=$PGPORT dbname=$PGDATABASE user=$PGUSER sslmode=disable" -Atqc \
+                "SELECT string_agg(quote_ident(column_name), ',')
+                 FROM information_schema.columns
+                 WHERE table_schema=$$${sch}$$ AND table_name=$$${tbl}$$
+                 ORDER BY ordinal_position;" | tr -d '\n'
+            }
+            check_empty() {
+              local sch="$1" tbl="$2"
+              local cnt
+              cnt="$(PGPASSWORD="$PGPASSWORD" psql "host=$PGHOST port=$PGPORT dbname=$PGDATABASE user=$PGUSER sslmode=disable" -Atqc "SELECT COUNT(*) FROM ${sch}.${tbl};" || echo "0")"
+              if [ "$cnt" != "0" ] && [ -z "${ALLOW_NONEMPTY:-}" ]; then exit 1; fi
+            }
 
-              SQL_DISCOVER="
-              WITH c AS (
-                SELECT n.nspname AS schema, c.relname AS table, d.description
-                  FROM pg_class c
-                  JOIN pg_namespace n ON n.oid = c.relnamespace
-                  LEFT JOIN pg_description d ON d.objoid = c.oid AND d.objsubid = 0
-                WHERE c.relkind IN ('r','p') AND d.description IS NOT NULL
-              ),
-              j AS (
-                SELECT schema, \"table\",
-                       CASE WHEN left(description,1)='{' THEN description::jsonb ELSE NULL END AS jdesc
-                FROM c
-              )
-              SELECT json_build_object('schema', schema, 'table',  \"table\", 'cfg', jdesc -> 'bootstrap')
-                FROM j
-               WHERE jdesc ? 'bootstrap'
-                 AND COALESCE( (jdesc->'bootstrap'->>'enabled')::boolean, false ) = true;
-              "
-              DISCOVERED="$(PGPASSWORD="$PGPASSWORD" psql "host=$PGHOST port=$PGPORT dbname=$PGDATABASE user=$PGUSER sslmode=disable" -Atqc "$SQL_DISCOVER" || true)"
-              echo "$DISCOVERED" | while read -r ROW_JSON; do
-                [ -z "$ROW_JSON" ] && continue
-                SCH="$(echo "$ROW_JSON" | jq -r '.schema')"
-                TBL="$(echo "$ROW_JSON" | jq -r '.table')"
-                CFG="$(echo "$ROW_JSON" | jq -c '.cfg // {}')"
-                BQ_TABLE="$(echo "$CFG" | jq -r '.bq // empty')"
-                [ -z "$BQ_TABLE" ] && exit 1
-                PREFIX="$(echo "$CFG" | jq -r '.gcs_prefix // "'$TBL'"')"
-                FMT="$(echo "$CFG" | jq -r '.format // "CSV"')"
-                HDR="$(echo "$CFG" | jq -r '.header // true')"
-                COLS_OVERRIDE="$(echo "$CFG" | jq -r '.columns // empty')"
-                if [ -z "$COLS_OVERRIDE" ] || [ "$COLS_OVERRIDE" = "null" ]; then
-                  COLS="$(get_columns "$SCH" "$TBL")"
-                else
-                  COLS="$(echo "$COLS_OVERRIDE" | awk -F',' '{for(i=1;i<=NF;i++){gsub(/^ +| +$/,"",$i); printf "%s\"%s\"", (i>1?",":""), $i}}')"
-                fi
-                DEST_URI="gs://${BUCKET}/bootstrap/${PREFIX}/${PREFIX}-*.csv"
-                if [ -n "${LOCATION:-}" ]; then BQ_LOC_FLAG="--location=${LOCATION}"; else BQ_LOC_FLAG=""; fi
-                bq ${BQ_LOC_FLAG} --project_id="${PROJECT}" extract \
-                  --destination_format="${FMT}" \
-                  --field_delimiter="," \
-                  --print_header="${HDR}" \
-                  "${BQ_TABLE}" \
-                  "${DEST_URI}"
-                check_empty "$SCH" "$TBL"
-                gsutil cat "gs://${BUCKET}/bootstrap/${PREFIX}/${PREFIX}-*.csv" \
-                | PGPASSWORD="$PGPASSWORD" psql "host=$PGHOST port=$PGPORT dbname=$PGDATABASE user=$PGUSER sslmode=disable" \
-                    -v ON_ERROR_STOP=1 \
-                    -c "\copy ${SCH}.${TBL} (${COLS}) from stdin with (format csv, header ${HDR})"
-              done
+            SQL_DISCOVER="
+            WITH c AS (
+              SELECT n.nspname AS schema, c.relname AS table, d.description
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                LEFT JOIN pg_description d ON d.objoid = c.oid AND d.objsubid = 0
+              WHERE c.relkind IN ('r','p') AND d.description IS NOT NULL
+            ),
+            j AS (
+              SELECT schema, \"table\",
+                     CASE WHEN left(description,1)='{' THEN description::jsonb ELSE NULL END AS jdesc
+              FROM c
+            )
+            SELECT json_build_object('schema', schema, 'table',  \"table\", 'cfg', jdesc -> 'bootstrap')
+              FROM j
+             WHERE jdesc ? 'bootstrap'
+               AND COALESCE( (jdesc->'bootstrap'->>'enabled')::boolean, false ) = true;
+            "
+            DISCOVERED="$(PGPASSWORD="$PGPASSWORD" psql "host=$PGHOST port=$PGPORT dbname=$PGDATABASE user=$PGUSER sslmode=disable" -Atqc "$SQL_DISCOVER" || true)"
+            echo "$DISCOVERED" | while read -r ROW_JSON; do
+              [ -z "$ROW_JSON" ] && continue
+              SCH="$(echo "$ROW_JSON" | jq -r '.schema')"
+              TBL="$(echo "$ROW_JSON" | jq -r '.table')"
+              CFG="$(echo "$ROW_JSON" | jq -c '.cfg // {}')"
+              BQ_TABLE="$(echo "$CFG" | jq -r '.bq // empty')"
+              [ -z "$BQ_TABLE" ] && exit 1
+              PREFIX="$(echo "$CFG" | jq -r '.gcs_prefix // "'$TBL'"')"
+              FMT="$(echo "$CFG" | jq -r '.format // "CSV"')"
+              HDR="$(echo "$CFG" | jq -r '.header // true')"
+              COLS_OVERRIDE="$(echo "$CFG" | jq -r '.columns // empty')"
+              if [ -z "$COLS_OVERRIDE" ] || [ "$COLS_OVERRIDE" = "null" ]; then
+                COLS="$(get_columns "$SCH" "$TBL")"
+              else
+                COLS="$(echo "$COLS_OVERRIDE" | awk -F',' '{for(i=1;i<=NF;i++){gsub(/^ +| +$/,"",$i); printf "%s\"%s\"", (i>1?",":""), $i}}')"
+              fi
+              DEST_URI="gs://${BUCKET}/bootstrap/${PREFIX}/${PREFIX}-*.csv"
+              if [ -n "${LOCATION:-}" ]; then BQ_LOC_FLAG="--location=${LOCATION}"; else BQ_LOC_FLAG=""; fi
+              bq ${BQ_LOC_FLAG} --project_id="${PROJECT}" extract \
+                --destination_format="${FMT}" \
+                --field_delimiter="," \
+                --print_header="${HDR}" \
+                "${BQ_TABLE}" \
+                "${DEST_URI}"
+              check_empty "$SCH" "$TBL"
+              gsutil cat "gs://${BUCKET}/bootstrap/${PREFIX}/${PREFIX}-*.csv" \
+              | PGPASSWORD="$PGPASSWORD" psql "host=$PGHOST port=$PGPORT dbname=$PGDATABASE user=$PGUSER sslmode=disable" \
+                  -v ON_ERROR_STOP=1 \
+                  -c "\copy ${SCH}.${TBL} (${COLS}) from stdin with (format csv, header ${HDR})"
+            done
+
+            # Flag completion
+            cat <<'EOF' | kubectl -n kafka apply -f -
+            apiVersion: v1
+            kind: ConfigMap
+            metadata:
+              name: bootstrap.ok
+              namespace: kafka
+              labels: { app: bq-yb-bootstrap }
+            data:
+              status: "complete"
+              completedAt: "__NOW__"
+            EOF
+      # kubectl comes with google/cloud-sdk by default
 
 # ============================================================================
 # Kafka (wave 2): single-broker KRaft — reads CLUSTER_ID from Secret
@@ -542,21 +556,20 @@ spec:
                 secretKeyRef:
                   name: kafka-cluster-id
                   key: CLUSTER_ID
-          command: ["/bin/sh","-lc"]
-          args:
-            - |
-              set -euo pipefail
-              META="/tmp/kraft-combined-logs/meta.properties"
-              if [ -f "$META" ]; then
-                echo "meta.properties present; not reformatting."
-                grep -E '^cluster\.id=' "$META" || true
-              else
-                echo "Formatting storage with cluster.id=${CLUSTER_ID}"
-                /opt/kafka/bin/kafka-storage.sh format \
-                  -t "${CLUSTER_ID}" \
-                  -c /opt/kafka/config/kraft/server.properties \
-                  --ignore-formatted
-              fi
+          command: ["/bin/sh", "-lc"]
+          args: |
+            set -euo pipefail
+            META="/tmp/kraft-combined-logs/meta.properties"
+            if [ -f "$META" ]; then
+              echo "meta.properties present; not reformatting."
+              grep -E '^cluster\.id=' "$META" || true
+            else
+              echo "Formatting storage with cluster.id=${CLUSTER_ID}"
+              /opt/kafka/bin/kafka-storage.sh format \
+                -t "${CLUSTER_ID}" \
+                -c /opt/kafka/config/kraft/server.properties \
+                --ignore-formatted
+            fi
           volumeMounts:
             - name: kafka-logs
               mountPath: /tmp/kraft-combined-logs
@@ -564,7 +577,6 @@ spec:
         - name: broker
           image: apache/kafka:3.9.0
           imagePullPolicy: IfNotPresent
-          # NOTE: do NOT set CLUSTER_ID here; only initContainer formats storage.
           env:
             - name: KAFKA_NODE_ID
               value: "1"
@@ -599,6 +611,20 @@ spec:
           resources:
             requests: { cpu: "250m", memory: "512Mi" }
             limits:   { cpu: "1000m", memory: "1Gi" }
+  volumeClaimTemplates: []
+  template:
+    metadata:
+      labels: { app: kafka }
+    spec: {}
+  volumeClaimTemplates: []
+  # Volumes below (emptyDir for quickstart)
+  # If you want persistence, replace with a PVC
+  volumeClaimTemplates: []
+  # (StatefulSet spec requires volumes in pod spec)
+  # We'll define them via pod template volumes:
+  # But kafka-logs is mounted by initContainer and container, so:
+  template:
+    spec:
       volumes:
         - name: kafka-logs
           emptyDir: {}
@@ -646,16 +672,15 @@ spec:
       initContainers:
         - name: install-plugins
           image: confluentinc/cp-kafka-connect:7.6.1
-          command: ["/bin/sh","-lc"]
-          args:
-            - |
-              set -e
-              mkdir -p /plugins
-              apt-get update >/dev/null 2>&1 || true
-              apt-get install -y unzip curl >/dev/null 2>&1 || true
-              confluent-hub install --no-prompt --component-dir /plugins confluentinc/kafka-connect-bigquery:${BQ_SINK_VER}
-              curl -fsSL "${YB_DEBEZIUM_URL}" -o /tmp/yb-connector.zip || wget -qO /tmp/yb-connector.zip "${YB_DEBEZIUM_URL}"
-              unzip -o /tmp/yb-connector.zip -d /plugins >/dev/null 2>&1 || true
+          command: ["/bin/sh", "-lc"]
+          args: |
+            set -e
+            mkdir -p /plugins
+            apt-get update >/dev/null 2>&1 || true
+            apt-get install -y unzip curl >/dev/null 2>&1 || true
+            confluent-hub install --no-prompt --component-dir /plugins confluentinc/kafka-connect-bigquery:${BQ_SINK_VER}
+            curl -fsSL "${YB_DEBEZIUM_URL}" -o /tmp/yb-connector.zip || wget -qO /tmp/yb-connector.zip "${YB_DEBEZIUM_URL}"
+            unzip -o /tmp/yb-connector.zip -d /plugins >/dev/null 2>&1 || true
           env:
             - name: BQ_SINK_VER
               value: "2.6.1"
@@ -704,7 +729,9 @@ spec:
           ports:
             - containerPort: 8083
           readinessProbe:
-            httpGet: { path: /connectors, port: 8083 }
+            httpGet:
+              path: /connectors
+              port: 8083
             initialDelaySeconds: 20
             periodSeconds: 5
           resources:
@@ -758,135 +785,129 @@ spec:
       restartPolicy: OnFailure
       initContainers:
         - name: wait-bootstrap-ok
-          image: alpine:3.19
-          command: ["/bin/sh","-lc"]
-          args:
-            - |
-              set -e
-              API="https://kubernetes.default.svc"
-              TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
-              CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-              until [ "$(wget -qO- --header="Authorization: Bearer ${TOKEN}" --ca-certificate="${CACERT}" \
-                "${API}/api/v1/namespaces/kafka/configmaps/bootstrap.ok" \
-                | sed -n 's/.*"status":"\([^"]*\)".*/\1/p')" = "complete" ]; do
-                sleep 5
-              done
+          image: curlimages/curl:8.8.0
+          command: ["/bin/sh", "-lc"]
+          args: |
+            set -e
+            API="https://kubernetes.default.svc"
+            TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+            CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+            until [ "$(curl -sS --cacert "${CACERT}" -H "Authorization: Bearer ${TOKEN}" \
+              "${API}/api/v1/namespaces/kafka/configmaps/bootstrap.ok" \
+              | sed -n 's/.*"status":"\([^"]*\)".*/\1/p')" = "complete" ]; do
+              sleep 5
+            done
       containers:
         - name: registrar
           image: yugabytedb/yugabyte:2024.2.2.0-b105
-          command: ["/bin/bash","-lc"]
-          args:
-            - |
-              set -euo pipefail
-              for f in /vault/secrets/yb /vault/secrets/bq /vault/secrets/pgpass.env; do
-                i=0; while [ ! -s "$f" ]; do i=$((i+1)); [ $i -gt 120 ] && exit 1; sleep 2; done
-                . "$f"
-              done
-              export PGPASSWORD
+          command: ["/bin/bash", "-lc"]
+          args: |
+            set -euo pipefail
+            for f in /vault/secrets/yb /vault/secrets/bq /vault/secrets/pgpass.env; do
+              i=0; while [ ! -s "$f" ]; do i=$((i+1)); [ $i -gt 120 ] && exit 1; sleep 2; done
+              . "$f"
+            done
+            export PGPASSWORD
 
-              until wget -qO- http://kafka-connect.kafka.svc.cluster.local:8083/connectors >/dev/null 2>&1; do
-                sleep 5
-              done
+            until curl -fsS http://kafka-connect.kafka.svc.cluster.local:8083/connectors >/dev/null 2>&1; do
+              sleep 5
+            done
 
-              PGURL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}?sslmode=disable"
+            PGURL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}?sslmode=disable"
 
-              mapfile -t ROWS < <(
-                /home/yugabyte/bin/ysqlsh "${PGURL}" -Atc "
-                  with t as (
-                    select table_schema, table_name,
-                           obj_description((quote_ident(table_schema)||'.'||quote_ident(table_name))::regclass) as comment
-                    from information_schema.tables
-                    where table_type='BASE TABLE'
-                      and table_schema not in ('pg_catalog','information_schema')
-                  )
-                  select table_schema||','||table_name||','||coalesce( (comment::jsonb -> 'bootstrap' ->> 'bq'), '' )
-                  from t
-                  where comment is not null
-                    and ((comment::jsonb -> 'bootstrap' ->> 'enabled')::boolean is true);
-                "
-              )
-              if [ ${#ROWS[@]} -eq 0 ]; then
-                echo "No flagged tables found; exiting."
-                exit 0
+            mapfile -t ROWS < <(
+              /home/yugabyte/bin/ysqlsh "${PGURL}" -Atc "
+                with t as (
+                  select table_schema, table_name,
+                         obj_description((quote_ident(table_schema)||'.'||quote_ident(table_name))::regclass) as comment
+                  from information_schema.tables
+                  where table_type='BASE TABLE'
+                    and table_schema not in ('pg_catalog','information_schema')
+                )
+                select table_schema||','||table_name||','||coalesce( (comment::jsonb -> 'bootstrap' ->> 'bq'), '' )
+                from t
+                where comment is not null
+                  and ((comment::jsonb -> 'bootstrap' ->> 'enabled')::boolean is true);
+              "
+            )
+            if [ ${#ROWS[@]} -eq 0 ]; then
+              echo "No flagged tables found; exiting."
+              exit 0
+            fi
+
+            SERVER_NAME="yb"
+            TABLE_INCLUDE_LIST=""
+            TOPICS=""
+            TOPIC2TABLEMAP=""
+            for R in "${ROWS[@]}"; do
+              SCHEMA="$(echo "$R" | cut -d, -f1)"
+              TBL="$(echo "$R" | cut -d, -f2)"
+              BQMAP="$(echo "$R" | cut -d, -f3-)"
+              FQ="${SCHEMA}.${TBL}"
+              TOPIC="${SERVER_NAME}.${FQ}"
+              TABLE_INCLUDE_LIST="${TABLE_INCLUDE_LIST}${FQ},"
+              TOPICS="${TOPICS}${TOPIC},"
+              if [ -n "$BQMAP" ] && [[ "$BQMAP" == *.* ]]; then
+                TOPIC2TABLEMAP="${TOPIC2TABLEMAP}${TOPIC}:${BQMAP},"
+              else
+                TOPIC2TABLEMAP="${TOPIC2TABLEMAP}${TOPIC}:${BQ_DEFAULT_DATASET}.${TBL},"
               fi
+            done
+            TABLE_INCLUDE_LIST="${TABLE_INCLUDE_LIST%,}"
+            TOPICS="${TOPICS%,}"
+            TOPIC2TABLEMAP="${TOPIC2TABLEMAP%,}"
 
-              SERVER_NAME="yb"
-              TABLE_INCLUDE_LIST=""
-              TOPICS=""
-              TOPIC2TABLEMAP=""
-              for R in "${ROWS[@]}"; do
-                SCHEMA="$(echo "$R" | cut -d, -f1)"
-                TBL="$(echo "$R" | cut -d, -f2)"
-                BQMAP="$(echo "$R" | cut -d, -f3-)"
-                FQ="${SCHEMA}.${TBL}"
-                TOPIC="${SERVER_NAME}.${FQ}"
-                TABLE_INCLUDE_LIST="${TABLE_INCLUDE_LIST}${FQ},"
-                TOPICS="${TOPICS}${TOPIC},"
-                if [ -n "$BQMAP" ] && [[ "$BQMAP" == *.* ]]; then
-                  TOPIC2TABLEMAP="${TOPIC2TABLEMAP}${TOPIC}:${BQMAP},"
-                else
-                  TOPIC2TABLEMAP="${TOPIC2TABLEMAP}${TOPIC}:${BQ_DEFAULT_DATASET}.${TBL},"
-                fi
-              done
-              TABLE_INCLUDE_LIST="${TABLE_INCLUDE_LIST%,}"
-              TOPICS="${TOPICS%,}"
-              TOPIC2TABLEMAP="${TOPIC2TABLEMAP%,}"
-
-              cat > /tmp/yb-source.json <<JSON
-              {
-                "name": "yb-source",
-                "config": {
-                  "connector.class": "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",
-                  "tasks.max": "1",
-                  "database.hostname": "${PGHOST}",
-                  "database.port": "${PGPORT}",
-                  "database.master.addresses": "${YB_MASTER_ADDRESSES}",
-                  "database.user": "${PGUSER}",
-                  "database.password": "${PGPASSWORD}",
-                  "database.dbname": "${PGDATABASE}",
-                  "database.server.name": "${SERVER_NAME}",
-                  "table.include.list": "${TABLE_INCLUDE_LIST}",
-                  "snapshot.mode": "never",
-                  "transforms": "unwrap",
-                  "transforms.unwrap.type": "io.debezium.connector.yugabytedb.transforms.YBExtractNewRecordState",
-                  "topic.creation.default.replication.factor": "1",
-                  "topic.creation.default.partitions": "1",
-                  "topic.creation.default.cleanup.policy": "delete"
-                }
+            cat > /tmp/yb-source.json <<JSON
+            {
+              "name": "yb-source",
+              "config": {
+                "connector.class": "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",
+                "tasks.max": "1",
+                "database.hostname": "${PGHOST}",
+                "database.port": "${PGPORT}",
+                "database.master.addresses": "${YB_MASTER_ADDRESSES}",
+                "database.user": "${PGUSER}",
+                "database.password": "${PGPASSWORD}",
+                "database.dbname": "${PGDATABASE}",
+                "database.server.name": "${SERVER_NAME}",
+                "table.include.list": "${TABLE_INCLUDE_LIST}",
+                "snapshot.mode": "never",
+                "transforms": "unwrap",
+                "transforms.unwrap.type": "io.debezium.connector.yugabytedb.transforms.YBExtractNewRecordState",
+                "topic.creation.default.replication.factor": "1",
+                "topic.creation.default.partitions": "1",
+                "topic.creation.default.cleanup.policy": "delete"
               }
-              JSON
-              wget --method=PUT --header="Content-Type: application/json" \
-                   --body-file=/tmp/yb-source.json \
-                   -qO- http://kafka-connect.kafka.svc.cluster.local:8083/connectors/yb-source/config >/dev/null 2>&1 \
-              || wget --header="Content-Type: application/json" \
-                      --post-file=/tmp/yb-source.json \
-                      -qO- http://kafka-connect.kafka.svc.cluster.local:8083/connectors >/dev/null
+            }
+            JSON
+            curl -fsS -X PUT -H 'Content-Type: application/json' --data-binary @/tmp/yb-source.json \
+              http://kafka-connect.kafka.svc.cluster.local:8083/connectors/yb-source/config \
+              || curl -fsS -X POST -H 'Content-Type: application/json' --data-binary @/tmp/yb-source.json \
+                   http://kafka-connect.kafka.svc.cluster.local:8083/connectors
 
-              cat > /tmp/bq-sink.json <<JSON
-              {
-                "name": "bq-sink",
-                "config": {
-                  "connector.class": "com.wepay.kafka.connect.bigquery.BigQuerySinkConnector",
-                  "tasks.max": "1",
-                  "topics": "${TOPICS}",
-                  "topic2TableMap": "${TOPIC2TABLEMAP}",
-                  "project": "${BQ_PROJECT}",
-                  "defaultDataset": "${BQ_DEFAULT_DATASET}",
-                  "sanitizeTopics": "true",
-                  "autoCreateTables": "false",
-                  "allowNewBigQueryFields": "true",
-                  "allowBigQueryRequiredFieldRelaxation": "true",
-                  "keySource": "JSON",
-                  "keyfile": ${BQ_KEY_JSON}
-                }
+            cat > /tmp/bq-sink.json <<JSON
+            {
+              "name": "bq-sink",
+              "config": {
+                "connector.class": "com.wepay.kafka.connect.bigquery.BigQuerySinkConnector",
+                "tasks.max": "1",
+                "topics": "${TOPICS}",
+                "topic2TableMap": "${TOPIC2TABLEMAP}",
+                "project": "${BQ_PROJECT}",
+                "defaultDataset": "${BQ_DEFAULT_DATASET}",
+                "sanitizeTopics": "true",
+                "autoCreateTables": "false",
+                "allowNewBigQueryFields": "true",
+                "allowBigQueryRequiredFieldRelaxation": "true",
+                "keySource": "JSON",
+                "keyfile": ${BQ_KEY_JSON}
               }
-              JSON
-              wget --method=PUT --header="Content-Type: application/json" \
-                   --body-file=/tmp/bq-sink.json \
-                   -qO- http://kafka-connect.kafka.svc.cluster.local:8083/connectors/bq-sink/config >/dev/null 2>&1 \
-              || wget --header="Content-Type: application/json" \
-                      --post-file=/tmp/bq-sink.json \
-                      -qO- http://kafka-connect.kafka.svc.cluster.local:8083/connectors >/dev/null
+            }
+            JSON
+            curl -fsS -X PUT -H 'Content-Type: application/json' --data-binary @/tmp/bq-sink.json \
+              http://kafka-connect.kafka.svc.cluster.local:8083/connectors/bq-sink/config \
+              || curl -fsS -X POST -H 'Content-Type: application/json' --data-binary @/tmp/bq-sink.json \
+                   http://kafka-connect.kafka.svc.cluster.local:8083/connectors
           resources:
             requests: { cpu: "200m", memory: "256Mi" }
             limits:   { cpu: "1000m", memory: "512Mi" }
