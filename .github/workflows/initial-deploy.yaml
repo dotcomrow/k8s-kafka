@@ -1,5 +1,5 @@
 # ============================================================================
-# Namespace & base RBAC (namespace: kafka)
+# Namespace & RBAC for data bootstrap pipeline (namespace: kafka)
 # ============================================================================
 apiVersion: v1
 kind: Namespace
@@ -43,8 +43,8 @@ roleRef:
 
 # ============================================================================
 # Kafka cluster.id generator (Argo CD PreSync) — namespace: kafka
-#   - SA/RBAC are PreSync (wave 0); Job is PreSync (wave 1)
-#   - Writes Secret kafka-cluster-id (key: CLUSTER_ID) if missing
+#   - Generates once and stores in Secret kafka-cluster-id (key: CLUSTER_ID)
+#   - No curl/wget downloads; no Bitnami
 # ============================================================================
 ---
 apiVersion: v1
@@ -123,8 +123,8 @@ spec:
               mountPath: /work
       containers:
         - name: apply
-          image: bitnami/kubectl:1.29
-          command: ["/bin/bash","-lc"]
+          image: registry.k8s.io/kubectl:v1.29.4
+          command: ["/bin/sh","-lc"]
           args:
             - |
               set -euo pipefail
@@ -146,8 +146,7 @@ spec:
 # ============================================================================
 # Vault CONFIG job (namespace: vault)
 # - Static DB username + dynamic password in KV (secret/<user>:value)
-# - Seeds KV with pg/bq config, binds k8s auth policy
-# - Requires Secret vault/vault-root-token (key: VAULT_TOKEN)
+# - Seeds KV for pg/bq & binds k8s auth
 # ============================================================================
 ---
 apiVersion: batch/v1
@@ -321,6 +320,7 @@ spec:
 
 # ============================================================================
 # One-shot Backfill Job (wave 2): BigQuery -> GCS -> Yugabyte (namespace: kafka)
+#   - google/cloud-sdk already includes kubectl, so no downloads needed
 # ============================================================================
 ---
 apiVersion: batch/v1
@@ -754,6 +754,7 @@ spec:
 # ============================================================================
 # Registration Job (wave 3): Yugabyte→Kafka (Debezium) + Kafka→BigQuery
 #   - Static DB user, dynamic password from Vault KV
+#   - No kubectl downloads; waits for bootstrap with a kubectl initContainer
 # ============================================================================
 ---
 apiVersion: batch/v1
@@ -796,6 +797,21 @@ spec:
     spec:
       serviceAccountName: bq-yb-bootstrap
       restartPolicy: OnFailure
+      volumes:
+        - name: shared
+          emptyDir: {}
+      initContainers:
+        - name: wait-bootstrap-ok
+          image: registry.k8s.io/kubectl:v1.29.4
+          command: ["/bin/sh","-lc"]
+          args:
+            - |
+              set -e
+              echo "Waiting for bootstrap.ok..."
+              until [ "$(kubectl -n kafka get configmap bootstrap.ok -o jsonpath='{.data.status}' 2>/dev/null || true)" = "complete" ]; do
+                echo "  bootstrap.ok not ready"; sleep 5
+              done
+              echo "bootstrap.ok is complete."
       containers:
         - name: registrar
           image: yugabytedb/yugabyte:2024.2.2.0-b105
@@ -804,13 +820,7 @@ spec:
             - |
               set -euo pipefail
 
-              if ! command -v kubectl >/dev/null 2>&1; then
-                VER="$(curl -fsSL https://dl.k8s.io/release/stable.txt || echo v1.29.0)"
-                curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/${VER}/bin/linux/amd64/kubectl" \
-                  || wget -qO /usr/local/bin/kubectl "https://dl.k8s.io/${VER}/bin/linux/amd64/kubectl"
-                chmod +x /usr/local/bin/kubectl
-              fi
-
+              # Load Vault-injected env files
               for f in /vault/secrets/yb /vault/secrets/bq /vault/secrets/pgpass.env; do
                 i=0
                 while [ ! -s "$f" ]; do
@@ -821,14 +831,8 @@ spec:
               done
               export PGPASSWORD
 
-              echo "Waiting for bootstrap.ok..."
-              until [ "$(kubectl -n kafka get configmap bootstrap.ok -o jsonpath='{.data.status}' 2>/dev/null || true)" = "complete" ]; do
-                echo "  bootstrap.ok not ready"; sleep 5
-              done
-
               echo "Waiting for Kafka Connect REST..."
-              until curl -sf http://kafka-connect.kafka.svc.cluster.local:8083/connectors >/dev/null || \
-                    wget -qO- http://kafka-connect.kafka.svc.cluster.local:8083/connectors >/dev/null; do
+              until wget -qO- http://kafka-connect.kafka.svc.cluster.local:8083/connectors >/dev/null 2>&1; do
                 echo "  connect not ready"; sleep 5
               done
 
@@ -906,10 +910,13 @@ spec:
               }
               JSON
 
-              (curl -sf -X PUT -H 'Content-Type: application/json' --data-binary @/tmp/yb-source.json \
-                http://kafka-connect.kafka.svc.cluster.local:8083/connectors/yb-source/config) \
-              || curl -sf -X POST -H 'Content-Type: application/json' --data-binary @/tmp/yb-source.json \
-                http://kafka-connect.kafka.svc.cluster.local:8083/connectors || { echo "❌ register source failed"; exit 1; }
+              # Try PUT first, then fallback to POST (wget only)
+              wget --method=PUT --header="Content-Type: application/json" \
+                   --body-file=/tmp/yb-source.json \
+                   -qO- http://kafka-connect.kafka.svc.cluster.local:8083/connectors/yb-source/config >/dev/null 2>&1 \
+              || wget --header="Content-Type: application/json" \
+                      --post-file=/tmp/yb-source.json \
+                      -qO- http://kafka-connect.kafka.svc.cluster.local:8083/connectors >/dev/null
 
               echo "Registering BigQuery Sink connector..."
               cat > /tmp/bq-sink.json <<JSON
@@ -932,10 +939,12 @@ spec:
               }
               JSON
 
-              (curl -sf -X PUT -H 'Content-Type: application/json' --data-binary @/tmp/bq-sink.json \
-                http://kafka-connect.kafka.svc.cluster.local:8083/connectors/bq-sink/config) \
-              || curl -sf -X POST -H 'Content-Type: application/json' --data-binary @/tmp/bq-sink.json \
-                http://kafka-connect.kafka.svc.cluster.local:8083/connectors || { echo "❌ register sink failed"; exit 1; }
+              wget --method=PUT --header="Content-Type: application/json" \
+                   --body-file=/tmp/bq-sink.json \
+                   -qO- http://kafka-connect.kafka.svc.cluster.local:8083/connectors/bq-sink/config >/dev/null 2>&1 \
+              || wget --header="Content-Type: application/json" \
+                      --post-file=/tmp/bq-sink.json \
+                      -qO- http://kafka-connect.kafka.svc.cluster.local:8083/connectors >/dev/null
 
               echo "✅ Connectors registered."
           resources:
