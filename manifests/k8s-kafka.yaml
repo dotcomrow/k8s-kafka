@@ -51,7 +51,7 @@ roleRef:
 # ============================================================================
 # Kafka cluster.id generator — namespace: kafka
 #   - Generates once and stores in Secret kafka-cluster-id (key: CLUSTER_ID)
-#   - No hooks; use sync-waves to ensure SA/RBAC (wave 0) → Job (wave 1)
+#   - Sync-waves ensure SA/RBAC (wave 0) → Job (wave 1)
 # ============================================================================
 ---
 apiVersion: v1
@@ -351,7 +351,7 @@ spec:
         app: bq-yb-bootstrap
       annotations:
         linkerd.io/inject: "disabled"
-        vault.hashicorp.com/agent-inject: "enabled"
+        vault.hashicorp.com/agent-inject: "true"
         vault.hashicorp.com/role: "data-bootstrap"
 
         # ---- GCP SA key (raw JSON from secret/kafka/bq/exporter.sa_json) ----
@@ -381,7 +381,7 @@ spec:
           {{ with .Data.data.master_addresses }}YB_MASTER_ADDRESSES={{ . }}{{ end }}
           {{- end -}}
 
-        # ---- Static username's password (single-value at secret/<user>:value) ----------
+        # ---- Static username's password ----------
         vault.hashicorp.com/agent-inject-secret-pg-admin.env: "secret/data/vaultadmin"
         vault.hashicorp.com/agent-inject-template-pg-admin.env: |
           {{- with secret "secret/data/vaultadmin" -}}
@@ -395,9 +395,7 @@ spec:
         - name: work
           emptyDir: {}
       containers:
-        # ------------------------------------------------------------
-        # 1) planner+importer: discovers tables & imports after data is ready
-        # ------------------------------------------------------------
+        # 1) importer: discovers tables, waits for CSVs, imports into YB
         - name: importer
           image: yugabytedb/yugabyte:2024.2.2.0-b105
           imagePullPolicy: IfNotPresent
@@ -468,7 +466,6 @@ spec:
               echo "📝 Plan:"
               cat /work/plan.tsv
 
-              # Helper to compute column list if not overridden
               get_columns() {
                 local sch="$1" tbl="$2"
                 /home/yugabyte/bin/ysqlsh "${PGURL}" -A -t -c "
@@ -479,7 +476,6 @@ spec:
                 " | tr -d '\n'
               }
 
-              # Import loop – wait for READY marker from cloudsdk container
               while IFS='|' read -r SCH TBL BQMAP PREFIX FMT HDR COLS; do
                 [ -z "${SCH}" ] && continue
                 [ -n "${BQMAP}" ] || { echo "❌ ${SCH}.${TBL} missing BQ mapping"; exit 1; }
@@ -520,9 +516,7 @@ spec:
               fi
               echo "🎉 Bootstrap import complete."
 
-        # ------------------------------------------------------------
         # 2) cloudsdk: runs BigQuery extract and copies CSVs locally
-        # ------------------------------------------------------------
         - name: cloudsdk
           image: google/cloud-sdk:latest
           imagePullPolicy: IfNotPresent
@@ -826,35 +820,43 @@ metadata:
   namespace: kafka
   annotations:
     argocd.argoproj.io/sync-wave: "5"
-    vault.hashicorp.com/agent-inject: "true"
-    vault.hashicorp.com/role: "data-bootstrap"
-    vault.hashicorp.com/agent-inject-secret-yb: "secret/data/kafka/pgconfig"
-    vault.hashicorp.com/agent-inject-template-yb: |
-      {{- with secret "secret/data/kafka/pgconfig" -}}
-      {{ with .Data.data.host }}PGHOST={{ . }}{{ end }}
-      {{ with .Data.data.port }}PGPORT={{ . }}{{ end }}
-      {{ with .Data.data.database }}PGDATABASE={{ . }}{{ end }}
-      {{ with .Data.data.user }}PGUSER={{ . }}{{ end }}
-      {{ with .Data.data.master_addresses }}YB_MASTER_ADDRESSES={{ . }}{{ end }}
-      {{- end }}
-    vault.hashicorp.com/agent-inject-secret-bq: "secret/data/kafka/bq/config"
-    vault.hashicorp.com/agent-inject-template-bq: |
-      {{- with secret "secret/data/kafka/bq/config" -}}
-      {{ with .Data.data.project }}BQ_PROJECT={{ . }}{{ end }}
-      {{ with .Data.data.dataset }}BQ_DEFAULT_DATASET={{ . }}{{ end }}
-      {{ with .Data.data.sa_json }}BQ_KEY_JSON={{ . | toJSON }}{{ end }}
-      {{- end }}
-    vault.hashicorp.com/agent-inject-secret-pgpass.env: "secret/data/vaultadmin"
-    vault.hashicorp.com/agent-inject-template-pgpass.env: |
-      {{- with secret "secret/data/vaultadmin" -}}
-      PGPASSWORD={{ .Data.data.value }}
-      {{- end }}
 spec:
   backoffLimit: 0
   template:
     metadata:
       annotations:
         linkerd.io/inject: "disabled"
+
+        # Vault injector MUST be on the pod template:
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: "data-bootstrap"
+
+        # YB config
+        vault.hashicorp.com/agent-inject-secret-yb: "secret/data/kafka/pgconfig"
+        vault.hashicorp.com/agent-inject-template-yb: |
+          {{- with secret "secret/data/kafka/pgconfig" -}}
+          {{ with .Data.data.host }}PGHOST={{ . }}{{ end }}
+          {{ with .Data.data.port }}PGPORT={{ . }}{{ end }}
+          {{ with .Data.data.database }}PGDATABASE={{ . }}{{ end }}
+          {{ with .Data.data.user }}PGUSER={{ . }}{{ end }}
+          {{ with .Data.data.master_addresses }}YB_MASTER_ADDRESSES={{ . }}{{ end }}
+          {{- end }}
+
+        # BigQuery config
+        vault.hashicorp.com/agent-inject-secret-bq: "secret/data/kafka/bq/config"
+        vault.hashicorp.com/agent-inject-template-bq: |
+          {{- with secret "secret/data/kafka/bq/config" -}}
+          {{ with .Data.data.project }}BQ_PROJECT={{ . }}{{ end }}
+          {{ with .Data.data.dataset }}BQ_DEFAULT_DATASET={{ . }}{{ end }}
+          {{ with .Data.data.sa_json }}BQ_KEY_JSON={{ . | toJSON }}{{ end }}
+          {{- end }}
+
+        # Static DB password
+        vault.hashicorp.com/agent-inject-secret-pgpass.env: "secret/data/vaultadmin"
+        vault.hashicorp.com/agent-inject-template-pgpass.env: |
+          {{- with secret "secret/data/vaultadmin" -}}
+          PGPASSWORD={{ .Data.data.value }}
+          {{- end }}
     spec:
       serviceAccountName: bq-yb-bootstrap
       restartPolicy: OnFailure
@@ -966,7 +968,7 @@ spec:
               {
                 "name": "bq-sink",
                 "config": {
-                  "connector.class": "com.wepay.kafka.connect.bigQuerySinkConnector",
+                  "connector.class": "com.wepay.kafka.connect.bigquery.BigQuerySinkConnector",
                   "tasks.max": "1",
                   "topics": "${TOPICS}",
                   "topic2TableMap": "${TOPIC2TABLEMAP}",
