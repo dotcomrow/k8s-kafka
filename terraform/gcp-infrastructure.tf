@@ -336,13 +336,13 @@ resource "null_resource" "notify_secret_version" {
         echo "  discovered topics (first few):"
         jq -r '(.topics // []) | .[].name' "$LIST_FILE" | head -n 8 | sed 's/^/    - /'
 
-        # Prefer the *trigger* topic containing region + add-version + trigger-
+        # Prefer the *trigger* topic: eventarc-<region>-...add-version...trigger-
         TOPIC_FQN="$(jq -r --arg region "$REGION" '
           (.topics // []) | .[].name
           | select(contains("eventarc-" + $region + "-") and contains("add-version") and contains("trigger-"))
         ' "$LIST_FILE" | head -n1 || true)"
 
-        # Fallback to the non-trigger variant (... add-version ... -topic)
+        # Fallback to the non-trigger variant (...add-version...-topic)
         if [ -z "$TOPIC_FQN" ]; then
           TOPIC_FQN="$(jq -r --arg region "$REGION" '
             (.topics // []) | .[].name
@@ -353,7 +353,7 @@ resource "null_resource" "notify_secret_version" {
         rm -f "$LIST_FILE"
 
         if [ -z "$TOPIC_FQN" ]; then
-          echo "❌ Could not find *any* Eventarc AddSecretVersion topic in region $REGION."
+          echo "❌ Could not find *any* AddSecretVersion Eventarc topic in region $REGION."
           echo "   Tip: set var.eventarc_add_version_trigger_topic_hint to the exact topic FQN."
           exit 1
         fi
@@ -361,11 +361,21 @@ resource "null_resource" "notify_secret_version" {
         echo "✅ Using topic: $TOPIC_FQN"
       fi
 
-      # ---------- Build the AuditLog entry ----------
-      echo "  payload_len = $(printf '%s' "$AUDIT_JSON" | wc -c | tr -d ' ') bytes"
-      PUB_BODY="$(jq -nc --arg d "$AUDIT_B64" '{messages:[{data:$d}]}' )"
+      # ---------- Build CloudEvents attributes (helps Eventarc treat this as proper event) ----------
+      # ce-type must match the Eventarc trigger type
+      CE_TYPE="google.cloud.audit.log.v1.written"
+      CE_SOURCE="//cloudaudit.googleapis.com/projects/$PROJECT/logs/cloudaudit.googleapis.com%2Factivity"
+      CE_SPEC="1.0"
+      CE_TIME="$(date -u +%FT%TZ)"
+      # simple unique id if uuidgen absent
+      if command -v uuidgen >/dev/null 2>&1; then CE_ID="$(uuidgen)"; else CE_ID="$(date +%s%N)-manual"; fi
 
       # ---------- Publish ----------
+      echo "  payload_len = $(printf '%s' "$AUDIT_JSON" | wc -c | tr -d ' ') bytes"
+      PUB_BODY="$(jq -nc --arg d "$AUDIT_B64" \
+        --arg t "$CE_TYPE" --arg s "$CE_SOURCE" --arg v "$CE_SPEC" --arg i "$CE_ID" --arg tm "$CE_TIME" \
+        '{messages:[{data:$d, attributes:{ "ce-type":$t, "ce-source":$s, "ce-specversion":$v, "ce-id":$i, "ce-time":$tm, "content-type":"application/json"}}]}')"
+
       RESP_FILE="$(mktemp)"
       HTTP_CODE="$(curl -sS -o "$RESP_FILE" -w '%%{http_code}' \
         -H "Authorization: Bearer $ACCESS_TOKEN" \
@@ -381,25 +391,26 @@ resource "null_resource" "notify_secret_version" {
       echo "  message_ids       = $MESSAGE_IDS"
       echo "  publish_response  = $RESP_PREVIEW"
 
-      # Save a small report for Terraform outputs (best-effort)
-        jq -nc \
+      # Save a small report for Terraform outputs (best-effort), include payload preview
+      PAYLOAD_PREVIEW="$(printf '%s' "$AUDIT_JSON" | head -c 500)"
+      jq -nc \
         --arg project "$PROJECT" \
         --arg region "$REGION" \
         --arg secret_id "$SECRET_ID" \
         --arg topic "$TOPIC_FQN" \
         --arg http_code "$HTTP_CODE" \
-        --arg resp_preview "$RESP_PREVIEW" \
         --arg mids "$MESSAGE_IDS" \
+        --arg payload_preview "$PAYLOAD_PREVIEW" \
         --argjson payload "$AUDIT_JSON" \
         '{
-            project: $project,
-            region: $region,
-            secret_id: $secret_id,
-            topic_used: $topic,
-            publish_http_code: ($http_code | tonumber),
-            publish_response_preview: $resp_preview,
-            message_ids: (if $mids == "" then [] else ($mids | split(",")) end),
-            payload_json: $payload
+          project: $project,
+          region: $region,
+          secret_id: $secret_id,
+          topic_used: $topic,
+          publish_http_code: ($http_code | tonumber),
+          message_ids: (if $mids == "" then [] else ($mids | split(",")) end),
+          payload_json: $payload,
+          payload_preview: $payload_preview
         }' \
         > "$PUBLISH_RESULT_PATH"
 
