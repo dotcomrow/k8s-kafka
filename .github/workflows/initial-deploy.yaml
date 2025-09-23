@@ -44,7 +44,7 @@ roleRef:
 # ============================================================================
 # Kafka cluster.id generator (Argo CD PreSync) — namespace: kafka
 #   - Generates once and stores in Secret kafka-cluster-id (key: CLUSTER_ID)
-#   - No curl/wget, no Bitnami, no kubectl downloads
+#   - No curl/wget, no self-install, no Bitnami
 # ============================================================================
 ---
 apiVersion: v1
@@ -110,7 +110,7 @@ spec:
             set -euo pipefail
             NS="kafka"
 
-            # If the secret already exists and has CLUSTER_ID, keep it.
+            # Keep existing secret if it already has a CLUSTER_ID
             if kubectl -n "$NS" get secret kafka-cluster-id >/dev/null 2>&1; then
               EXIST="$(kubectl -n "$NS" get secret kafka-cluster-id -o jsonpath='{.data.CLUSTER_ID}' 2>/dev/null || true)"
               if [ -n "$EXIST" ]; then
@@ -119,10 +119,8 @@ spec:
               fi
             fi
 
-            # Generate a Kafka-compatible Base64URL 22-char ID (16 random bytes, base64 URL-safe, no '=')
-            CID="$(head -c 16 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=[:space:]')"
-            # Safety: enforce length 22
-            CID="$(printf '%s' "$CID" | cut -c1-22)"
+            # Generate Kafka Base64URL 22-char id (16 bytes, URL-safe, strip '=')
+            CID="$(head -c 16 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=[:space:]' | cut -c1-22)"
             echo "Generated cluster.id: ${CID}"
 
             kubectl -n "$NS" create secret generic kafka-cluster-id \
@@ -135,7 +133,6 @@ spec:
 # ============================================================================
 # Vault CONFIG job (namespace: vault)
 # - Static DB username + dynamic password in KV (secret/<user>:value)
-# - Seeds KV for pg/bq & binds k8s auth
 # ============================================================================
 ---
 apiVersion: batch/v1
@@ -309,6 +306,7 @@ spec:
 
 # ============================================================================
 # One-shot Backfill Job (wave 2): BigQuery -> GCS -> Yugabyte (namespace: kafka)
+#   - Uses sidecar kubectl to write bootstrap.ok (no kubectl in main)
 # ============================================================================
 ---
 apiVersion: batch/v1
@@ -358,6 +356,11 @@ spec:
     spec:
       serviceAccountName: bq-yb-bootstrap
       restartPolicy: Never
+      volumes:
+        - name: vault-secrets
+          emptyDir: {}
+        - name: work
+          emptyDir: {}
       containers:
       - name: runner
         image: google/cloud-sdk:latest
@@ -368,10 +371,14 @@ spec:
         volumeMounts:
           - name: vault-secrets
             mountPath: /vault/secrets
+          - name: work
+            mountPath: /work
         command: ["/bin/sh","-lc"]
         args:
           - |
             set -eu
+
+            # Wait for Vault-injected files
             for f in /vault/secrets/bootstrap.env /vault/secrets/pg.env /vault/secrets/pg-admin.env /vault/secrets/gcp-key.json; do
               i=0
               while [ ! -s "$f" ]; do
@@ -379,6 +386,8 @@ spec:
                 echo "⏳ Waiting for Vault secret $f..."; sleep 2
               done
             done
+
+            # Load env
             . /vault/secrets/bootstrap.env
             . /vault/secrets/pg.env
             . /vault/secrets/pg-admin.env
@@ -391,6 +400,7 @@ spec:
 
             echo "✅ Secrets loaded. PROJECT=${PROJECT:-unset} BUCKET=${BUCKET:-unset} PGHOST=${PGHOST}"
 
+            # Tools
             apt-get update >/dev/null
             apt-get install -y --no-install-recommends postgresql-client jq >/dev/null
             apt-get clean; rm -rf /var/lib/apt/lists/*
@@ -404,6 +414,7 @@ spec:
                  WHERE table_schema=$$${sch}$$ AND table_name=$$${tbl}$$
                  ORDER BY ordinal_position;" | tr -d '\n'
             }
+
             check_empty() {
               local sch="$1" tbl="$2"
               local cnt
@@ -431,6 +442,7 @@ spec:
              WHERE jdesc ? 'bootstrap'
                AND COALESCE( (jdesc->'bootstrap'->>'enabled')::boolean, false ) = true;
             "
+
             DISCOVERED="$(PGPASSWORD="$PGPASSWORD" psql "host=$PGHOST port=$PGPORT dbname=$PGDATABASE user=$PGUSER sslmode=disable" -Atqc "$SQL_DISCOVER" || true)"
             if [ -z "${DISCOVERED}" ]; then
               echo "ℹ️  No tables flagged for bootstrap (COMMENT JSON missing or enabled=false)."
@@ -476,7 +488,26 @@ spec:
               echo "✅ Imported ${SCH}.${TBL}"
             done
 
-            kubectl -n kafka apply -f - <<'EOF'
+            # Signal completion to the sidecar (include timestamp)
+            date -Is > /work/done
+      - name: flag-bootstrap-ok
+        image: registry.k8s.io/kubectl:v1.29.4
+        imagePullPolicy: IfNotPresent
+        volumeMounts:
+          - name: work
+            mountPath: /work
+        command: ["/bin/sh","-lc"]
+        args:
+          - |
+            set -e
+            echo "Waiting for /work/done..."
+            i=0
+            while [ ! -s /work/done ]; do
+              i=$((i+1)); [ $i -gt 360 ] && echo "❌ Timeout waiting for completion flag" && exit 1
+              sleep 2
+            done
+            TS="$(cat /work/done)"
+            cat <<EOF | kubectl -n kafka apply -f -
             apiVersion: v1
             kind: ConfigMap
             metadata:
@@ -485,16 +516,12 @@ spec:
               labels: { app: bq-yb-bootstrap }
             data:
               status: "complete"
-              completedAt: "__NOW__"
+              completedAt: "${TS}"
             EOF
-
-            echo "🎉 Bootstrap complete."
+            echo "bootstrap.ok applied."
         resources:
-          requests: { cpu: "250m", memory: "512Mi" }
-          limits:   { cpu: "1000m", memory: "1Gi" }
-      volumes:
-        - name: vault-secrets
-          emptyDir: {}
+          requests: { cpu: "10m", memory: "32Mi" }
+          limits:   { cpu: "200m", memory: "64Mi" }
 
 # ============================================================================
 # Kafka (wave 1): single-broker KRaft — reads CLUSTER_ID from Secret
@@ -538,7 +565,7 @@ metadata:
   name: kafka
   namespace: kafka
   annotations:
-    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-wave: "2"
 spec:
   serviceName: kafka-hs
   replicas: 1
@@ -628,7 +655,7 @@ spec:
 
 # ============================================================================
 # Kafka Connect (wave 1): BigQuery Sink + Debezium YB gRPC (namespace: kafka)
-#   (kept as-is; uses curl only inside this container to fetch plugins)
+#   (curl/wget only for plugin fetch inside this image; no kubectl anywhere)
 # ============================================================================
 ---
 apiVersion: v1
@@ -637,7 +664,7 @@ metadata:
   name: kafka-connect
   namespace: kafka
   annotations:
-    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-wave: "2"
 spec:
   type: ClusterIP
   ports:
@@ -653,7 +680,7 @@ metadata:
   name: kafka-connect
   namespace: kafka
   annotations:
-    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-wave: "2"
 spec:
   replicas: 1
   selector:
@@ -744,7 +771,7 @@ spec:
 # ============================================================================
 # Registration Job (wave 3): Yugabyte→Kafka (Debezium) + Kafka→BigQuery
 #   - Static DB user, dynamic password from Vault KV
-#   - No kubectl downloads; waits for bootstrap via kubectl initContainer
+#   - No kubectl in main; wait for bootstrap.ok via kubectl initContainer
 # ============================================================================
 ---
 apiVersion: batch/v1
@@ -908,7 +935,7 @@ spec:
               {
                 "name": "bq-sink",
                 "config": {
-                  "connector.class": "com.wepay.kafka.connect.bigQuerySinkConnector",
+                  "connector.class": "com.wepay.kafka.connect.bigquery.BigQuerySinkConnector",
                   "tasks.max": "1",
                   "topics": "${TOPICS}",
                   "topic2TableMap": "${TOPIC2TABLEMAP}",
