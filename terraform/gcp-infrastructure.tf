@@ -269,13 +269,6 @@ resource "google_project_iam_audit_config" "pubsub_data_access" {
 # ---------- inputs ----------
 variable "vault_sync_topic_name" { type = string } # e.g. "eventarc-us-east1-vault-add-version-topic"
 
-# Optional override (leave empty to auto-discover)
-variable "eventarc_add_version_trigger_topic_hint" {
-  type        = string
-  default     = "" # projects/<id>/topics/<name> OR just <name>
-  description = "Override the Eventarc AddSecretVersion trigger Pub/Sub topic"
-}
-
 resource "null_resource" "notify_secret_version" {
   triggers = {
     version      = google_secret_manager_secret_version.k8s_kafka_sa_json_v.name
