@@ -211,7 +211,7 @@ resource "google_secret_manager_secret_version" "pipeline_key_v" {
 # Secret container (auto replication; provider v5 syntax)
 resource "google_secret_manager_secret" "k8s_kafka_sa_json" {
   project   = var.secrets_project_id
-  secret_id = "k8s-kafka-gcp-sesrvice-account-json"
+  secret_id = "k8s-kafka-gcp-service-account-json"
 
   replication {
     auto {}

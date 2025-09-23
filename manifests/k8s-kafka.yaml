@@ -128,7 +128,7 @@ spec:
               BQ_DEFAULT_DATASET="${BQ_DEFAULT_DATASET:-}"  # e.g. analytics
               # Raw JSON for a SA key that needs BigQuery & GCS perms (optional)
               # inside yb-vault-config before put_bq_config/put_bq_exporter_key
-              SYNCED="$(vault kv get -format=json 'secret/k8s-kafka-gcp-sesrvice-account-json' 2>/dev/null || true)"
+              SYNCED="$(vault kv get -format=json 'secret/data/k8s-kafka-gcp-service-account-json' 2>/dev/null || true)"
               if [ -n "$SYNCED" ]; then
                 BQ_SA_JSON="$(echo "$SYNCED" | jq -r '.data.data.value')"
               fi
