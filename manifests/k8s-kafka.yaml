@@ -612,6 +612,10 @@ spec:
               fi
             done
 
+            find /out/yugabytedb -type f \
+              \( -iname '*cloudevents*.jar' -o -iname 'debezium-converter-cloud-events-*.jar' \) \
+              -print -delete || true
+
             echo "❌ Could not find connector payload in known locations. Listing hints:" >&2
             ls -la / >&2
             ls -la /kafka || true >&2
@@ -622,7 +626,7 @@ spec:
           - { name: plugins, mountPath: /out }
       containers:
       - name: connect
-        image: confluentinc/cp-kafka-connect:7.6.1
+        image: quay.io/debezium/connect:1.9.7.Final
         imagePullPolicy: IfNotPresent
         env:
         - name: CLUSTER_ID
