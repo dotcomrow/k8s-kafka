@@ -968,7 +968,7 @@ spec:
         - { name: ON_DISABLE, value: "pause" }   # pause|keep (hook point)
         - { name: ON_DELETE,  value: "keep" }    # keep (hook point)
         command: ["/bin/bash","-lc"]
-                args:
+        args:
           - |
             set -euo pipefail
             for f in /vault/secrets/yb.env /vault/secrets/pgpass.env /vault/secrets/bq.env; do
