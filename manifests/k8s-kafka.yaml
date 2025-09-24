@@ -895,6 +895,7 @@ spec:
           - --provider=github
           - --http-address=0.0.0.0:4180
           - --upstream=http://kafka-ui.kafka.svc.cluster.local:8080/
+          - --redirect-url=https://kafka-gui.app.suncoast.systems/oauth2/callback
           - --cookie-secure=true
           - --cookie-samesite=lax
           - --cookie-refresh=1h
