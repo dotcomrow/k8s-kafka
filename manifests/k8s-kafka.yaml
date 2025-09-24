@@ -975,128 +975,129 @@ spec:
         - { name: ON_DISABLE, value: "pause" }   # pause|keep (hook point)
         - { name: ON_DELETE,  value: "keep" }    # keep (hook point)
         command: ["/bin/bash","-lc"]
-        args: |
-          set -euo pipefail
-          for f in /vault/secrets/yb.env /vault/secrets/pgpass.env /vault/secrets/bq.env; do
-            i=0; while [ ! -s "$f" ]; do i=$((i+1)); [ $i -gt 120 ] && echo "vault secrets missing" && exit 1; sleep 2; done
-            . "$f"
-          done
-          export PGPASSWORD
-          PGHOST="${PGHOST:-yb-tserver-service.yugabyte.svc.cluster.local}"
-          PGPORT="${PGPORT:-5433}"
-          PGDATABASE="${PGDATABASE:-kafka}"
-          PGUSER="${PGUSER:-vaultadmin}"
-          PGURL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}?sslmode=disable"
-          STATE=/state/tables.json
+        args: 
+          - |
+            set -euo pipefail
+            for f in /vault/secrets/yb.env /vault/secrets/pgpass.env /vault/secrets/bq.env; do
+              i=0; while [ ! -s "$f" ]; do i=$((i+1)); [ $i -gt 120 ] && echo "vault secrets missing" && exit 1; sleep 2; done
+              . "$f"
+            done
+            export PGPASSWORD
+            PGHOST="${PGHOST:-yb-tserver-service.yugabyte.svc.cluster.local}"
+            PGPORT="${PGPORT:-5433}"
+            PGDATABASE="${PGDATABASE:-kafka}"
+            PGUSER="${PGUSER:-vaultadmin}"
+            PGURL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}?sslmode=disable"
+            STATE=/state/tables.json
 
-          get_plan() {
-            /home/yugabyte/bin/ysqlsh "${PGURL}" -A -t -F '|' -c "
-              WITH t AS (
-                SELECT n.nspname AS schema, c.relname AS table, d.description
-                  FROM pg_class c
-                  JOIN pg_namespace n ON n.oid = c.relnamespace
-                  LEFT JOIN pg_description d ON d.objoid = c.oid AND d.objsubid = 0
-                 WHERE c.relkind IN ('r','p') AND d.description IS NOT NULL
-              ),
-              j AS (
-                SELECT schema, \"table\", CASE WHEN left(description,1)='{' THEN description::jsonb ELSE NULL END AS jdesc
-                FROM t
-              ),
-              b AS (
+            get_plan() {
+              /home/yugabyte/bin/ysqlsh "${PGURL}" -A -t -F '|' -c "
+                WITH t AS (
+                  SELECT n.nspname AS schema, c.relname AS table, d.description
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    LEFT JOIN pg_description d ON d.objoid = c.oid AND d.objsubid = 0
+                  WHERE c.relkind IN ('r','p') AND d.description IS NOT NULL
+                ),
+                j AS (
+                  SELECT schema, \"table\", CASE WHEN left(description,1)='{' THEN description::jsonb ELSE NULL END AS jdesc
+                  FROM t
+                ),
+                b AS (
+                  SELECT schema, \"table\",
+                        jdesc->'bootstrap' AS b
+                  FROM j WHERE jdesc ? 'bootstrap'
+                )
                 SELECT schema, \"table\",
-                       jdesc->'bootstrap' AS b
-                FROM j WHERE jdesc ? 'bootstrap'
-              )
-              SELECT schema, \"table\",
-                     COALESCE(b->>'bq','') AS bq,
-                     COALESCE(b->>'gcs_prefix', \"table\") AS gcs_prefix,
-                     COALESCE(b->>'format','CSV') AS format,
-                     COALESCE(b->>'header','true') AS header,
-                     COALESCE(b->>'columns','') AS columns,
-                     COALESCE((b->>'enabled')::boolean,false) AS enabled
-              FROM b;" \
-            | awk -F'|' 'BEGIN{print "["} {printf "%s{\"schema\":\"%s\",\"table\":\"%s\",\"bq\":\"%s\",\"prefix\":\"%s\",\"fmt\":\"%s\",\"hdr\":\"%s\",\"cols\":\"%s\",\"enabled\":%s}",(NR>1?",":""),$1,$2,$3,$4,$5,$6,$7,$8} END{print "]"}'
-          }
+                      COALESCE(b->>'bq','') AS bq,
+                      COALESCE(b->>'gcs_prefix', \"table\") AS gcs_prefix,
+                      COALESCE(b->>'format','CSV') AS format,
+                      COALESCE(b->>'header','true') AS header,
+                      COALESCE(b->>'columns','') AS columns,
+                      COALESCE((b->>'enabled')::boolean,false) AS enabled
+                FROM b;" \
+              | awk -F'|' 'BEGIN{print "["} {printf "%s{\"schema\":\"%s\",\"table\":\"%s\",\"bq\":\"%s\",\"prefix\":\"%s\",\"fmt\":\"%s\",\"hdr\":\"%s\",\"cols\":\"%s\",\"enabled\":%s}",(NR>1?",":""),$1,$2,$3,$4,$5,$6,$7,$8} END{print "]"}'
+            }
 
-          render_connect() {
-            python3 - "$BQ_DEFAULT_DATASET" "$SERVER_NAME" <<'PY'
-            import sys,json
-            rows=json.load(sys.stdin)
-            dataset=sys.argv[1]
-            server=sys.argv[2]
-            enabled=[r for r in rows if r.get("enabled")]
-            def fq(r): return f'{r["schema"]}.{r["table"]}'
-            table_list=",".join(fq(r) for r in enabled)
-            topics=",".join(f'{server}.{fq(r)}' for r in enabled)
-            t2map=[]
-            for r in enabled:
-              bq=r.get("bq") or f"{dataset}.{r['table']}"
-              t2map.append(f'{server}.{fq(r)}:{bq}')
-            print(json.dumps({
-              "table_include_list": table_list,
-              "topics": topics,
-              "topic2TableMap": ",".join(t2map)
-            }))
-          PY
-          }
+            render_connect() {
+              python3 - "$BQ_DEFAULT_DATASET" "$SERVER_NAME" <<'PY'
+              import sys,json
+              rows=json.load(sys.stdin)
+              dataset=sys.argv[1]
+              server=sys.argv[2]
+              enabled=[r for r in rows if r.get("enabled")]
+              def fq(r): return f'{r["schema"]}.{r["table"]}'
+              table_list=",".join(fq(r) for r in enabled)
+              topics=",".join(f'{server}.{fq(r)}' for r in enabled)
+              t2map=[]
+              for r in enabled:
+                bq=r.get("bq") or f"{dataset}.{r['table']}"
+                t2map.append(f'{server}.{fq(r)}:{bq}')
+              print(json.dumps({
+                "table_include_list": table_list,
+                "topics": topics,
+                "topic2TableMap": ",".join(t2map)
+              }))
+            PY
+            }
 
-          first=1
-          while true; do
-            CUR="$(get_plan)"
-            PREV="[]"; [ -s "$STATE" ] && PREV="$(cat "$STATE")"
-            if [ "$CUR" != "$PREV" ] || [ "$first" = 1 ]; then
-              echo "$CUR" > "$STATE"
+            first=1
+            while true; do
+              CUR="$(get_plan)"
+              PREV="[]"; [ -s "$STATE" ] && PREV="$(cat "$STATE")"
+              if [ "$CUR" != "$PREV" ] || [ "$first" = 1 ]; then
+                echo "$CUR" > "$STATE"
 
-              CFG="$(printf '%s' "$CUR" | render_connect)"
-              TABLES="$(echo "$CFG" | python3 -c 'import sys,json;print(json.load(sys.stdin)["table_include_list"])')"
-              TOPICS="$(echo "$CFG" | python3 -c 'import sys,json;print(json.load(sys.stdin)["topics"])')"
-              T2MAP="$(echo "$CFG" | python3 -c 'import sys,json;print(json.load(sys.stdin)["topic2TableMap"])')"
+                CFG="$(printf '%s' "$CUR" | render_connect)"
+                TABLES="$(echo "$CFG" | python3 -c 'import sys,json;print(json.load(sys.stdin)["table_include_list"])')"
+                TOPICS="$(echo "$CFG" | python3 -c 'import sys,json;print(json.load(sys.stdin)["topics"])')"
+                T2MAP="$(echo "$CFG" | python3 -c 'import sys,json;print(json.load(sys.stdin)["topic2TableMap"])')"
 
-              cat > /tmp/yb-source.json <<JSON
-              {"name":"yb-source","config":{
-                "connector.class":"io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",
-                "tasks.max":"1",
-                "database.hostname":"${PGHOST}",
-                "database.port":"${PGPORT}",
-                "database.master.addresses":"${YB_MASTER_ADDRESSES}",
-                "database.user":"${PGUSER}",
-                "database.password":"${PGPASSWORD}",
-                "database.dbname":"${PGDATABASE}",
-                "database.server.name":"${SERVER_NAME}",
-                "table.include.list":"${TABLES}",
-                "snapshot.mode":"never",
-                "transforms":"unwrap",
-                "transforms.unwrap.type":"io.debezium.connector.yugabytedb.transforms.YBExtractNewRecordState",
-                "topic.creation.default.replication.factor":"1",
-                "topic.creation.default.partitions":"1",
-                "topic.creation.default.cleanup.policy":"delete"}}
-              JSON
-              curl -fsS -X PUT -H 'Content-Type: application/json' --data-binary @/tmp/yb-source.json \
-                "${CONNECT_URL}/connectors/yb-source/config" \
-                || curl -fsS -X POST -H 'Content-Type: application/json' --data-binary @/tmp/yb-source.json \
-                     "${CONNECT_URL}/connectors"
+                cat > /tmp/yb-source.json <<JSON
+                {"name":"yb-source","config":{
+                  "connector.class":"io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",
+                  "tasks.max":"1",
+                  "database.hostname":"${PGHOST}",
+                  "database.port":"${PGPORT}",
+                  "database.master.addresses":"${YB_MASTER_ADDRESSES}",
+                  "database.user":"${PGUSER}",
+                  "database.password":"${PGPASSWORD}",
+                  "database.dbname":"${PGDATABASE}",
+                  "database.server.name":"${SERVER_NAME}",
+                  "table.include.list":"${TABLES}",
+                  "snapshot.mode":"never",
+                  "transforms":"unwrap",
+                  "transforms.unwrap.type":"io.debezium.connector.yugabytedb.transforms.YBExtractNewRecordState",
+                  "topic.creation.default.replication.factor":"1",
+                  "topic.creation.default.partitions":"1",
+                  "topic.creation.default.cleanup.policy":"delete"}}
+                JSON
+                curl -fsS -X PUT -H 'Content-Type: application/json' --data-binary @/tmp/yb-source.json \
+                  "${CONNECT_URL}/connectors/yb-source/config" \
+                  || curl -fsS -X POST -H 'Content-Type: application/json' --data-binary @/tmp/yb-source.json \
+                      "${CONNECT_URL}/connectors"
 
-              cat > /tmp/bq-sink.json <<JSON
-              {"name":"bq-sink","config":{
-                "connector.class":"com.wepay.kafka.connect.bigquery.BigQuerySinkConnector",
-                "tasks.max":"1",
-                "topics":"${TOPICS}",
-                "topic2TableMap":"${T2MAP}",
-                "project":"${BQ_PROJECT}",
-                "defaultDataset":"${BQ_DEFAULT_DATASET}",
-                "sanitizeTopics":"true",
-                "autoCreateTables":"false",
-                "allowNewBigQueryFields":"true",
-                "allowBigQueryRequiredFieldRelaxation":"true",
-                "keySource":"JSON",
-                "keyfile": ${BQ_KEY_JSON} }}
-              JSON
-              curl -fsS -X PUT -H 'Content-Type: application/json' --data-binary @/tmp/bq-sink.json \
-                "${CONNECT_URL}/connectors/bq-sink/config" \
-                || curl -fsS -X POST -H 'Content-Type: application/json' --data-binary @/tmp/bq-sink.json \
-                     "${CONNECT_URL}/connectors"
+                cat > /tmp/bq-sink.json <<JSON
+                {"name":"bq-sink","config":{
+                  "connector.class":"com.wepay.kafka.connect.bigquery.BigQuerySinkConnector",
+                  "tasks.max":"1",
+                  "topics":"${TOPICS}",
+                  "topic2TableMap":"${T2MAP}",
+                  "project":"${BQ_PROJECT}",
+                  "defaultDataset":"${BQ_DEFAULT_DATASET}",
+                  "sanitizeTopics":"true",
+                  "autoCreateTables":"false",
+                  "allowNewBigQueryFields":"true",
+                  "allowBigQueryRequiredFieldRelaxation":"true",
+                  "keySource":"JSON",
+                  "keyfile": ${BQ_KEY_JSON} }}
+                JSON
+                curl -fsS -X PUT -H 'Content-Type: application/json' --data-binary @/tmp/bq-sink.json \
+                  "${CONNECT_URL}/connectors/bq-sink/config" \
+                  || curl -fsS -X POST -H 'Content-Type: application/json' --data-binary @/tmp/bq-sink.json \
+                      "${CONNECT_URL}/connectors"
 
-              first=0
-            fi
-            sleep "${SCAN_INTERVAL}"
-          done
+                first=0
+              fi
+              sleep "${SCAN_INTERVAL}"
+            done
