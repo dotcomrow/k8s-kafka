@@ -692,6 +692,8 @@ spec:
         linkerd.io/inject: "disabled"
         vault.hashicorp.com/agent-inject: "true"
         vault.hashicorp.com/role: "data-bootstrap"
+        vault.hashicorp.com/agent-pre-populate-only: "true"
+        vault.hashicorp.com/exit-on-error: "false"
         vault.hashicorp.com/agent-inject-secret-yb: "secret/data/kafka/pgconfig"
         vault.hashicorp.com/agent-inject-template-yb: |
           {{- with secret "secret/data/kafka/pgconfig" -}}
