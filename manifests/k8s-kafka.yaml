@@ -7,7 +7,6 @@ metadata:
   name: kafka
   labels:
     app: bq-yb-bootstrap
-    vault.hashicorp.com/agent-inject: "enabled"   # <— enable Vault injection by ns selector
   annotations:
     linkerd.io/inject: "disabled"
     scheduler.alpha.kubernetes.io/node-selector: "dedicated=ctrl-node"
@@ -51,7 +50,6 @@ roleRef:
 
 # ============================================================================
 # Kafka cluster.id generator — namespace: kafka
-#   - Generates once and stores in Secret kafka-cluster-id (key: CLUSTER_ID)
 # ============================================================================
 ---
 apiVersion: v1
@@ -157,7 +155,7 @@ spec:
               mountPath: /work
 
 # ============================================================================
-# Vault CONFIG job — namespace: vault (static user + dynamic password via KV)
+# Vault CONFIG job — namespace: vault
 # ============================================================================
 ---
 apiVersion: batch/v1
@@ -276,8 +274,6 @@ spec:
 
 # ============================================================================
 # One-shot Backfill Job (wave 2) — namespace: kafka
-#   - planner/importer/cloudsdk run as regular containers (not init)
-#   - vault agent injection works before they start
 # ============================================================================
 ---
 apiVersion: batch/v1
@@ -298,15 +294,11 @@ spec:
         linkerd.io/inject: "disabled"
         vault.hashicorp.com/agent-inject: "true"
         vault.hashicorp.com/role: "data-bootstrap"
-
-        # GCP SA key
         vault.hashicorp.com/agent-inject-secret-gcp-key.json: "secret/data/kafka/bq/exporter"
         vault.hashicorp.com/agent-inject-template-gcp-key.json: |
           {{- with secret "secret/data/kafka/bq/exporter" -}}
           {{ .Data.data.sa_json }}
           {{- end -}}
-
-        # Bootstrap env
         vault.hashicorp.com/agent-inject-secret-bootstrap.env: "secret/data/kafka/bq/bootstrap"
         vault.hashicorp.com/agent-inject-template-bootstrap.env: |
           {{- with secret "secret/data/kafka/bq/bootstrap" -}}
@@ -314,8 +306,6 @@ spec:
           {{ with .Data.data.project }}PROJECT={{ . }}{{ end }}
           {{ with .Data.data.location }}LOCATION={{ . }}{{ end }}
           {{- end -}}
-
-        # DB config
         vault.hashicorp.com/agent-inject-secret-pg.env: "secret/data/kafka/pgconfig"
         vault.hashicorp.com/agent-inject-template-pg.env: |
           {{- with secret "secret/data/kafka/pgconfig" -}}
@@ -325,8 +315,6 @@ spec:
           {{ with .Data.data.user }}PGUSER={{ . }}{{ end }}
           {{ with .Data.data.master_addresses }}YB_MASTER_ADDRESSES={{ . }}{{ end }}
           {{- end -}}
-
-        # Static PG password
         vault.hashicorp.com/agent-inject-secret-pg-admin.env: "secret/data/vaultadmin"
         vault.hashicorp.com/agent-inject-template-pg-admin.env: |
           {{- with secret "secret/data/vaultadmin" -}}
@@ -340,7 +328,7 @@ spec:
         - name: work
           emptyDir: {}
       containers:
-        # 1) planner: produces /work/plan.tsv or /work/NO_TABLES
+        # 1) planner: writes plan.tsv or NO_TABLES
         - name: planner
           image: yugabytedb/yugabyte:latest
           volumeMounts: [{ name: work, mountPath: /work }]
@@ -348,6 +336,7 @@ spec:
           args:
             - |
               set -euo pipefail
+              # Need PG env only if we are going to query; but that's always for planning.
               for f in /vault/secrets/pg.env /vault/secrets/pg-admin.env; do
                 i=0; while [ ! -s "$f" ]; do i=$((i+1)); [ $i -gt 300 ] && echo "❌ Timeout waiting for $f" && exit 1; echo "⏳ waiting for $f..."; sleep 2; done
                 . "$f"
@@ -359,7 +348,6 @@ spec:
               : "${PGUSER:=vaultadmin}"
               PGURL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}?sslmode=disable"
 
-              # wait DB
               for i in $(seq 1 60); do
                 /home/yugabyte/bin/ysqlsh "${PGURL}" -Atc "select 1" >/dev/null 2>&1 && break
                 [ "$i" -eq 60 ] && echo "❌ DB unreachable" && exit 1
@@ -397,7 +385,7 @@ spec:
                 echo "ℹ️  No flagged tables."
               fi
 
-        # 2) importer: reads plan & imports when cloudsdk writes files
+        # 2) importer: exits immediately if NO_TABLES (no Vault wait)
         - name: importer
           image: yugabytedb/yugabyte:latest
           volumeMounts: [{ name: work, mountPath: /work }]
@@ -405,6 +393,13 @@ spec:
           args:
             - |
               set -euo pipefail
+              # Fast-path: nothing to do
+              if [ -f /work/NO_TABLES ]; then
+                echo "No tables to import. Marking DONE."
+                touch /work/DONE
+                exit 0
+              fi
+
               . /vault/secrets/pg.env
               . /vault/secrets/pg-admin.env
               export PGPASSWORD
@@ -414,15 +409,9 @@ spec:
               : "${PGUSER:=vaultadmin}"
               PGURL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}?sslmode=disable"
 
-              # wait for plan or NO_TABLES
-              i=0; while [ ! -s /work/plan.tsv ] && [ ! -f /work/NO_TABLES ]; do
+              i=0; while [ ! -s /work/plan.tsv ]; do
                 i=$((i+1)); [ $i -gt 300 ] && echo "❌ Timeout waiting for plan.tsv" && exit 1; sleep 2
               done
-              if [ -f /work/NO_TABLES ]; then
-                echo "No tables to import."
-                touch /work/DONE
-                exit 0
-              fi
 
               get_columns() {
                 local sch="$1" tbl="$2"
@@ -456,7 +445,7 @@ spec:
               touch /work/DONE
               echo "✅ Import complete."
 
-        # 3) cloudsdk: exports BQ and copies CSVs into shared volume
+        # 3) cloudsdk: exits immediately if NO_TABLES
         - name: cloudsdk
           image: google/cloud-sdk:latest
           env:
@@ -469,11 +458,10 @@ spec:
           args:
             - |
               set -euo pipefail
-              # wait for plan or NO_TABLES
-              i=0; while [ ! -s /work/plan.tsv ] && [ ! -f /work/NO_TABLES ]; do
-                i=$((i+1)); [ $i -gt 300 ] && echo "❌ Timeout waiting for plan.tsv" && exit 1; sleep 2
-              done
-              [ -f /work/NO_TABLES ] && { echo "No tables to export."; exit 0; }
+              if [ -f /work/NO_TABLES ]; then
+                echo "No tables to export."
+                exit 0
+              fi
 
               for f in /vault/secrets/bootstrap.env /vault/secrets/gcp-key.json; do
                 j=0; while [ ! -s "$f" ]; do
@@ -485,6 +473,10 @@ spec:
               : "${BUCKET:?missing BUCKET}"
               : "${LOCATION:=}"
               if [ -n "${LOCATION}" ]; then BQ_LOC_FLAG=(--location="${LOCATION}"); else BQ_LOC_FLAG=(); fi
+
+              i=0; while [ ! -s /work/plan.tsv ]; do
+                i=$((i+1)); [ $i -gt 300 ] && echo "❌ Timeout waiting for plan.tsv" && exit 1; sleep 2
+              done
 
               while IFS='|' read -r SCH TBL BQMAP PREFIX FMT HDR COLS; do
                 [ -z "${SCH}" ] && continue
@@ -502,7 +494,7 @@ spec:
                 touch "${OUTDIR}/READY"
               done < /work/plan.tsv
 
-        # 4) flagger: publishes bootstrap.ok when importer signals DONE
+        # 4) flagger: creates bootstrap.ok; immediate on NO_TABLES
         - name: flagger
           image: curlimages/curl:8.8.0
           volumeMounts: [{ name: work, mountPath: /work }]
@@ -510,14 +502,20 @@ spec:
           args:
             - |
               set -e
-              for i in $(seq 1 360); do
-                [ -f /work/DONE ] && break
-                sleep 2
-              done
               API="https://kubernetes.default.svc"
               TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
               CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
               DATA='{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"bootstrap.ok","namespace":"kafka","labels":{"app":"bq-yb-bootstrap"}},"data":{"status":"complete","completedAt":"__NOW__"}}'
+
+              if [ -f /work/NO_TABLES ]; then
+                echo "No tables: publishing bootstrap.ok now."
+              else
+                for i in $(seq 1 360); do
+                  [ -f /work/DONE ] && break
+                  sleep 2
+                done
+              fi
+
               code="$(curl -s -o /tmp/cm.json -w '%{http_code}' --cacert "$CACERT" -H "Authorization: Bearer $TOKEN" "$API/api/v1/namespaces/kafka/configmaps/bootstrap.ok" || true)"
               if [ "$code" = "200" ]; then
                 curl -sS -X PATCH --cacert "$CACERT" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/merge-patch+json" \
@@ -750,7 +748,9 @@ spec:
           ports:
             - containerPort: 8083
           readinessProbe:
-            httpGet: { path: /connectors, port: 8083 }
+            httpGet:
+              path: /connectors
+              port: 8083
             initialDelaySeconds: 20
             periodSeconds: 5
           resources:
