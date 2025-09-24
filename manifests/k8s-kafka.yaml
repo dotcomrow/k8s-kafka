@@ -573,24 +573,34 @@ spec:
     spec:
       volumes: [{ name: plugins, emptyDir: {} }]
       initContainers:
-      - name: install-plugins
+      - name: install-bq
         image: confluentinc/cp-kafka-connect:7.6.1
         command: ["/bin/bash","-lc"]
-        args:
-          - |
+        args: |
             set -e
             mkdir -p /plugins
             apt-get update >/dev/null 2>&1 || true
             apt-get install -y unzip curl >/dev/null 2>&1 || true
-            # ✅ Correct component id (owner/name:version)
             confluent-hub install --no-prompt --component-dir /plugins \
-              wepay/kafka-connect-bigquery:${BQ_SINK_VER}
-            curl -fsSL "${YB_DEBEZIUM_URL}" -o /tmp/yb-connector.zip || \
-              wget -qO /tmp/yb-connector.zip "${YB_DEBEZIUM_URL}"
-            unzip -o /tmp/yb-connector.zip -d /plugins >/dev/null 2>&1 || true
-        env:
-        - { name: BQ_SINK_VER, value: "2.5.7" }
-        - { name: YB_DEBEZIUM_URL, value: "https://downloads.yugabyte.com/debezium/dz.1.9.5.yb.grpc.2024.2.2/debezium-connector-yugabytedb-grpc.zip" }
+              wepay/kafka-connect-bigquery:2.5.7
+        volumeMounts: [{ name: plugins, mountPath: /plugins }]
+
+        # 2) Copy Yugabyte Debezium gRPC connector from Quay image
+      - name: fetch-yb-debezium
+        image: quay.io/yugabyte/debezium-connector:dz.1.9.5.yb.grpc.2024.2.2
+        command: ["/bin/sh","-lc"]
+        args: |
+            set -eu
+            mkdir -p /plugins/yugabytedb
+            # Most Yugabyte images place the connector jars under /kafka-connect
+            if [ -d /kafka-connect ]; then
+              cp -R /kafka-connect/* /plugins/yugabytedb/
+            elif [ -d /debezium-connector ]; then
+              cp -R /debezium-connector/* /plugins/yugabytedb/
+            else
+              echo "Could not find connector payload in image" >&2; ls -la /
+              exit 1
+            fi
         volumeMounts: [{ name: plugins, mountPath: /plugins }]
       containers:
       - name: connect
@@ -602,6 +612,7 @@ spec:
             secretKeyRef:
               name: kafka-cluster-id
               key: CLUSTER_ID
+        - { name: CONNECT_PLUGIN_PATH, value: "/plugins" }
         - { name: CONNECT_BOOTSTRAP_SERVERS, value: "kafka.kafka.svc.cluster.local:9092" }
         - { name: CONNECT_REST_ADVERTISED_HOST_NAME, value: "kafka-connect" }
         - { name: CONNECT_REST_PORT, value: "8083" }
