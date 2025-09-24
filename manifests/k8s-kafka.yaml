@@ -128,11 +128,12 @@ spec:
             [ "$code" = "200" ] && { echo "Secret exists; nothing to do."; exit 0; }
 
             b64="$(printf '%s' "$CID" | base64 | tr -d '\n')"
-            cat >/tmp/newsecret.json <<JSON
+            cat >/tmp/newsecret.json <<'JSON'
             {"apiVersion":"v1","kind":"Secret",
-             "metadata":{"name":"$SECRET_NAME","namespace":"$NAMESPACE"},
-             "type":"Opaque","data":{"CLUSTER_ID":"$b64"}}
+             "metadata":{"name":"kafka-cluster-id","namespace":"kafka"},
+             "type":"Opaque","data":{"CLUSTER_ID":"__B64__"}}
             JSON
+            sed -i "s/__B64__/${b64}/" /tmp/newsecret.json
             curl -sS -X POST --cacert "$CACERT" -H "Authorization: Bearer $TOKEN" \
               -H "Content-Type: application/json" --data-binary @/tmp/newsecret.json \
               "$API/api/v1/namespaces/$NAMESPACE/secrets" && echo "Created secret."
@@ -589,28 +590,16 @@ spec:
           - |
             set -eu
             mkdir -p /out/yugabytedb
-            for SRC in \
-              /plugins \
-              /kafka/connect \
-              /kafka/connectors \
-              /kafka/connect/yugabytedb \
-              /opt/kafka/connect \
-              /opt/kafka/plugins \
-              /debezium-connector \
-              /kafka; do
+            for SRC in /plugins /kafka/connect /kafka/connectors /kafka/connect/yugabytedb /opt/kafka/connect /opt/kafka/plugins /debezium-connector /kafka; do
               if [ -d "$SRC" ] && [ -n "$(ls -A "$SRC" 2>/dev/null || true)" ]; then
-                echo "✅ Found connector payload at $SRC"
+                echo "Found connector payload at $SRC"
                 cp -R "$SRC"/* /out/yugabytedb/
                 # remove CloudEvents converter jars to avoid class init error
-                find /out/yugabytedb -type f \
-                  \( -iname '*cloudevents*.jar' -o -iname 'debezium-converter-cloud-events-*.jar' \) \
-                  -print -delete || true
+                find /out/yugabytedb -type f \( -iname '*cloudevents*.jar' -o -iname 'debezium-converter-cloud-events-*.jar' \) -print -delete || true
                 exit 0
               fi
             done
-            echo "❌ Could not find connector payload; listing hints:" >&2
-            ls -la / >&2; ls -la /kafka || true >&2; ls -la /plugins || true >&2
-            exit 1
+            echo "Could not find connector payload"; exit 1
         volumeMounts:
           - { name: plugins, mountPath: /out }
       containers:
@@ -658,7 +647,7 @@ spec:
         volumeMounts: [{ name: plugins, mountPath: /plugins }]
 
 # ============================================================================
-# Registration Job (wave 5)
+# Registration Job (wave 5) — autoCreateTables=true
 # ============================================================================
 ---
 apiVersion: batch/v1
@@ -770,18 +759,18 @@ spec:
             TOPICS="${TOPICS%,}"
             TOPIC2TABLEMAP="${TOPIC2TABLEMAP%,}"
 
-            cat > /tmp/yb-source.json <<JSON
+            cat > /tmp/yb-source.json <<'JSON'
             {"name":"yb-source","config":{
               "connector.class":"io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",
               "tasks.max":"1",
-              "database.hostname":"${PGHOST}",
-              "database.port":"${PGPORT}",
-              "database.master.addresses":"${YB_MASTER_ADDRESSES}",
-              "database.user":"${PGUSER}",
-              "database.password":"${PGPASSWORD}",
-              "database.dbname":"${PGDATABASE}",
-              "database.server.name":"${SERVER_NAME}",
-              "table.include.list":"${TABLE_INCLUDE_LIST}",
+              "database.hostname":"__PGHOST__",
+              "database.port":"__PGPORT__",
+              "database.master.addresses":"__YBMA__",
+              "database.user":"__PGUSER__",
+              "database.password":"__PGPASS__",
+              "database.dbname":"__PGDB__",
+              "database.server.name":"__SERVER__",
+              "table.include.list":"__TABLES__",
               "snapshot.mode":"never",
               "transforms":"unwrap",
               "transforms.unwrap.type":"io.debezium.connector.yugabytedb.transforms.YBExtractNewRecordState",
@@ -789,26 +778,46 @@ spec:
               "topic.creation.default.partitions":"1",
               "topic.creation.default.cleanup.policy":"delete"}}
             JSON
+            sed -i \
+              -e "s/__PGHOST__/${PGHOST}/" \
+              -e "s/__PGPORT__/${PGPORT}/" \
+              -e "s/__YBMA__/${YB_MASTER_ADDRESSES//\//\\/}/" \
+              -e "s/__PGUSER__/${PGUSER}/" \
+              -e "s/__PGPASS__/${PGPASSWORD}/" \
+              -e "s/__PGDB__/${PGDATABASE}/" \
+              -e "s/__SERVER__/${SERVER_NAME}/" \
+              -e "s/__TABLES__/${TABLE_INCLUDE_LIST//\//\\/}/" /tmp/yb-source.json
+
             curl -fsS -X PUT -H 'Content-Type: application/json' --data-binary @/tmp/yb-source.json \
               http://kafka-connect.kafka.svc.cluster.local:8083/connectors/yb-source/config \
               || curl -fsS -X POST -H 'Content-Type: application/json' --data-binary @/tmp/yb-source.json \
                    http://kafka-connect.kafka.svc.cluster.local:8083/connectors
 
-            cat > /tmp/bq-sink.json <<JSON
+            cat > /tmp/bq-sink.json <<'JSON'
             {"name":"bq-sink","config":{
               "connector.class":"com.wepay.kafka.connect.bigquery.BigQuerySinkConnector",
               "tasks.max":"1",
-              "topics":"${TOPICS}",
-              "topic2TableMap":"${TOPIC2TABLEMAP}",
-              "project":"${BQ_PROJECT}",
-              "defaultDataset":"${BQ_DEFAULT_DATASET}",
+              "topics":"__TOPICS__",
+              "topic2TableMap":"__T2MAP__",
+              "project":"__BQPROJECT__",
+              "defaultDataset":"__BQDATASET__",
               "sanitizeTopics":"true",
-              "autoCreateTables":"false",
+              "autoCreateTables":"true",
               "allowNewBigQueryFields":"true",
               "allowBigQueryRequiredFieldRelaxation":"true",
               "keySource":"JSON",
-              "keyfile": ${BQ_KEY_JSON} }}
+              "keyfile": __BQKEYJSON__ }}
             JSON
+            # Inject values (escape slashes for sed)
+            sed -i \
+              -e "s/__TOPICS__/${TOPICS//\//\\/}/" \
+              -e "s/__T2MAP__/${TOPIC2TABLEMAP//\//\\/}/" \
+              -e "s/__BQPROJECT__/${BQ_PROJECT}/" \
+              -e "s/__BQDATASET__/${BQ_DEFAULT_DATASET}/" \
+              /tmp/bq-sink.json
+            # Insert raw JSON for keyfile
+            perl -0777 -pe 's/"__BQKEYJSON__"/$ENV{BQ_KEY_JSON}/' -i /tmp/bq-sink.json
+
             curl -fsS -X PUT -H 'Content-Type: application/json' --data-binary @/tmp/bq-sink.json \
               http://kafka-connect.kafka.svc.cluster.local:8083/connectors/bq-sink/config \
               || curl -fsS -X POST -H 'Content-Type: application/json' --data-binary @/tmp/bq-sink.json \
@@ -915,7 +924,7 @@ spec:
           valueFrom: { secretKeyRef: { name: oauth2-proxy-secrets, key: cookie_secret } }
 
 # ============================================================================
-# Continuous Annotation Watcher (wave 50)
+# Continuous Annotation Watcher (wave 50) — autoCreateTables=true, heredocs fixed
 # ============================================================================
 ---
 apiVersion: apps/v1
@@ -988,7 +997,7 @@ spec:
             PGDATABASE="${PGDATABASE:-kafka}"
             PGUSER="${PGUSER:-vaultadmin}"
             PGURL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}?sslmode=disable"
-            STATE=/state/tables.json
+            STATE=/state/tables.tsv
 
             get_plan() {
               /home/yugabyte/bin/ysqlsh "${PGURL}" -A -t -F '|' -c "
@@ -1004,8 +1013,7 @@ spec:
                   FROM t
                 ),
                 b AS (
-                  SELECT schema, \"table\",
-                        jdesc->'bootstrap' AS b
+                  SELECT schema, \"table\", jdesc->'bootstrap' AS b
                   FROM j WHERE jdesc ? 'bootstrap'
                 )
                 SELECT schema, \"table\",
@@ -1015,56 +1023,52 @@ spec:
                       COALESCE(b->>'header','true') AS header,
                       COALESCE(b->>'columns','') AS columns,
                       COALESCE((b->>'enabled')::boolean,false) AS enabled
-                FROM b;" \
-              | awk -F'|' 'BEGIN{print "["} {printf "%s{\"schema\":\"%s\",\"table\":\"%s\",\"bq\":\"%s\",\"prefix\":\"%s\",\"fmt\":\"%s\",\"hdr\":\"%s\",\"cols\":\"%s\",\"enabled\":%s}",(NR>1?",":""),$1,$2,$3,$4,$5,$6,$7,$8} END{print "]"}'
+                FROM b
+                ORDER BY schema, \"table\";
+              "
             }
 
-            render_connect() {
-              python3 - "$BQ_DEFAULT_DATASET" "$SERVER_NAME" <<'PY'
-              import sys,json
-              rows=json.load(sys.stdin)
-              dataset=sys.argv[1]
-              server=sys.argv[2]
-              enabled=[r for r in rows if r.get("enabled")]
-              def fq(r): return f'{r["schema"]}.{r["table"]}'
-              table_list=",".join(fq(r) for r in enabled)
-              topics=",".join(f'{server}.{fq(r)}' for r in enabled)
-              t2map=[]
-              for r in enabled:
-                bq=r.get("bq") or f"{dataset}.{r['table']}"
-                t2map.append(f'{server}.{fq(r)}:{bq}')
-              print(json.dumps({
-                "table_include_list": table_list,
-                "topics": topics,
-                "topic2TableMap": ",".join(t2map)
-              }))
-            PY
+            build_vars() {
+              TABLES=""; TOPICS=""; T2MAP=""
+              while IFS='|' read -r SCH TBL BQMAP PREFIX FMT HDR COLS ENA; do
+                [ -z "$SCH" ] && continue
+                [ "$ENA" != "t" ] && continue
+                FQ="${SCH}.${TBL}"
+                TOPIC="${SERVER_NAME}.${FQ}"
+                TABLES="${TABLES}${FQ},"
+                TOPICS="${TOPICS}${TOPIC},"
+                if [ -n "$BQMAP" ] && echo "$BQMAP" | grep -q '\.'; then
+                  T2MAP="${T2MAP}${TOPIC}:${BQMAP},"
+                else
+                  T2MAP="${T2MAP}${TOPIC}:${BQ_DEFAULT_DATASET}.${TBL},"
+                fi
+              done
+              TABLES="${TABLES%,}"
+              TOPICS="${TOPICS%,}"
+              T2MAP="${T2MAP%,}"
             }
 
-            first=1
-            while true; do
+            last_sig=""
+            while :; do
               CUR="$(get_plan)"
-              PREV="[]"; [ -s "$STATE" ] && PREV="$(cat "$STATE")"
-              if [ "$CUR" != "$PREV" ] || [ "$first" = 1 ]; then
-                echo "$CUR" > "$STATE"
+              sig="$(printf '%s' "$CUR" | sha256sum | awk '{print $1}')"
+              if [ "$sig" != "$last_sig" ]; then
+                printf '%s\n' "$CUR" > "$STATE"
+                build_vars < "$STATE"
 
-                CFG="$(printf '%s' "$CUR" | render_connect)"
-                TABLES="$(echo "$CFG" | python3 -c 'import sys,json;print(json.load(sys.stdin)["table_include_list"])')"
-                TOPICS="$(echo "$CFG" | python3 -c 'import sys,json;print(json.load(sys.stdin)["topics"])')"
-                T2MAP="$(echo "$CFG" | python3 -c 'import sys,json;print(json.load(sys.stdin)["topic2TableMap"])')"
-
-                cat > /tmp/yb-source.json <<JSON
+                # yb-source config
+                cat > /tmp/yb-source.json <<'JSON'
                 {"name":"yb-source","config":{
                   "connector.class":"io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",
                   "tasks.max":"1",
-                  "database.hostname":"${PGHOST}",
-                  "database.port":"${PGPORT}",
-                  "database.master.addresses":"${YB_MASTER_ADDRESSES}",
-                  "database.user":"${PGUSER}",
-                  "database.password":"${PGPASSWORD}",
-                  "database.dbname":"${PGDATABASE}",
-                  "database.server.name":"${SERVER_NAME}",
-                  "table.include.list":"${TABLES}",
+                  "database.hostname":"__PGHOST__",
+                  "database.port":"__PGPORT__",
+                  "database.master.addresses":"__YBMA__",
+                  "database.user":"__PGUSER__",
+                  "database.password":"__PGPASS__",
+                  "database.dbname":"__PGDB__",
+                  "database.server.name":"__SERVER__",
+                  "table.include.list":"__TABLES__",
                   "snapshot.mode":"never",
                   "transforms":"unwrap",
                   "transforms.unwrap.type":"io.debezium.connector.yugabytedb.transforms.YBExtractNewRecordState",
@@ -1072,32 +1076,52 @@ spec:
                   "topic.creation.default.partitions":"1",
                   "topic.creation.default.cleanup.policy":"delete"}}
                 JSON
+                sed -i \
+                  -e "s/__PGHOST__/${PGHOST}/" \
+                  -e "s/__PGPORT__/${PGPORT}/" \
+                  -e "s/__YBMA__/${YB_MASTER_ADDRESSES//\//\\/}/" \
+                  -e "s/__PGUSER__/${PGUSER}/" \
+                  -e "s/__PGPASS__/${PGPASSWORD}/" \
+                  -e "s/__PGDB__/${PGDATABASE}/" \
+                  -e "s/__SERVER__/${SERVER_NAME}/" \
+                  -e "s/__TABLES__/${TABLES//\//\\/}/" /tmp/yb-source.json
+
+                until curl -fsS "${CONNECT_URL}/connectors" >/dev/null 2>&1; do sleep 3; done
                 curl -fsS -X PUT -H 'Content-Type: application/json' --data-binary @/tmp/yb-source.json \
                   "${CONNECT_URL}/connectors/yb-source/config" \
                   || curl -fsS -X POST -H 'Content-Type: application/json' --data-binary @/tmp/yb-source.json \
                       "${CONNECT_URL}/connectors"
 
-                cat > /tmp/bq-sink.json <<JSON
+                # bq-sink config (autoCreateTables true)
+                cat > /tmp/bq-sink.json <<'JSON'
                 {"name":"bq-sink","config":{
                   "connector.class":"com.wepay.kafka.connect.bigquery.BigQuerySinkConnector",
                   "tasks.max":"1",
-                  "topics":"${TOPICS}",
-                  "topic2TableMap":"${T2MAP}",
-                  "project":"${BQ_PROJECT}",
-                  "defaultDataset":"${BQ_DEFAULT_DATASET}",
+                  "topics":"__TOPICS__",
+                  "topic2TableMap":"__T2MAP__",
+                  "project":"__BQPROJECT__",
+                  "defaultDataset":"__BQDATASET__",
                   "sanitizeTopics":"true",
-                  "autoCreateTables":"false",
+                  "autoCreateTables":"true",
                   "allowNewBigQueryFields":"true",
                   "allowBigQueryRequiredFieldRelaxation":"true",
                   "keySource":"JSON",
-                  "keyfile": ${BQ_KEY_JSON} }}
+                  "keyfile": __BQKEYJSON__ }}
                 JSON
+                sed -i \
+                  -e "s/__TOPICS__/${TOPICS//\//\\/}/" \
+                  -e "s/__T2MAP__/${T2MAP//\//\\/}/" \
+                  -e "s/__BQPROJECT__/${BQ_PROJECT}/" \
+                  -e "s/__BQDATASET__/${BQ_DEFAULT_DATASET}/" \
+                  /tmp/bq-sink.json
+                perl -0777 -pe 's/"__BQKEYJSON__"/$ENV{BQ_KEY_JSON}/' -i /tmp/bq-sink.json
+
                 curl -fsS -X PUT -H 'Content-Type: application/json' --data-binary @/tmp/bq-sink.json \
                   "${CONNECT_URL}/connectors/bq-sink/config" \
                   || curl -fsS -X POST -H 'Content-Type: application/json' --data-binary @/tmp/bq-sink.json \
                       "${CONNECT_URL}/connectors"
 
-                first=0
+                last_sig="$sig"
               fi
               sleep "${SCAN_INTERVAL}"
             done
