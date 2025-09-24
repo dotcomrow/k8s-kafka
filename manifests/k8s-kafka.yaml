@@ -718,19 +718,19 @@ spec:
       restartPolicy: OnFailure
       initContainers:
       - name: wait-bootstrap-ok
-        image: curlimages/curl:8.8.0
+        image: alpine:3.20
         command: ["/bin/sh","-lc"]
-        args:
-          - |
-            set -e
-            API="https://kubernetes.default.svc"
-            TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
-            CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-            until [ "$(curl -sS --cacert "${CACERT}" -H "Authorization: Bearer ${TOKEN}" \
-              "${API}/api/v1/namespaces/kafka/configmaps/bootstrap.ok" \
-              | sed -n 's/.*"status":"\([^"]*\)".*/\1/p')" = "complete" ]; do
-              sleep 5
-            done
+        args: |
+          set -eu
+          apk add --no-cache curl jq >/dev/null
+          API="https://kubernetes.default.svc"
+          TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+          CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+          until [ "$(curl -sS --cacert "$CACERT" -H "Authorization: Bearer $TOKEN" \
+              "$API/api/v1/namespaces/kafka/configmaps/bootstrap.ok" \
+              | jq -r '.data.status // empty')" = "complete" ]; do
+            sleep 5
+          done
       containers:
       - name: registrar
         image: yugabytedb/yugabyte:latest
