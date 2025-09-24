@@ -889,7 +889,7 @@ spec:
     spec:
       containers:
       - name: proxy
-        image: ghcr.io/oauth2-proxy/oauth2-proxy:v7.6.0
+        image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
         ports: [{ containerPort: 4180, name: http }]
         args:
           - --provider=github
@@ -904,9 +904,7 @@ spec:
           - --pass-authorization-header=true
           - --pass-access-token=true
           - --skip-provider-button=true
-          # Restrict access:
-          # - --github-org=<your-org>
-          # - --github-team=<your-org>/<team>
+          - --allowed-group=dotcomrow:pgweb_users
         env:
         - name: OAUTH2_PROXY_CLIENT_ID
           valueFrom: { secretKeyRef: { name: oauth2-proxy-secrets, key: client_id } }
@@ -914,27 +912,6 @@ spec:
           valueFrom: { secretKeyRef: { name: oauth2-proxy-secrets, key: client_secret } }
         - name: OAUTH2_PROXY_COOKIE_SECRET
           valueFrom: { secretKeyRef: { name: oauth2-proxy-secrets, key: cookie_secret } }
-
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: kafka-ui
-  namespace: kafka
-  annotations:
-    argocd.argoproj.io/sync-wave: "47"
-spec:
-  ingressClassName: nginx
-  rules:
-  - host: kafka-ui.example.com   # <-- change me
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend: { service: { name: oauth2-proxy, port: { number: 4180 } } }
-  tls:
-  - hosts: [kafka-ui.example.com]  # <-- change me
-    secretName: kafka-ui-tls       # <-- provide/replace
 
 # ============================================================================
 # Continuous Annotation Watcher (wave 50)
