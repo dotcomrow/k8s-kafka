@@ -283,7 +283,6 @@ spec:
       terminationGracePeriodSeconds: 30
       volumes: [{ name: work, emptyDir: {} }]
       containers:
-      # 1) planner — time out & NO_TABLES if Vault files never arrive
       - name: planner
         image: yugabytedb/yugabyte:latest
         volumeMounts: [{ name: work, mountPath: /work }]
@@ -339,7 +338,6 @@ spec:
             " > /work/plan.tsv
 
             [ -s /work/plan.tsv ] || echo "NO_TABLES" > /work/NO_TABLES
-      # 2) importer — exits immediately if NO_TABLES
       - name: importer
         image: yugabytedb/yugabyte:latest
         volumeMounts: [{ name: work, mountPath: /work }]
@@ -387,7 +385,6 @@ spec:
             done < /work/plan.tsv
 
             touch /work/DONE
-      # 3) cloudsdk — exits immediately if NO_TABLES
       - name: cloudsdk
         image: google/cloud-sdk:latest
         env:
@@ -427,7 +424,6 @@ spec:
               gsutil -m cp "gs://${BUCKET}/bootstrap/${PREFIX}/${PREFIX}-*.csv" "${OUTDIR}/"
               touch "${OUTDIR}/READY"
             done < /work/plan.tsv
-      # 4) flagger — creates/updates bootstrap.ok
       - name: flagger
         image: curlimages/curl:8.8.0
         volumeMounts: [{ name: work, mountPath: /work }]
@@ -586,7 +582,6 @@ spec:
               wepay/kafka-connect-bigquery:2.5.7
         volumeMounts: [{ name: plugins, mountPath: /plugins }]
 
-        # 2) Copy Yugabyte Debezium gRPC connector from Quay image
       - name: fetch-yb-debezium
         image: quay.io/yugabyte/debezium-connector:dz.1.9.5.yb.grpc.2024.2.2
         command: ["/bin/sh","-lc"]
@@ -594,8 +589,6 @@ spec:
           - |
             set -eu
             mkdir -p /out/yugabytedb
-
-            # Try the most likely locations in this image
             for SRC in \
               /plugins \
               /kafka/connect \
@@ -608,21 +601,17 @@ spec:
               if [ -d "$SRC" ] && [ -n "$(ls -A "$SRC" 2>/dev/null || true)" ]; then
                 echo "✅ Found connector payload at $SRC"
                 cp -R "$SRC"/* /out/yugabytedb/
+                # remove CloudEvents converter jars to avoid class init error
+                find /out/yugabytedb -type f \
+                  \( -iname '*cloudevents*.jar' -o -iname 'debezium-converter-cloud-events-*.jar' \) \
+                  -print -delete || true
                 exit 0
               fi
             done
-
-            find /out/yugabytedb -type f \
-              \( -iname '*cloudevents*.jar' -o -iname 'debezium-converter-cloud-events-*.jar' \) \
-              -print -delete || true
-
-            echo "❌ Could not find connector payload in known locations. Listing hints:" >&2
-            ls -la / >&2
-            ls -la /kafka || true >&2
-            ls -la /plugins || true >&2
+            echo "❌ Could not find connector payload; listing hints:" >&2
+            ls -la / >&2; ls -la /kafka || true >&2; ls -la /plugins || true >&2
             exit 1
         volumeMounts:
-          # mount the SAME emptyDir volume, but at /out to avoid masking image content
           - { name: plugins, mountPath: /out }
       containers:
       - name: connect
@@ -634,33 +623,28 @@ spec:
             secretKeyRef:
               name: kafka-cluster-id
               key: CLUSTER_ID
-        # Debezium (no CONNECT_ prefix)
+
+        # Debezium envs (no CONNECT_ prefix)
         - { name: BOOTSTRAP_SERVERS, value: "kafka.kafka.svc.cluster.local:9092" }
         - { name: GROUP_ID, value: "connect-cluster" }
-
         - { name: CONFIG_STORAGE_TOPIC, value: "_connect-configs" }
         - { name: OFFSET_STORAGE_TOPIC,  value: "_connect-offsets" }
         - { name: STATUS_STORAGE_TOPIC,  value: "_connect-status" }
-
-        # Replication factors for the internal topics (since you're single-broker)
         - { name: CONFIG_STORAGE_REPLICATION_FACTOR, value: "1" }
         - { name: OFFSET_STORAGE_REPLICATION_FACTOR,  value: "1" }
         - { name: STATUS_STORAGE_REPLICATION_FACTOR,  value: "1" }
 
-        # REST
         - { name: REST_ADVERTISED_HOST_NAME, value: "kafka-connect" }
         - { name: REST_PORT, value: "8083" }
 
-        # Converters
         - { name: KEY_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
         - { name: VALUE_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
         - { name: KEY_CONVERTER_SCHEMAS_ENABLE, value: "true" }
         - { name: VALUE_CONVERTER_SCHEMAS_ENABLE, value: "true" }
 
-        # Plugins dir (Debezium honors this)
-        - { name: CONNECT_PLUGIN_PATH, value: "/plugins" }
+        # Narrow plugin path for faster, safer classpath
+        - { name: CONNECT_PLUGIN_PATH, value: "/plugins/wepay-kafka-connect-bigquery,/plugins/yugabytedb" }
 
-        # (Optional) Heap
         - { name: KAFKA_HEAP_OPTS, value: "-Xms256m -Xmx512m" }
         ports:
         - { containerPort: 8083 }
@@ -829,3 +813,312 @@ spec:
               http://kafka-connect.kafka.svc.cluster.local:8083/connectors/bq-sink/config \
               || curl -fsS -X POST -H 'Content-Type: application/json' --data-binary @/tmp/bq-sink.json \
                    http://kafka-connect.kafka.svc.cluster.local:8083/connectors
+
+# ============================================================================
+# Kafka UI + oauth2-proxy (waves 45-47)
+# ============================================================================
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-ui
+  namespace: kafka
+  annotations: { argocd.argoproj.io/sync-wave: "45" }
+spec:
+  ports: [{ name: http, port: 8080, targetPort: 8080 }]
+  selector: { app: kafka-ui }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-ui
+  namespace: kafka
+  annotations: { argocd.argoproj.io/sync-wave: "45" }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: kafka-ui } }
+  template:
+    metadata:
+      labels: { app: kafka-ui }
+      annotations: { linkerd.io/inject: "disabled" }
+    spec:
+      containers:
+      - name: ui
+        image: provectuslabs/kafka-ui:v0.7.2
+        ports: [{ containerPort: 8080, name: http }]
+        env:
+        - { name: KAFKA_CLUSTERS_0_NAME, value: "local" }
+        - { name: KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS, value: "kafka.kafka.svc.cluster.local:9092" }
+        # - { name: KAFKA_CLUSTERS_0_READONLY, value: "true" }  # optional
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: oauth2-proxy-secrets
+  namespace: kafka
+type: Opaque
+stringData:
+  client_id: "<path:secret/data/k8s-kafka-kafka-gui-oauth-clientid#value>"
+  client_secret: "<path:secret/data/k8s-kafka-kafka-gui-oauth-clientsecret#value>"
+  cookie_secret: "<path:secret/data/k8s-kafka-kafka-gui-oauth-cookiesecret#value>"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oauth2-proxy
+  namespace: kafka
+  annotations: { argocd.argoproj.io/sync-wave: "46" }
+spec:
+  ports: [{ name: http, port: 4180, targetPort: 4180 }]
+  selector: { app: oauth2-proxy }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oauth2-proxy
+  namespace: kafka
+  annotations: { argocd.argoproj.io/sync-wave: "46" }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: oauth2-proxy } }
+  template:
+    metadata:
+      labels: { app: oauth2-proxy }
+      annotations: { linkerd.io/inject: "disabled" }
+    spec:
+      containers:
+      - name: proxy
+        image: ghcr.io/oauth2-proxy/oauth2-proxy:v7.6.0
+        ports: [{ containerPort: 4180, name: http }]
+        args:
+          - --provider=github
+          - --http-address=0.0.0.0:4180
+          - --upstream=http://kafka-ui.kafka.svc.cluster.local:8080/
+          - --cookie-secure=true
+          - --cookie-samesite=lax
+          - --cookie-refresh=1h
+          - --cookie-expire=8h
+          - --email-domain=*
+          - --set-authorization-header=true
+          - --pass-authorization-header=true
+          - --pass-access-token=true
+          - --skip-provider-button=true
+          # Restrict access:
+          # - --github-org=<your-org>
+          # - --github-team=<your-org>/<team>
+        env:
+        - name: OAUTH2_PROXY_CLIENT_ID
+          valueFrom: { secretKeyRef: { name: oauth2-proxy-secrets, key: client_id } }
+        - name: OAUTH2_PROXY_CLIENT_SECRET
+          valueFrom: { secretKeyRef: { name: oauth2-proxy-secrets, key: client_secret } }
+        - name: OAUTH2_PROXY_COOKIE_SECRET
+          valueFrom: { secretKeyRef: { name: oauth2-proxy-secrets, key: cookie_secret } }
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: kafka-ui
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "47"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: kafka-ui.example.com   # <-- change me
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend: { service: { name: oauth2-proxy, port: { number: 4180 } } }
+  tls:
+  - hosts: [kafka-ui.example.com]  # <-- change me
+    secretName: kafka-ui-tls       # <-- provide/replace
+
+# ============================================================================
+# Continuous Annotation Watcher (wave 50)
+# ============================================================================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bootstrap-watcher
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "50"
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: bootstrap-watcher } }
+  template:
+    metadata:
+      labels: { app: bootstrap-watcher }
+      annotations:
+        linkerd.io/inject: "disabled"
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: "data-bootstrap"
+        vault.hashicorp.com/agent-pre-populate-only: "true"
+        vault.hashicorp.com/exit-on-error: "false"
+        vault.hashicorp.com/agent-inject-secret-yb.env: "secret/data/kafka/pgconfig"
+        vault.hashicorp.com/agent-inject-template-yb.env: |
+          {{- with secret "secret/data/kafka/pgconfig" -}}
+          {{ with .Data.data.host }}PGHOST={{ . }}{{ end }}
+          {{ with .Data.data.port }}PGPORT={{ . }}{{ end }}
+          {{ with .Data.data.database }}PGDATABASE={{ . }}{{ end }}
+          {{ with .Data.data.user }}PGUSER={{ . }}{{ end }}
+          {{ with .Data.data.master_addresses }}YB_MASTER_ADDRESSES={{ . }}{{ end }}
+          {{- end -}}
+        vault.hashicorp.com/agent-inject-secret-pgpass.env: "secret/data/vaultadmin"
+        vault.hashicorp.com/agent-inject-template-pgpass.env: |
+          {{- with secret "secret/data/vaultadmin" -}}
+          PGPASSWORD={{ .Data.data.value }}
+          {{- end -}}
+        vault.hashicorp.com/agent-inject-secret-bq.env: "secret/data/kafka/bq/config"
+        vault.hashicorp.com/agent-inject-template-bq.env: |
+          {{- with secret "secret/data/kafka/bq/config" -}}
+          {{ with .Data.data.project }}BQ_PROJECT={{ . }}{{ end }}
+          {{ with .Data.data.dataset }}BQ_DEFAULT_DATASET={{ . }}{{ end }}
+          {{ with .Data.data.sa_json }}BQ_KEY_JSON={{ . | toJSON }}{{ end }}
+          {{- end }}
+    spec:
+      serviceAccountName: bq-yb-bootstrap
+      volumes:
+      - name: state
+        emptyDir: {}
+      containers:
+      - name: watcher
+        image: yugabytedb/yugabyte:latest
+        volumeMounts:
+        - { name: state, mountPath: /state }
+        env:
+        - { name: CONNECT_URL, value: "http://kafka-connect.kafka.svc.cluster.local:8083" }
+        - { name: SERVER_NAME, value: "yb" }
+        - { name: SCAN_INTERVAL, value: "30" }   # seconds
+        - { name: ON_DISABLE, value: "pause" }   # pause|keep (hook point)
+        - { name: ON_DELETE,  value: "keep" }    # keep (hook point)
+        command: ["/bin/bash","-lc"]
+        args: |
+          set -euo pipefail
+          for f in /vault/secrets/yb.env /vault/secrets/pgpass.env /vault/secrets/bq.env; do
+            i=0; while [ ! -s "$f" ]; do i=$((i+1)); [ $i -gt 120 ] && echo "vault secrets missing" && exit 1; sleep 2; done
+            . "$f"
+          done
+          export PGPASSWORD
+          PGHOST="${PGHOST:-yb-tserver-service.yugabyte.svc.cluster.local}"
+          PGPORT="${PGPORT:-5433}"
+          PGDATABASE="${PGDATABASE:-kafka}"
+          PGUSER="${PGUSER:-vaultadmin}"
+          PGURL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}?sslmode=disable"
+          STATE=/state/tables.json
+
+          get_plan() {
+            /home/yugabyte/bin/ysqlsh "${PGURL}" -A -t -F '|' -c "
+              WITH t AS (
+                SELECT n.nspname AS schema, c.relname AS table, d.description
+                  FROM pg_class c
+                  JOIN pg_namespace n ON n.oid = c.relnamespace
+                  LEFT JOIN pg_description d ON d.objoid = c.oid AND d.objsubid = 0
+                 WHERE c.relkind IN ('r','p') AND d.description IS NOT NULL
+              ),
+              j AS (
+                SELECT schema, \"table\", CASE WHEN left(description,1)='{' THEN description::jsonb ELSE NULL END AS jdesc
+                FROM t
+              ),
+              b AS (
+                SELECT schema, \"table\",
+                       jdesc->'bootstrap' AS b
+                FROM j WHERE jdesc ? 'bootstrap'
+              )
+              SELECT schema, \"table\",
+                     COALESCE(b->>'bq','') AS bq,
+                     COALESCE(b->>'gcs_prefix', \"table\") AS gcs_prefix,
+                     COALESCE(b->>'format','CSV') AS format,
+                     COALESCE(b->>'header','true') AS header,
+                     COALESCE(b->>'columns','') AS columns,
+                     COALESCE((b->>'enabled')::boolean,false) AS enabled
+              FROM b;" \
+            | awk -F'|' 'BEGIN{print "["} {printf "%s{\"schema\":\"%s\",\"table\":\"%s\",\"bq\":\"%s\",\"prefix\":\"%s\",\"fmt\":\"%s\",\"hdr\":\"%s\",\"cols\":\"%s\",\"enabled\":%s}",(NR>1?",":""),$1,$2,$3,$4,$5,$6,$7,$8} END{print "]"}'
+          }
+
+          render_connect() {
+            python3 - "$BQ_DEFAULT_DATASET" "$SERVER_NAME" <<'PY'
+            import sys,json
+            rows=json.load(sys.stdin)
+            dataset=sys.argv[1]
+            server=sys.argv[2]
+            enabled=[r for r in rows if r.get("enabled")]
+            def fq(r): return f'{r["schema"]}.{r["table"]}'
+            table_list=",".join(fq(r) for r in enabled)
+            topics=",".join(f'{server}.{fq(r)}' for r in enabled)
+            t2map=[]
+            for r in enabled:
+              bq=r.get("bq") or f"{dataset}.{r['table']}"
+              t2map.append(f'{server}.{fq(r)}:{bq}')
+            print(json.dumps({
+              "table_include_list": table_list,
+              "topics": topics,
+              "topic2TableMap": ",".join(t2map)
+            }))
+          PY
+          }
+
+          first=1
+          while true; do
+            CUR="$(get_plan)"
+            PREV="[]"; [ -s "$STATE" ] && PREV="$(cat "$STATE")"
+            if [ "$CUR" != "$PREV" ] || [ "$first" = 1 ]; then
+              echo "$CUR" > "$STATE"
+
+              CFG="$(printf '%s' "$CUR" | render_connect)"
+              TABLES="$(echo "$CFG" | python3 -c 'import sys,json;print(json.load(sys.stdin)["table_include_list"])')"
+              TOPICS="$(echo "$CFG" | python3 -c 'import sys,json;print(json.load(sys.stdin)["topics"])')"
+              T2MAP="$(echo "$CFG" | python3 -c 'import sys,json;print(json.load(sys.stdin)["topic2TableMap"])')"
+
+              cat > /tmp/yb-source.json <<JSON
+              {"name":"yb-source","config":{
+                "connector.class":"io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",
+                "tasks.max":"1",
+                "database.hostname":"${PGHOST}",
+                "database.port":"${PGPORT}",
+                "database.master.addresses":"${YB_MASTER_ADDRESSES}",
+                "database.user":"${PGUSER}",
+                "database.password":"${PGPASSWORD}",
+                "database.dbname":"${PGDATABASE}",
+                "database.server.name":"${SERVER_NAME}",
+                "table.include.list":"${TABLES}",
+                "snapshot.mode":"never",
+                "transforms":"unwrap",
+                "transforms.unwrap.type":"io.debezium.connector.yugabytedb.transforms.YBExtractNewRecordState",
+                "topic.creation.default.replication.factor":"1",
+                "topic.creation.default.partitions":"1",
+                "topic.creation.default.cleanup.policy":"delete"}}
+              JSON
+              curl -fsS -X PUT -H 'Content-Type: application/json' --data-binary @/tmp/yb-source.json \
+                "${CONNECT_URL}/connectors/yb-source/config" \
+                || curl -fsS -X POST -H 'Content-Type: application/json' --data-binary @/tmp/yb-source.json \
+                     "${CONNECT_URL}/connectors"
+
+              cat > /tmp/bq-sink.json <<JSON
+              {"name":"bq-sink","config":{
+                "connector.class":"com.wepay.kafka.connect.bigquery.BigQuerySinkConnector",
+                "tasks.max":"1",
+                "topics":"${TOPICS}",
+                "topic2TableMap":"${T2MAP}",
+                "project":"${BQ_PROJECT}",
+                "defaultDataset":"${BQ_DEFAULT_DATASET}",
+                "sanitizeTopics":"true",
+                "autoCreateTables":"false",
+                "allowNewBigQueryFields":"true",
+                "allowBigQueryRequiredFieldRelaxation":"true",
+                "keySource":"JSON",
+                "keyfile": ${BQ_KEY_JSON} }}
+              JSON
+              curl -fsS -X PUT -H 'Content-Type: application/json' --data-binary @/tmp/bq-sink.json \
+                "${CONNECT_URL}/connectors/bq-sink/config" \
+                || curl -fsS -X POST -H 'Content-Type: application/json' --data-binary @/tmp/bq-sink.json \
+                     "${CONNECT_URL}/connectors"
+
+              first=0
+            fi
+            sleep "${SCAN_INTERVAL}"
+          done
