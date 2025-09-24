@@ -590,32 +590,33 @@ spec:
       - name: fetch-yb-debezium
         image: quay.io/yugabyte/debezium-connector:dz.1.9.5.yb.grpc.2024.2.2
         command: ["/bin/sh","-lc"]
-        args: |
-          set -eu
-          mkdir -p /out/yugabytedb
+        args: 
+          - |
+            set -eu
+            mkdir -p /out/yugabytedb
 
-          # Try the most likely locations in this image
-          for SRC in \
-            /plugins \
-            /kafka/connect \
-            /kafka/connectors \
-            /kafka/connect/yugabytedb \
-            /opt/kafka/connect \
-            /opt/kafka/plugins \
-            /debezium-connector \
-            /kafka; do
-            if [ -d "$SRC" ] && [ -n "$(ls -A "$SRC" 2>/dev/null || true)" ]; then
-              echo "✅ Found connector payload at $SRC"
-              cp -R "$SRC"/* /out/yugabytedb/
-              exit 0
-            fi
-          done
+            # Try the most likely locations in this image
+            for SRC in \
+              /plugins \
+              /kafka/connect \
+              /kafka/connectors \
+              /kafka/connect/yugabytedb \
+              /opt/kafka/connect \
+              /opt/kafka/plugins \
+              /debezium-connector \
+              /kafka; do
+              if [ -d "$SRC" ] && [ -n "$(ls -A "$SRC" 2>/dev/null || true)" ]; then
+                echo "✅ Found connector payload at $SRC"
+                cp -R "$SRC"/* /out/yugabytedb/
+                exit 0
+              fi
+            done
 
-          echo "❌ Could not find connector payload in known locations. Listing hints:" >&2
-          ls -la / >&2
-          ls -la /kafka || true >&2
-          ls -la /plugins || true >&2
-          exit 1
+            echo "❌ Could not find connector payload in known locations. Listing hints:" >&2
+            ls -la / >&2
+            ls -la /kafka || true >&2
+            ls -la /plugins || true >&2
+            exit 1
         volumeMounts:
           # mount the SAME emptyDir volume, but at /out to avoid masking image content
           - { name: plugins, mountPath: /out }
