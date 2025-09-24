@@ -249,6 +249,8 @@ spec:
         linkerd.io/inject: "disabled"
         vault.hashicorp.com/agent-inject: "true"
         vault.hashicorp.com/role: "data-bootstrap"
+        vault.hashicorp.com/agent-run-as-init: "true"
+        vault.hashicorp.com/exit-on-error: "false"
         vault.hashicorp.com/agent-inject-secret-gcp-key.json: "secret/data/kafka/bq/exporter"
         vault.hashicorp.com/agent-inject-template-gcp-key.json: |
           {{- with secret "secret/data/kafka/bq/exporter" -}}
