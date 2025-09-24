@@ -576,7 +576,8 @@ spec:
       - name: install-bq
         image: confluentinc/cp-kafka-connect:7.6.1
         command: ["/bin/bash","-lc"]
-        args: |
+        args: 
+          - |
             set -e
             mkdir -p /plugins
             apt-get update >/dev/null 2>&1 || true
@@ -589,7 +590,8 @@ spec:
       - name: fetch-yb-debezium
         image: quay.io/yugabyte/debezium-connector:dz.1.9.5.yb.grpc.2024.2.2
         command: ["/bin/sh","-lc"]
-        args: |
+        args: 
+          - |
             set -eu
             mkdir -p /plugins/yugabytedb
             # Most Yugabyte images place the connector jars under /kafka-connect
