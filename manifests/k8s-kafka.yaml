@@ -386,7 +386,7 @@ spec:
 
             touch /work/DONE
       - name: cloudsdk
-        image: google/cloud-sdk:latest
+        image: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
         env:
         - { name: GOOGLE_APPLICATION_CREDENTIALS, value: /vault/secrets/gcp-key.json }
         - { name: CLOUDSDK_CORE_DISABLE_PROMPTS, value: "1" }
