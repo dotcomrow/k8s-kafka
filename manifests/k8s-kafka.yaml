@@ -100,7 +100,9 @@ spec:
         command: ["/bin/bash","-lc"]
         args:
           - |
-            set -eu
+            set -Eeuo pipefail
+            PS4='+ [GEN] $(date -Is) '
+            set -x
             CID="$("/opt/kafka/bin/kafka-storage.sh" random-uuid)"
             echo "Generated cluster.id: ${CID}"
             printf '%s' "${CID}" > /work/cluster.id
@@ -111,7 +113,11 @@ spec:
         command: ["/bin/sh","-c"]
         args:
           - |
-            set -eu
+            set -Eeuo pipefail
+            PS4='+ [APPLY] $(date -Is) '
+            set -x
+            trap 'echo "[APPLY] failed; recent state:"; ls -l /work || true; cat /tmp/ex.json 2>/dev/null || true' ERR
+
             NAMESPACE="kafka"; SECRET_NAME="kafka-cluster-id"
             API="https://kubernetes.default.svc"
             TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
@@ -131,9 +137,10 @@ spec:
             printf '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"%s","namespace":"%s"},"type":"Opaque","data":{"CLUSTER_ID":"%s"}}' \
               "$SECRET_NAME" "$NAMESPACE" "$b64" > /tmp/newsecret.json
 
-            curl -sS -X POST --cacert "$CACERT" -H "Authorization: Bearer $TOKEN" \
+            curl -sS -D /tmp/h.txt -o /tmp/r.txt -X POST --cacert "$CACERT" -H "Authorization: Bearer $TOKEN" \
               -H "Content-Type: application/json" --data-binary @/tmp/newsecret.json \
               "$API/api/v1/namespaces/$NAMESPACE/secrets" && echo "Created secret."
+            echo "=== response headers ==="; cat /tmp/h.txt; echo "=== body ==="; cat /tmp/r.txt
         volumeMounts: [{ name: work, mountPath: /work }]
 
 # ============================================================================
@@ -175,7 +182,11 @@ spec:
         command: ["/bin/sh","-c"]
         args:
           - |
-            set -euo pipefail
+            set -Eeuo pipefail
+            PS4='+ [VAULTCFG] $(date -Is) '
+            set -x
+            trap 'echo "[VAULTCFG] failed; dumping debug"; env | sort; exit 1' ERR
+
             until [ -s /vault-token/VAULT_TOKEN ]; do echo "waiting for VAULT_TOKEN..."; sleep 2; done
             export VAULT_TOKEN="$(cat /vault-token/VAULT_TOKEN)"
 
@@ -188,10 +199,11 @@ spec:
             : "${BQ_BOOTSTRAP_PROJECT:=}"; : "${BQ_BOOTSTRAP_BUCKET:=}"; : "${BQ_BOOTSTRAP_LOCATION:=}"
             : "${BQ_PROJECT:=}"; : "${BQ_DEFAULT_DATASET:=}"
 
+            echo "→ Pulling GCP SA JSON from Vault (masked in logs)…"
             BQ_SA_JSON="$(vault kv get -field=value secret/k8s-kafka-gcp-service-account-json 2>/dev/null || true)"
             [ -n "$BQ_SA_JSON" ] && printf '%s' "$BQ_SA_JSON" > /tmp/sa.json || true
 
-            echo "waiting for secret/${PGUSER}..."
+            echo "→ Waiting for secret/${PGUSER} password in Vault…"
             while :; do PASS="$(vault kv get -field=value "secret/${PGUSER}" 2>/dev/null || true)"; [ -n "$PASS" ] && break; echo "retry..."; sleep 5; done
 
             PG_ARGS=""; [ -n "$PGHOST" ] && PG_ARGS="$PG_ARGS host=$PGHOST"
@@ -199,18 +211,18 @@ spec:
             [ -n "$PGDATABASE" ] && PG_ARGS="$PG_ARGS database=$PGDATABASE"
             [ -n "$PGUSER" ] && PG_ARGS="$PG_ARGS user=$PGUSER"
             [ -n "$YB_MASTER_ADDRESSES" ] && PG_ARGS="$PG_ARGS master_addresses=$YB_MASTER_ADDRESSES"
-            [ -n "$PG_ARGS" ] && vault kv put secret/kafka/pgconfig $PG_ARGS >/dev/null
+            [ -n "$PG_ARGS" ] && vault kv put secret/kafka/pgconfig $PG_ARGS >/dev/null && echo "→ Wrote secret/kafka/pgconfig"
 
             BOOT_ARGS=""; [ -n "$BQ_BOOTSTRAP_BUCKET" ] && BOOT_ARGS="$BOOT_ARGS bucket=$BQ_BOOTSTRAP_BUCKET"
             [ -n "$BQ_BOOTSTRAP_PROJECT" ] && BOOT_ARGS="$BOOT_ARGS project=$BQ_BOOTSTRAP_PROJECT"
             [ -n "$BQ_BOOTSTRAP_LOCATION" ] && BOOT_ARGS="$BOOT_ARGS location=$BQ_BOOTSTRAP_LOCATION"
-            [ -n "$BOOT_ARGS" ] && vault kv put secret/kafka/bq/bootstrap $BOOT_ARGS >/dev/null
+            [ -n "$BOOT_ARGS" ] && vault kv put secret/kafka/bq/bootstrap $BOOT_ARGS >/dev/null && echo "→ Wrote secret/kafka/bq/bootstrap"
 
             CFG_ARGS=""; [ -n "$BQ_PROJECT" ] && CFG_ARGS="$CFG_ARGS project=$BQ_PROJECT"
             [ -n "$BQ_DEFAULT_DATASET" ] && CFG_ARGS="$CFG_ARGS dataset=$BQ_DEFAULT_DATASET"
             [ -s /tmp/sa.json ] && CFG_ARGS="$CFG_ARGS sa_json=@/tmp/sa.json"
-            [ -n "$CFG_ARGS" ] && vault kv put secret/kafka/bq/config $CFG_ARGS >/dev/null
-            [ -s /tmp/sa.json ] && vault kv put secret/kafka/bq/exporter sa_json=@/tmp/sa.json >/dev/null
+            [ -n "$CFG_ARGS" ] && vault kv put secret/kafka/bq/config $CFG_ARGS >/dev/null && echo "→ Wrote secret/kafka/bq/config"
+            [ -s /tmp/sa.json ] && vault kv put secret/kafka/bq/exporter sa_json=@/tmp/sa.json >/dev/null && echo "→ Wrote secret/kafka/bq/exporter"
 
             vault policy write data-bootstrap - <<'EOP'
             path "secret/data/kafka/pgconfig"     { capabilities = ["read"] }
@@ -224,6 +236,7 @@ spec:
               bound_service_account_names="${SA_NAME}" \
               bound_service_account_namespaces="${SA_NAMESPACE}" \
               policies="data-bootstrap" ttl="24h" >/dev/null
+            echo "✅ Vault config done."
         volumeMounts: [{ name: root-token, mountPath: /vault-token, readOnly: true }]
 
 # ============================================================================
@@ -287,7 +300,11 @@ spec:
         command: ["/bin/bash","-lc"]
         args:
           - |
-            set -euo pipefail
+            set -Eeuo pipefail
+            PS4='+ [PLANNER] $(date -Is) '
+            set -x
+            trap 'echo "[PLANNER] FAIL: env:"; env | sort; echo "--- plan.tsv ---"; cat /work/plan.tsv 2>/dev/null || true; exit 1' ERR
+
             # wait up to 120s for Vault files; else assume NO_TABLES and exit 0
             for f in /vault/secrets/pg.env /vault/secrets/pg-admin.env; do
               i=0; while [ ! -s "$f" ]; do
@@ -302,6 +319,7 @@ spec:
             : "${PGDATABASE:=kafka}"
             : "${PGUSER:=vaultadmin}"
             PGURL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}?sslmode=disable"
+            echo "[PLANNER] Using ${PGURL%:*}***"
 
             for i in $(seq 1 60); do
               /home/yugabyte/bin/ysqlsh "${PGURL}" -Atc "select 1" >/dev/null 2>&1 && break
@@ -309,7 +327,8 @@ spec:
               sleep 2
             done
 
-            /home/yugabyte/bin/ysqlsh "${PGURL}" -A -t -F '|' -c "
+            SQL="
+            \\set VERBOSITY verbose
             WITH t AS (
               SELECT n.nspname AS schema, c.relname AS table, d.description
                 FROM pg_class c
@@ -319,7 +338,9 @@ spec:
             ),
             j AS (
               SELECT schema, \"table\",
-                     CASE WHEN description ~ '^[[:space:]]*\\{' THEN description::jsonb ELSE NULL END AS jdesc
+                     CASE WHEN description ~ '^[[:space:]]*\\{'
+                          THEN (regexp_replace(description, '^[[:space:]]*', ''))::jsonb
+                          ELSE NULL END AS jdesc
                 FROM t
             ),
             b AS (
@@ -334,7 +355,13 @@ spec:
                    COALESCE(b->>'columns','') AS columns
               FROM b
              WHERE COALESCE( (b->>'enabled')::boolean, false ) = true;
-            " > /work/plan.tsv
+            "
+
+            echo "[PLANNER] Running plan SQL…"
+            /home/yugabyte/bin/ysqlsh "${PGURL}" -a -e -A -t -F '|' -c "$SQL" > /work/plan.tsv
+
+            echo "[PLANNER] Plan rows: $(grep -c '|' /work/plan.tsv || true)"
+            echo "--- plan.tsv ---"; cat /work/plan.tsv || true
 
             [ -s /work/plan.tsv ] || echo "NO_TABLES" > /work/NO_TABLES
       - name: importer
@@ -343,8 +370,12 @@ spec:
         command: ["/bin/bash","-lc"]
         args:
           - |
-            set -euo pipefail
-            if [ -f /work/NO_TABLES ]; then touch /work/DONE; exit 0; fi
+            set -Eeuo pipefail
+            PS4='+ [IMPORTER] $(date -Is) '
+            set -x
+            trap 'echo "[IMPORTER] FAIL; listing /work"; ls -R /work || true; exit 1' ERR
+
+            if [ -f /work/NO_TABLES ]; then echo "[IMPORTER] NO_TABLES flag set; exiting."; touch /work/DONE; exit 0; fi
 
             . /vault/secrets/pg.env
             . /vault/secrets/pg-admin.env
@@ -362,6 +393,7 @@ spec:
             get_columns() {
               local sch="$1" tbl="$2"
               /home/yugabyte/bin/ysqlsh "${PGURL}" -A -t -c "
+                \\set VERBOSITY verbose
                 SELECT string_agg(quote_ident(column_name), ',')
                 FROM information_schema.columns
                 WHERE table_schema='${sch}' AND table_name='${tbl}'
@@ -378,8 +410,10 @@ spec:
                 sleep 2
               done
               if [ -z "${COLS}" ] || [ "${COLS}" = "null" ]; then COLS="$(get_columns "${SCH}" "${TBL}")"; fi
+              echo "[IMPORTER] Loading ${SCH}.${TBL} with columns: ${COLS}"
               cat ${INDIR}/*.csv \
-                | /home/yugabyte/bin/ysqlsh "${PGURL}" -v ON_ERROR_STOP=1 \
+                | /home/yugabyte/bin/ysqlsh "${PGURL}" -v ON_ERROR_STOP=1 -a -e \
+                    -c "\\set VERBOSITY verbose" \
                     -c "\copy ${SCH}.${TBL} (${COLS}) from stdin with (format csv, header ${HDR});"
             done < /work/plan.tsv
 
@@ -393,8 +427,12 @@ spec:
         command: ["/bin/bash","-lc"]
         args:
           - |
-            set -euo pipefail
-            if [ -f /work/NO_TABLES ]; then exit 0; fi
+            set -Eeuo pipefail
+            PS4='+ [CLOUDSDK] $(date -Is) '
+            set -x
+            trap 'echo "[CLOUDSDK] FAIL; list /work"; ls -R /work || true; exit 1' ERR
+
+            if [ -f /work/NO_TABLES ]; then echo "[CLOUDSDK] NO_TABLES flag; skipping."; exit 0; fi
 
             for f in /vault/secrets/bootstrap.env /vault/secrets/gcp-key.json; do
               j=0; while [ ! -s "$f" ]; do
@@ -414,13 +452,14 @@ spec:
             while IFS='|' read -r SCH TBL BQMAP PREFIX FMT HDR COLS; do
               [ -z "${SCH}" ] && continue
               : "${PREFIX:=${TBL}}"; : "${FMT:=CSV}"; : "${HDR:=true}"
+              echo "[CLOUDSDK] Exporting ${BQMAP} → gs://${BUCKET}/bootstrap/${PREFIX}/${PREFIX}-*.csv"
               DEST_URI="gs://${BUCKET}/bootstrap/${PREFIX}/${PREFIX}-*.csv"
               bq "${BQ_LOC_FLAG[@]}" --project_id="${PROJECT}" extract \
                 --destination_format="${FMT}" --field_delimiter="," --print_header="${HDR}" \
                 "${BQMAP}" "${DEST_URI}"
 
               OUTDIR="/work/in/${PREFIX}"; mkdir -p "${OUTDIR}"
-              gsutil -m cp "gs://${BUCKET}/bootstrap/${PREFIX}/${PREFIX}-*.csv" "${OUTDIR}/"
+              gsutil -m -o "GSUtil:parallel_process_count=1" cp "gs://${BUCKET}/bootstrap/${PREFIX}/${PREFIX}-*.csv" "${OUTDIR}/"
               touch "${OUTDIR}/READY"
             done < /work/plan.tsv
       - name: flagger
@@ -429,11 +468,14 @@ spec:
         command: ["/bin/sh","-lc"]
         args:
           - |
-            set -e
+            set -Eeuo pipefail
+            PS4='+ [FLAGGER] $(date -Is) '
+            set -x
             API="https://kubernetes.default.svc"
             TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
             CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-            DATA='{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"bootstrap.ok","namespace":"kafka","labels":{"app":"bq-yb-bootstrap"}},"data":{"status":"complete","completedAt":"__NOW__"}}'
+            NOW="$(date -Is)"
+            DATA='{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"bootstrap.ok","namespace":"kafka","labels":{"app":"bq-yb-bootstrap"}},"data":{"status":"complete","completedAt":"'"$NOW"'"}}'
 
             if [ ! -f /work/NO_TABLES ]; then
               for i in $(seq 1 360); do [ -f /work/DONE ] && break; sleep 2; done
@@ -501,7 +543,9 @@ spec:
         command: ["/bin/bash","-lc"]
         args:
           - |
-            set -euo pipefail
+            set -Eeuo pipefail
+            PS4='+ [KAFKA-FMT] $(date -Is) '
+            set -x
             META="/tmp/kraft-combined-logs/meta.properties"
             if [ -f "$META" ]; then
               echo "meta.properties present; not reformatting."; grep -E '^cluster\.id=' "$META" || true
@@ -573,7 +617,9 @@ spec:
         command: ["/bin/bash","-lc"]
         args:
           - |
-            set -e
+            set -Eeuo pipefail
+            PS4='+ [INSTALL-BQ] $(date -Is) '
+            set -x
             mkdir -p /plugins
             apt-get update >/dev/null 2>&1 || true
             apt-get install -y unzip curl >/dev/null 2>&1 || true
@@ -586,7 +632,9 @@ spec:
         command: ["/bin/sh","-lc"]
         args:
           - |
-            set -eu
+            set -Eeuo pipefail
+            PS4='+ [FETCH-YB] $(date -Is) '
+            set -x
             mkdir -p /out/yugabytedb
             for SRC in /plugins /kafka/connect /kafka/connectors /kafka/connect/yugabytedb /opt/kafka/connect /opt/kafka/plugins /debezium-connector /kafka; do
               if [ -d "$SRC" ] && [ -n "$(ls -A "$SRC" 2>/dev/null || true)" ]; then
@@ -610,7 +658,7 @@ spec:
               name: kafka-cluster-id
               key: CLUSTER_ID
 
-        # Debezium envs (no CONNECT_ prefix)
+        # Debezium/KC config
         - { name: BOOTSTRAP_SERVERS, value: "kafka.kafka.svc.cluster.local:9092" }
         - { name: GROUP_ID, value: "connect-cluster" }
         - { name: CONFIG_STORAGE_TOPIC, value: "_connect-configs" }
@@ -630,6 +678,10 @@ spec:
 
         # Narrow plugin path for faster, safer classpath
         - { name: CONNECT_PLUGIN_PATH, value: "/plugins/wepay-kafka-connect-bigquery,/plugins/yugabytedb" }
+
+        # More verbose logging in the worker + connectors
+        - { name: CONNECT_LOG4J_ROOT_LOGLEVEL, value: "DEBUG" }
+        - { name: CONNECT_LOG4J_LOGGERS, value: "org.apache.kafka.connect.runtime.rest=WARN,io.debezium=DEBUG,io.debezium.connector.yugabytedb=DEBUG,com.wepay.kafka.connect.bigquery=DEBUG" }
 
         - { name: KAFKA_HEAP_OPTS, value: "-Xms256m -Xmx512m" }
         ports:
@@ -804,7 +856,11 @@ spec:
         command: ["/bin/bash","-lc"]
         args:
           - |
-            set -euo pipefail
+            set -Eeuo pipefail
+            PS4='+ [WATCHER] $(date -Is) '
+            set -x
+            trap 'echo "[WATCHER] FAIL; dumping /state and last REST response"; ls -l /state || true; cat /tmp/resp.txt 2>/dev/null || true; exit 1' ERR
+
             for f in /vault/secrets/yb.env /vault/secrets/pgpass.env /vault/secrets/bq.env; do
               i=0; while [ ! -s "$f" ]; do i=$((i+1)); [ $i -gt 120 ] && echo "vault secrets missing: $f" >&2 && exit 1; sleep 2; done
               . "$f"
@@ -813,24 +869,22 @@ spec:
             PGHOST="${PGHOST:-yb-tserver-service.yugabyte.svc.cluster.local}"
             PGPORT="${PGPORT:-5433}"
             PGUSER="${PGUSER:-vaultadmin}"
-            # PGDATABASE is ignored for listing; we enumerate all DBs
+            echo "[WATCHER] PGHOST=$PGHOST PGPORT=$PGPORT PGUSER=$PGUSER PGDATABASE=${PGDATABASE:-<ignored>}"
 
             esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
-            api_put()   { local u="$1" f="$2"; code=$(curl -sS -o /tmp/resp.txt -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @"$f" -X PUT "$u" || true); if [ "${code:-000}" -ge 400 ]; then echo "PUT $u -> $code"; cat /tmp/resp.txt >&2; return 1; fi; }
-            api_post()  { local u="$1" f="$2"; code=$(curl -sS -o /tmp/resp.txt -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @"$f" -X POST "$u" || true); if [ "${code:-000}" -ge 400 ]; then echo "POST $u -> $code"; cat /tmp/resp.txt >&2; return 1; fi; }
-            api_delete(){ local u="$1"; code=$(curl -sS -o /tmp/resp.txt -w '%{http_code}' -X DELETE "$u" || true); if [ "$code" != "404" ] && [ "$code" != "204" ]; then echo "DELETE $u -> $code"; cat /tmp/resp.txt >&2; fi; }
+            api_put()   { local u="$1" f="$2"; code=$(curl -sS -D /tmp/h.txt -o /tmp/resp.txt -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @"$f" -X PUT "$u" || true); echo "PUT $u -> $code"; cat /tmp/resp.txt; }
+            api_post()  { local u="$1" f="$2"; code=$(curl -sS -D /tmp/h.txt -o /tmp/resp.txt -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @"$f" -X POST "$u" || true); echo "POST $u -> $code"; cat /tmp/resp.txt; }
+            api_delete(){ local u="$1"; code=$(curl -sS -D /tmp/h.txt -o /tmp/resp.txt -w '%{http_code}' -X DELETE "$u" || true); echo "DELETE $u -> $code"; cat /tmp/resp.txt; }
 
-            # Wait for Connect REST and print installed plugins once
-            until curl -fsS "${CONNECT_URL}/connectors" >/dev/null 2>&1; do sleep 3; done
+            until curl -fsS "${CONNECT_URL}/connectors" >/dev/null 2>&1; do echo "[WATCHER] waiting for connect REST…"; sleep 3; done
             echo "== Connector plugins =="; curl -fsS "${CONNECT_URL}/connector-plugins" | sed 's/.*/  &/'; echo "======================="
 
             list_dbs() {
-              # Try yugabyte then postgres; fall back to any db in env
               for DB in yugabyte postgres "${PGDATABASE:-}"; do
                 [ -z "$DB" ] && continue
                 URL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${DB}?sslmode=disable"
                 if /home/yugabyte/bin/ysqlsh "$URL" -Atc "select 1" >/dev/null 2>&1; then
-                  /home/yugabyte/bin/ysqlsh "$URL" -Atc "select datname from pg_database where datallowconn and datname not in ('template0','template1')" | sort -u
+                  /home/yugabyte/bin/ysqlsh "$URL" -Atc "select datname from pg_database where datallowconn and datname not in ('template0','template1') order by 1" | sort -u
                   return 0
                 fi
               done
@@ -841,7 +895,8 @@ spec:
             get_plan_for_db() {
               local DB="$1"
               local URL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${DB}?sslmode=disable"
-              /home/yugabyte/bin/ysqlsh "$URL" -A -t -F '|' -c "
+              /home/yugabyte/bin/ysqlsh "$URL" -a -e -A -t -F '|' -c "
+                \\set VERBOSITY verbose
                 WITH t AS (
                   SELECT n.nspname AS schema, c.relname AS table, d.description
                     FROM pg_class c
@@ -851,7 +906,9 @@ spec:
                 ),
                 j AS (
                   SELECT schema, \"table\",
-                         CASE WHEN description ~ '^[[:space:]]*\\{' THEN description::jsonb ELSE NULL END AS jdesc
+                         CASE WHEN description ~ '^[[:space:]]*\\{'
+                              THEN (regexp_replace(description, '^[[:space:]]*', ''))::jsonb
+                              ELSE NULL END AS jdesc
                   FROM t
                 ),
                 b AS (
@@ -890,15 +947,18 @@ spec:
 
             while :; do
               mapfile -t DBS < <(list_dbs)
+              echo "[WATCHER] DBs: ${DBS[*]}"
               printf '%s\n' "${DBS[@]}" > /state/_dbs.current || true
 
               for DB in "${DBS[@]}"; do
                 PLAN="$(get_plan_for_db "$DB")"
+                echo "[WATCHER] ${DB} plan lines: $(printf '%s\n' "$PLAN" | grep -c '|' || true)"
                 SIG="$(printf '%s' "$PLAN" | sha256sum | awk '{print $1}')"
                 LAST="/state/${DB}.plan.sig"
                 if [ ! -f "$LAST" ] || [ "$SIG" != "$(cat "$LAST" 2>/dev/null || echo)" ]; then
                   printf '%s' "$SIG" > "$LAST"
                   printf '%s\n' "$PLAN" > "/state/${DB}.plan.tsv"
+                  echo "--- /state/${DB}.plan.tsv ---"; cat "/state/${DB}.plan.tsv" || true
 
                   TABLES=""; TOPICS=""; T2MAP=""
                   while IFS='|' read -r SCH TBL BQMAP PREFIX FMT HDR COLS ENA; do
