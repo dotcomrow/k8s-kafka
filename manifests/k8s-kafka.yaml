@@ -733,7 +733,7 @@ spec:
           - --pass-authorization-header=true
           - --pass-access-token=true
           - --skip-provider-button=true
-          - --allowed-group=dotcomrow:pgweb_users
+          - --allowed-group=dotcomrow:kafka_gui_users
         env:
         - name: OAUTH2_PROXY_CLIENT_ID
           valueFrom: { secretKeyRef: { name: oauth2-proxy-secrets, key: client_id } }
@@ -798,8 +798,10 @@ spec:
         - { name: state, mountPath: /state }
         env:
         - { name: CONNECT_URL, value: "http://kafka-connect.kafka.svc.cluster.local:8083" }
-        - { name: SERVER_PREFIX, value: "yb" }
-        - { name: SCAN_INTERVAL, value: "30" }   # seconds
+        - { name: SERVER_PREFIX, value: "yb" }  # topics: yb_<db>.<schema>.<table>
+        - { name: SCAN_INTERVAL, value: "30" }  # seconds
+        - { name: DB_INCLUDE_REGEX, value: ".*" }
+        - { name: DB_EXCLUDE_REGEX, value: "^(template0|template1)$" }
         command: ["/bin/bash","-lc"]
         args:
           - |
@@ -812,7 +814,6 @@ spec:
             PGHOST="${PGHOST:-yb-tserver-service.yugabyte.svc.cluster.local}"
             PGPORT="${PGPORT:-5433}"
             PGUSER="${PGUSER:-vaultadmin}"
-            # PGDATABASE is ignored for listing; we enumerate all DBs
 
             esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
             api_put()   { local u="$1" f="$2"; code=$(curl -sS -o /tmp/resp.txt -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @"$f" -X PUT "$u" || true); if [ "${code:-000}" -ge 400 ]; then echo "PUT $u -> $code"; cat /tmp/resp.txt >&2; return 1; fi; }
@@ -823,17 +824,24 @@ spec:
             until curl -fsS "${CONNECT_URL}/connectors" >/dev/null 2>&1; do sleep 3; done
             echo "== Connector plugins =="; curl -fsS "${CONNECT_URL}/connector-plugins" | sed 's/.*/  &/'; echo "======================="
 
+            DB_INCLUDE_REGEX="${DB_INCLUDE_REGEX:-.*}"
+            DB_EXCLUDE_REGEX="${DB_EXCLUDE_REGEX:-^(template0|template1)$}"
+            SERVER_PREFIX="${SERVER_PREFIX:-yb}"
+            SCAN_INTERVAL="${SCAN_INTERVAL:-30}"
+
             list_dbs() {
-              # Try yugabyte then postgres; fall back to any db in env
+              # Try yugabyte then postgres; fallback to $PGDATABASE
               for DB in yugabyte postgres "${PGDATABASE:-}"; do
                 [ -z "$DB" ] && continue
                 URL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${DB}?sslmode=disable"
                 if /home/yugabyte/bin/ysqlsh "$URL" -Atc "select 1" >/dev/null 2>&1; then
-                  /home/yugabyte/bin/ysqlsh "$URL" -Atc "select datname from pg_database where datallowconn and datname not in ('template0','template1')" | sort -u
+                  /home/yugabyte/bin/ysqlsh "$URL" -Atc \
+                    "select datname from pg_database where datallowconn = true" \
+                    | sort -u
                   return 0
                 fi
               done
-              echo "ERROR: cannot connect to a control DB to enumerate databases" >&2
+              echo "ERROR: cannot connect to enumerate databases" >&2
               return 1
             }
 
@@ -857,12 +865,12 @@ spec:
                   FROM j WHERE jdesc ? 'bootstrap'
                 )
                 SELECT schema, \"table\",
-                      COALESCE(b->>'bq','') AS bq,
-                      COALESCE(b->>'gcs_prefix', \"table\") AS gcs_prefix,
-                      COALESCE(b->>'format','CSV') AS format,
-                      COALESCE(b->>'header','true') AS header,
-                      COALESCE(b->>'columns','') AS columns,
-                      COALESCE((b->>'enabled')::boolean,false) AS enabled
+                       COALESCE(b->>'bq','') AS bq,
+                       COALESCE(b->>'gcs_prefix', \"table\") AS gcs_prefix,
+                       COALESCE(b->>'format','CSV') AS format,
+                       COALESCE(b->>'header','true') AS header,
+                       COALESCE(b->>'columns','') AS columns,
+                       COALESCE((b->>'enabled')::boolean,false) AS enabled
                 FROM b
                 ORDER BY schema, \"table\";
               " || true
@@ -871,38 +879,39 @@ spec:
             ensure_signal_table() {
               local DB="$1"
               local URL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${DB}?sslmode=disable"
-              /home/yugabyte/bin/ysqlsh "$URL" -Atc "CREATE TABLE IF NOT EXISTS public.debezium_signal (id varchar(64) PRIMARY KEY, type varchar(32) NOT NULL, data varchar(2048));" >/dev/null 2>&1 || true
+              /home/yugabyte/bin/ysqlsh "$URL" -Atc \
+                "CREATE TABLE IF NOT EXISTS public.debezium_signal (id text primary key, type text not null, data jsonb not null);" \
+                >/dev/null 2>&1 || true
             }
 
             signal_snapshot_table() {
-              local DB="$1" SCHEMA="$2" TBL="$3"
+              local DB="$1" SCH="$2" TBL="$3"
               local URL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${DB}?sslmode=disable"
-              local ID="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || date +%s%N)"
-              local DATA="{\"data-collections\": [\"${SCHEMA}.${TBL}\"]}"
-              /home/yugabyte/bin/ysqlsh "$URL" -Atc "INSERT INTO public.debezium_signal(id,type,data) VALUES ('${ID}','execute-snapshot','${DATA}');" >/dev/null 2>&1 || true
-              echo "signaled snapshot for ${DB}.${SCHEMA}.${TBL}"
+              local ID; ID="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || date +%s%N)"
+              local DATA="{\"data-collections\": [\"${SCH}.${TBL}\"]}"
+              /home/yugabyte/bin/ysqlsh "$URL" -Atc \
+                "INSERT INTO public.debezium_signal(id,type,data) VALUES ('${ID}','execute-snapshot','${DATA}'::jsonb);" \
+                >/dev/null 2>&1 || true
+              echo "signaled snapshot for ${DB}.${SCH}.${TBL}"
             }
 
-            SERVER_PREFIX="${SERVER_PREFIX:-yb}"
-            SCAN_INTERVAL="${SCAN_INTERVAL:-30}"
-
             while :; do
-              mapfile -t DBS < <(list_dbs)
-              # Track DBs we saw this round
-              printf '%s\n' "${DBS[@]}" > /state/_dbs.current || true
+              mapfile -t ALL < <(list_dbs | grep -E "${DB_INCLUDE_REGEX}" | grep -Ev "${DB_EXCLUDE_REGEX}" || true)
+              echo "Discovered DBs: ${ALL[*]}"
+              printf '%s\n' "${ALL[@]}" > /state/_dbs.current || true
 
-              for DB in "${DBS[@]}"; do
+              for DB in "${ALL[@]}"; do
                 PLAN="$(get_plan_for_db "$DB")"
-                SIG="$(printf '%s' "$PLAN" | sha256sum | awk '{print $1}')"
+                SIG="$(printf '%s' "$DB|$PLAN" | sha256sum | awk '{print $1}')"
                 LAST="/state/${DB}.plan.sig"
-                if [ ! -f "$LAST" ] || [ "$SIG" != "$(cat "$LAST" 2>/dev/null || echo)" ]; then
+                OLD="$(cat "$LAST" 2>/dev/null || true)"
+                if [ "$SIG" != "$OLD" ]; then
                   printf '%s' "$SIG" > "$LAST"
                   printf '%s\n' "$PLAN" > "/state/${DB}.plan.tsv"
 
-                  # Build include list, topics, and topic->table map for this DB
                   TABLES=""; TOPICS=""; T2MAP=""
                   while IFS='|' read -r SCH TBL BQMAP PREFIX FMT HDR COLS ENA; do
-                    [ -z "$SCH" ] && continue
+                    [ -z "${SCH:-}" ] && continue
                     [ "$ENA" != "t" ] && continue
                     FQ="${SCH}.${TBL}"
                     SERVER="${SERVER_PREFIX}_${DB}"
@@ -917,7 +926,6 @@ spec:
                   done < "/state/${DB}.plan.tsv"
                   TABLES="${TABLES%,}"; TOPICS="${TOPICS%,}"; T2MAP="${T2MAP%,}"
 
-                  # Remove connectors if no enabled tables
                   if [ -z "$TABLES" ]; then
                     echo "DB ${DB}: no enabled tables; removing connectors if present."
                     api_delete "${CONNECT_URL}/connectors/bq-sink-${DB}" || true
@@ -928,7 +936,7 @@ spec:
 
                   ensure_signal_table "$DB"
 
-                  # Configure yb-source-<db>
+                  # yb-source-<db>
                   {
                     echo '{ "name":"yb-source-'"${DB}"'", "config": {'
                     echo '  "connector.class":"io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",'
@@ -951,14 +959,13 @@ spec:
                     echo '  "topic.creation.default.cleanup.policy":"delete"'
                     echo '} }'
                   } > "/tmp/yb-source-${DB}.json"
-
                   api_put  "${CONNECT_URL}/connectors/yb-source-${DB}/config" "/tmp/yb-source-${DB}.json" || \
                   api_post "${CONNECT_URL}/connectors"                       "/tmp/yb-source-${DB}.json"
 
-                  # Configure bq-sink-<db>
+                  # bq-sink-<db>
                   {
                     echo '{ "name":"bq-sink-'"${DB}"'", "config": {'
-                    echo '  "connector.class":"com.wepay.kafka.connect.bigquery.BigQuerySinkConnector",'
+                    echo '  "connector.class":"com.wepay.kafka.connect.bigQuery.BigQuerySinkConnector",'
                     echo '  "tasks.max":"1",'
                     echo "  \"topics\":\"$(esc "$TOPICS")\","
                     echo "  \"topic2TableMap\":\"$(esc "$T2MAP")\","
@@ -972,6 +979,8 @@ spec:
                     echo '  "keyfile": '"${BQ_KEY_JSON}"
                     echo '} }'
                   } > "/tmp/bq-sink-${DB}.json"
+                  # Fix class casing (some images expect lower-case 'bigquery')
+                  sed -i 's/bigQuery/bigquery/g' "/tmp/bq-sink-${DB}.json"
 
                   api_put  "${CONNECT_URL}/connectors/bq-sink-${DB}/config" "/tmp/bq-sink-${DB}.json" || \
                   api_post "${CONNECT_URL}/connectors"                     "/tmp/bq-sink-${DB}.json"
@@ -980,13 +989,15 @@ spec:
                   CUR_LIST_FILE="/state/${DB}.tables"
                   PREV_LIST="$(cat "$CUR_LIST_FILE" 2>/dev/null || true)"
                   printf '%s' "$TABLES" > "$CUR_LIST_FILE"
-                  # Diff: new entries = in current but not in previous
                   printf '%s' "$TABLES" | tr ',' '\n' | while read -r FQ; do
                     [ -z "$FQ" ] && continue
                     if ! printf '%s\n' "$PREV_LIST" | tr ',' '\n' | grep -qx "$FQ"; then
                       signal_snapshot_table "$DB" "${FQ%%.*}" "${FQ#*.}"
                     fi
                   done
+                  echo "DB ${DB}: connectors applied. Topics: ${TOPICS}"
+                else
+                  echo "DB ${DB}: no changes."
                 fi
               done
 
