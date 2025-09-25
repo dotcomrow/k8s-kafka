@@ -643,7 +643,7 @@ spec:
         volumeMounts: [{ name: plugins, mountPath: /plugins }]
 
 # ============================================================================
-# Registration Job (wave 5) — autoCreateTables=true + incremental snapshot signals
+# Registration Job (wave 5) — signals enabled (no heredocs)
 # ============================================================================
 ---
 apiVersion: batch/v1
@@ -718,13 +718,11 @@ spec:
             until curl -fsS http://kafka-connect.kafka.svc.cluster.local:8083/connectors >/dev/null 2>&1; do sleep 5; done
 
             PGURL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}?sslmode=disable"
-
-            # Ensure Debezium signal table exists
             /home/yugabyte/bin/ysqlsh "${PGURL}" -v ON_ERROR_STOP=1 -c "
               CREATE TABLE IF NOT EXISTS public.debezium_signal (
-                id   TEXT PRIMARY KEY,
-                type TEXT NOT NULL,
-                data JSONB NOT NULL
+                id   text PRIMARY KEY,
+                type text NOT NULL,
+                data jsonb NOT NULL
               );"
 
             mapfile -t ROWS < <(
@@ -742,17 +740,15 @@ spec:
                   and ((comment::jsonb -> 'bootstrap' ->> 'enabled')::boolean is true);
               "
             )
-            [ ${#ROWS[@]} -eq 0 ] && exit 0
+            [ ${#ROWS[@]} -eq 0 ] && { echo "No enabled tables at registration time."; exit 0; }
 
             SERVER_NAME="yb"
             TABLE_INCLUDE_LIST=""; TOPICS=""; TOPIC2TABLEMAP=""
-            ENABLED_FQS=()
             for R in "${ROWS[@]}"; do
               SCHEMA="$(echo "$R" | cut -d, -f1)"
               TBL="$(echo "$R" | cut -d, -f2)"
               BQMAP="$(echo "$R" | cut -d, -f3-)"
               FQ="${SCHEMA}.${TBL}"
-              ENABLED_FQS+=("$FQ")
               TOPIC="${SERVER_NAME}.${FQ}"
               TABLE_INCLUDE_LIST="${TABLE_INCLUDE_LIST}${FQ},"
               TOPICS="${TOPICS}${TOPIC},"
@@ -781,7 +777,7 @@ spec:
               echo "  \"database.server.name\":\"$(esc "$SERVER_NAME")\","
               echo "  \"table.include.list\":\"$(esc "$TABLE_INCLUDE_LIST")\","
               echo '  "snapshot.mode":"never",'
-              echo '  "incremental.snapshot.allowed":"true",'
+              echo '  "signal.enabled":"true",'
               echo '  "signal.data.collection":"public.debezium_signal",'
               echo '  "transforms":"unwrap",'
               echo '  "transforms.unwrap.type":"io.debezium.connector.yugabytedb.transforms.YBExtractNewRecordState",'
@@ -817,21 +813,6 @@ spec:
               http://kafka-connect.kafka.svc.cluster.local:8083/connectors/bq-sink/config \
               || curl -fsS -X POST -H 'Content-Type: application/json' --data-binary @/tmp/bq-sink.json \
                    http://kafka-connect.kafka.svc.cluster.local:8083/connectors
-
-            # Send execute-snapshot signal for each enabled table now
-            send_snapshot_signal() {
-              local fq="$1"
-              local id
-              id="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "id$RANDOM$(date +%s)")"
-              local payload
-              payload=$(printf '{"data-collections":["%s"]}' "$fq")
-              /home/yugabyte/bin/ysqlsh "${PGURL}" -v ON_ERROR_STOP=1 -c \
-                "INSERT INTO public.debezium_signal (id,type,data)
-                 VALUES ('${id}','execute-snapshot','${payload}');"
-            }
-            for fq in "${ENABLED_FQS[@]}"; do
-              send_snapshot_signal "$fq"
-            done
 
 # ============================================================================
 # Kafka UI + oauth2-proxy (waves 45-47)
@@ -934,7 +915,7 @@ spec:
           valueFrom: { secretKeyRef: { name: oauth2-proxy-secrets, key: cookie_secret } }
 
 # ============================================================================
-# Continuous Annotation Watcher (wave 50) — no heredocs, autoCreateTables=true, snapshot-on-first-enable
+# Continuous Annotation Watcher (wave 50) — signals + auto snapshots
 # ============================================================================
 ---
 apiVersion: apps/v1
@@ -1007,9 +988,8 @@ spec:
             PGDATABASE="${PGDATABASE:-kafka}"
             PGUSER="${PGUSER:-vaultadmin}"
             PGURL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}?sslmode=disable"
-            STATE=/state/tables.tsv
-            ENABLED_LIST=/state/enabled.list
-            CUR_ENABLED=/state/current_enabled.list
+            STATE_TSV=/state/tables.tsv
+            STATE_ENABLED=/state/enabled.list
 
             esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
             api_put()   { local u="$1" f="$2"; code=$(curl -sS -o /tmp/resp.txt -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @"$f" -X PUT "$u" || true); if [ "${code:-000}" -ge 400 ]; then echo "PUT $u -> $code"; cat /tmp/resp.txt >&2; return 1; fi; }
@@ -1019,9 +999,9 @@ spec:
             # Ensure signal table exists
             /home/yugabyte/bin/ysqlsh "${PGURL}" -v ON_ERROR_STOP=1 -c "
               CREATE TABLE IF NOT EXISTS public.debezium_signal (
-                id   TEXT PRIMARY KEY,
-                type TEXT NOT NULL,
-                data JSONB NOT NULL
+                id   text PRIMARY KEY,
+                type text NOT NULL,
+                data jsonb NOT NULL
               );"
 
             get_plan() {
@@ -1055,20 +1035,17 @@ spec:
 
             build_vars() {
               TABLES=""; TOPICS=""; T2MAP=""
-              : > "$CUR_ENABLED"
               while IFS='|' read -r SCH TBL BQMAP PREFIX FMT HDR COLS ENA; do
                 [ -z "$SCH" ] && continue
-                if [ "$ENA" = "t" ] || [ "$ENA" = "true" ]; then
-                  FQ="${SCH}.${TBL}"
-                  echo "$FQ" >> "$CUR_ENABLED"
-                  TOPIC="${SERVER_NAME}.${FQ}"
-                  TABLES="${TABLES}${FQ},"
-                  TOPICS="${TOPICS}${TOPIC},"
-                  if [ -n "$BQMAP" ] && echo "$BQMAP" | grep -q '\.'; then
-                    T2MAP="${T2MAP}${TOPIC}:${BQMAP},"
-                  else
-                    T2MAP="${T2MAP}${TOPIC}:${BQ_DEFAULT_DATASET}.${TBL},"
-                  fi
+                [ "$ENA" != "t" ] && continue
+                FQ="${SCH}.${TBL}"
+                TOPIC="${SERVER_NAME}.${FQ}"
+                TABLES="${TABLES}${FQ},"
+                TOPICS="${TOPICS}${TOPIC},"
+                if [ -n "$BQMAP" ] && echo "$BQMAP" | grep -q '\.'; then
+                  T2MAP="${T2MAP}${TOPIC}:${BQMAP},"
+                else
+                  T2MAP="${T2MAP}${TOPIC}:${BQ_DEFAULT_DATASET}.${TBL},"
                 fi
               done
               TABLES="${TABLES%,}"
@@ -1076,7 +1053,11 @@ spec:
               T2MAP="${T2MAP%,}"
             }
 
-            # Wait for connect REST to be up, and print available plugins once
+            current_enabled_list() {
+              echo "$TABLES" | tr ',' '\n' | sed '/^$/d' | sort -u
+            }
+
+            # Wait for connect REST to be up, and print plugins once
             until curl -fsS "${CONNECT_URL}/connectors" >/dev/null 2>&1; do sleep 3; done
             echo "== Connector plugins =="
             curl -fsS "${CONNECT_URL}/connector-plugins" | sed 's/.*/  &/'
@@ -1089,45 +1070,28 @@ spec:
               echo "WARNING: YugabyteDB Debezium connector class not found" >&2
             fi
 
-            send_snapshot_signal() {
-              local fq="$1"
-              local id
-              id="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "id$RANDOM$(date +%s)")"
-              local payload
-              payload=$(printf '{"data-collections":["%s"]}' "$fq")
-              /home/yugabyte/bin/ysqlsh "${PGURL}" -v ON_ERROR_STOP=1 -c \
-                "INSERT INTO public.debezium_signal (id,type,data)
-                 VALUES ('${id}','execute-snapshot','${payload}');"
-            }
-
             last_sig=""
+            touch "${STATE_ENABLED}"
             while :; do
               CUR="$(get_plan || true)"
               [ -z "${CUR}" ] && CUR=""
               sig="$(printf '%s' "$CUR" | sha256sum | awk '{print $1}')"
               if [ "$sig" != "$last_sig" ]; then
-                printf '%s\n' "$CUR" > "$STATE"
-                build_vars < "$STATE"
-
-                # Find newly enabled tables (present now but not previously)
-                if [ -f "$ENABLED_LIST" ]; then
-                  NEW=$(grep -Fxv -f "$ENABLED_LIST" "$CUR_ENABLED" || true)
-                else
-                  NEW=$(cat "$CUR_ENABLED" 2>/dev/null || true)
-                fi
+                printf '%s\n' "$CUR" > "$STATE_TSV"
+                build_vars < "$STATE_TSV"
 
                 # If nothing is enabled, ensure connectors are absent to avoid 500s from empty config
                 if [ -z "${TABLES}" ]; then
                   echo "No enabled tables found; removing connectors if present."
                   api_delete "${CONNECT_URL}/connectors/bq-sink" || true
                   api_delete "${CONNECT_URL}/connectors/yb-source" || true
-                  cp -f "$CUR_ENABLED" "$ENABLED_LIST"
+                  : > "${STATE_ENABLED}"
                   last_sig="$sig"
                   sleep "${SCAN_INTERVAL}"
                   continue
                 fi
 
-                # (Re)configure yb-source
+                # (Re)configure yb-source with signals enabled
                 {
                   echo '{ "name":"yb-source", "config": {'
                   echo '  "connector.class":"io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",'
@@ -1141,7 +1105,7 @@ spec:
                   echo "  \"database.server.name\":\"$(esc "$SERVER_NAME")\","
                   echo "  \"table.include.list\":\"$(esc "$TABLES")\","
                   echo '  "snapshot.mode":"never",'
-                  echo '  "incremental.snapshot.allowed":"true",'
+                  echo '  "signal.enabled":"true",'
                   echo '  "signal.data.collection":"public.debezium_signal",'
                   echo '  "transforms":"unwrap",'
                   echo '  "transforms.unwrap.type":"io.debezium.connector.yugabytedb.transforms.YBExtractNewRecordState",'
@@ -1175,16 +1139,23 @@ spec:
                 api_put  "${CONNECT_URL}/connectors/bq-sink/config" /tmp/bq-sink.json || \
                 api_post "${CONNECT_URL}/connectors"               /tmp/bq-sink.json
 
-                # Send snapshot signal for any newly-enabled tables
-                if [ -n "$NEW" ]; then
-                  echo "Newly enabled tables detected -> sending incremental snapshot signals:"
-                  echo "$NEW" | sed 's/^/  - /'
-                  while IFS= read -r fq; do
-                    [ -n "$fq" ] && send_snapshot_signal "$fq"
-                  done <<< "$NEW"
-                fi
+                # Auto-snapshot for any newly enabled tables
+                NEW_ENABLED="$(current_enabled_list)"
+                # Compare with previous enabled list
+                while read -r T; do
+                  [ -z "$T" ] && continue
+                  if ! grep -qx "$T" "${STATE_ENABLED}"; then
+                    ID="snap-$(date +%s)-$RANDOM-${T//./_}"
+                    echo "Emitting execute-snapshot for $T (id=$ID)"
+                    /home/yugabyte/bin/ysqlsh "${PGURL}" -v ON_ERROR_STOP=1 -c \
+                      "INSERT INTO public.debezium_signal (id, type, data)
+                       VALUES ('${ID}', 'execute-snapshot',
+                               jsonb_build_object('data-collections', ARRAY['${T}']));"
+                    sleep 1
+                  fi
+                done <<< "${NEW_ENABLED}"
+                printf '%s\n' "${NEW_ENABLED}" > "${STATE_ENABLED}"
 
-                cp -f "$CUR_ENABLED" "$ENABLED_LIST"
                 last_sig="$sig"
               fi
               sleep "${SCAN_INTERVAL}"
