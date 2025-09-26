@@ -1081,7 +1081,9 @@ spec:
                     echo '  "tasks.max":"1",'
                     echo "  \"database.hostname\":\"$(esc "$PGHOST")\","
                     echo "  \"database.port\":\"$(esc "$PGPORT")\","
-                    echo "  \"database.master.addresses\":\"$(esc "$YB_MASTER_ADDRESSES")\","
+                    if [ -n "$YB_MASTER_ADDRESSES" ]; then
+                      echo "  \"database.master.addresses\":\"$(esc "$YB_MASTER_ADDRESSES")\","
+                    fi
                     echo "  \"database.user\":\"$(esc "$PGUSER")\","
                     echo "  \"database.password\":\"$(esc "$PGPASSWORD")\","
                     echo "  \"database.dbname\":\"$(esc "$DB")\","
@@ -1090,8 +1092,6 @@ spec:
                     echo '  "snapshot.mode":"never",'
                     echo '  "incremental.snapshot.enabled":"true",'
                     echo '  "signal.data.collection":"public.debezium_signal",'
-                    echo '  "publication.name":"dbz_publication",'
-                    echo '  "publication.autocreate.mode":"disabled",'
                     echo '  "transforms":"unwrap",'
                     echo '  "transforms.unwrap.type":"io.debezium.connector.yugabytedb.transforms.YBExtractNewRecordState",'
                     echo '  "topic.creation.default.replication.factor":"1",'
@@ -1118,7 +1118,7 @@ spec:
                     echo '  "allowNewBigQueryFields":"true",'
                     echo '  "allowBigQueryRequiredFieldRelaxation":"true",'
                     echo '  "keySource":"JSON",'
-                    echo '  "keyfile": '"${BQ_KEY_JSON}"
+                    echo "  \"keyfile\":\"$(esc "$BQ_KEY_JSON")\""
                     echo '}'
                   } > "/tmp/bq-sink-${DB}.put.json"
                   { echo '{ "name":"bq-sink-'"${DB}"'", "config": '; cat "/tmp/bq-sink-${DB}.put.json"; echo ' }'; } > "/tmp/bq-sink-${DB}.post.json"
