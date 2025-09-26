@@ -315,8 +315,8 @@ spec:
             \gexec
             SQL
 
-                        # 4) In target DB, ensure Debezium signal table and publication (idempotent)
-                        /home/yugabyte/bin/ysqlsh -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$DBNAME" -v ON_ERROR_STOP=1 <<'SQL'
+            # 4) In target DB, ensure Debezium signal table and publication (idempotent)
+            /home/yugabyte/bin/ysqlsh -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$DBNAME" -v ON_ERROR_STOP=1 <<'SQL'
             CREATE TABLE IF NOT EXISTS public.debezium_signal (
               id   varchar(64) PRIMARY KEY,
               type varchar(32) NOT NULL,
@@ -417,7 +417,6 @@ spec:
             done
 
             SQL="
-            \\set VERBOSITY verbose
             WITH t AS (
               SELECT n.nspname AS schema, c.relname AS table, d.description
                 FROM pg_class c
@@ -447,7 +446,7 @@ spec:
             "
 
             echo "[PLANNER] Running plan SQL…"
-            /home/yugabyte/bin/ysqlsh "${PGURL}" -a -e -A -t -F '|' -c "$SQL" > /work/plan.tsv
+            /home/yugabyte/bin/ysqlsh "${PGURL}" -q -A -t -F '|' -c "$SQL" > /work/plan.tsv
 
             echo "[PLANNER] Plan rows: $(grep -c '|' /work/plan.tsv || true)"
             echo "--- plan.tsv ---"; cat /work/plan.tsv || true
@@ -481,8 +480,7 @@ spec:
 
             get_columns() {
               local sch="$1" tbl="$2"
-              /home/yugabyte/bin/ysqlsh "${PGURL}" -A -t -c "
-                \\set VERBOSITY verbose
+              /home/yugabyte/bin/ysqlsh "${PGURL}" -q -A -t -c "
                 SELECT string_agg(quote_ident(column_name), ',')
                 FROM information_schema.columns
                 WHERE table_schema='${sch}' AND table_name='${tbl}'
@@ -500,10 +498,11 @@ spec:
               done
               if [ -z "${COLS}" ] || [ "${COLS}" = "null" ]; then COLS="$(get_columns "${SCH}" "${TBL}")"; fi
               echo "[IMPORTER] Loading ${SCH}.${TBL} with columns: ${COLS}"
+
+              # Server-side COPY; no psql meta-commands
               cat ${INDIR}/*.csv \
-                | /home/yugabyte/bin/ysqlsh "${PGURL}" -v ON_ERROR_STOP=1 -a -e \
-                    -c "\\set VERBOSITY verbose" \
-                    -c "\copy ${SCH}.${TBL} (${COLS}) from stdin with (format csv, header ${HDR});"
+                | /home/yugabyte/bin/ysqlsh "${PGURL}" -v ON_ERROR_STOP=1 -q \
+                    -c "COPY ${SCH}.${TBL} (${COLS}) FROM STDIN WITH (FORMAT csv, HEADER ${HDR});"
             done < /work/plan.tsv
 
             touch /work/DONE
@@ -984,8 +983,7 @@ spec:
             get_plan_for_db() {
               local DB="$1"
               local URL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${DB}?sslmode=disable"
-              /home/yugabyte/bin/ysqlsh "$URL" -a -e -A -t -F '|' -c "
-                \\set VERBOSITY verbose
+              /home/yugabyte/bin/ysqlsh "$URL" -q -A -t -F '|' -c "
                 WITH t AS (
                   SELECT n.nspname AS schema, c.relname AS table, d.description
                     FROM pg_class c
