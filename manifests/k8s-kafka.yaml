@@ -240,7 +240,7 @@ spec:
         volumeMounts: [{ name: root-token, mountPath: /vault-token, readOnly: true }]
 
 # ============================================================================
-# DB init job (wave 2) — uses vaultadmin superuser to create DB & publication
+# DB init job (wave 2)
 # ============================================================================
 ---
 apiVersion: batch/v1
@@ -285,7 +285,6 @@ spec:
             PS4='+ [DBINIT] $(date -Is) '
             set -x
 
-            # 1) Load Vault-injected env
             for f in /vault/secrets/pg.env /vault/secrets/pg-admin.env; do
               i=0; while [ ! -s "$f" ]; do
                 i=$((i+1)); [ $i -gt 120 ] && echo "[DBINIT] missing $f" >&2 && exit 1; sleep 2
@@ -298,7 +297,6 @@ spec:
             : "${PGUSER:=vaultadmin}"
             export PGPASSWORD
 
-            # 2) Pick a control DB (connects as superuser vaultadmin)
             CONTROL_DB=""
             for DB in yugabyte postgres; do
               /home/yugabyte/bin/ysqlsh -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$DB" -Atc "select 1" >/dev/null 2>&1 \
@@ -308,28 +306,25 @@ spec:
 
             DBNAME="$PGDATABASE"
 
-            # 3) Create target DB if missing (idempotent via \gexec)
             /home/yugabyte/bin/ysqlsh -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$CONTROL_DB" -v ON_ERROR_STOP=1 -v dbname="$DBNAME" <<'SQL'
             SELECT format('CREATE DATABASE %I OWNER vaultadmin', :'dbname')
             WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = :'dbname');
             \gexec
             SQL
 
-            # 4) In target DB, ensure Debezium signal table and publication (idempotent)
             /home/yugabyte/bin/ysqlsh -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$DBNAME" -v ON_ERROR_STOP=1 <<'SQL'
             CREATE TABLE IF NOT EXISTS public.debezium_signal (
               id   varchar(64) PRIMARY KEY,
               type varchar(32) NOT NULL,
               data varchar(2048)
             );
-
             SELECT 'CREATE PUBLICATION dbz_publication FOR ALL TABLES'
             WHERE NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'dbz_publication');
             \gexec
             SQL
 
 # ============================================================================
-# One-shot Backfill Job (wave 3) — namespace: kafka
+# One-shot Backfill Job (wave 3)
 # ============================================================================
 ---
 apiVersion: batch/v1
@@ -394,7 +389,6 @@ spec:
             set -x
             trap 'echo "[PLANNER] FAIL: env:"; env | sort; echo "--- plan.tsv ---"; cat /work/plan.tsv 2>/dev/null || true; exit 1' ERR
 
-            # wait up to 120s for Vault files; else assume NO_TABLES and exit 0
             for f in /vault/secrets/pg.env /vault/secrets/pg-admin.env; do
               i=0; while [ ! -s "$f" ]; do
                 i=$((i+1)); [ $i -gt 60 ] && echo "NO_TABLES" > /work/NO_TABLES && exit 0
@@ -445,7 +439,6 @@ spec:
              WHERE COALESCE( (b->>'enabled')::boolean, false ) = true;
             "
 
-            echo "[PLANNER] Running plan SQL…"
             /home/yugabyte/bin/ysqlsh "${PGURL}" -q -A -t -F '|' -c "$SQL" > /work/plan.tsv
 
             echo "[PLANNER] Plan rows: $(grep -c '|' /work/plan.tsv || true)"
@@ -463,7 +456,6 @@ spec:
             set -x
             trap 'echo "[IMPORTER] FAIL; listing /work"; ls -R /work || true; exit 1' ERR
 
-            # Exit early if the planner already decided there's nothing to do
             if [ -f /work/NO_TABLES ]; then
               echo "[IMPORTER] NO_TABLES flag set; exiting."
               touch /work/DONE
@@ -479,7 +471,6 @@ spec:
             : "${PGUSER:=vaultadmin}"
             PGURL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}?sslmode=disable"
 
-            # Wait for the plan, but also detect NO_TABLES if it appears later
             i=0
             while [ ! -s /work/plan.tsv ]; do
               if [ -f /work/NO_TABLES ]; then
@@ -513,7 +504,6 @@ spec:
               if [ -z "${COLS}" ] || [ "${COLS}" = "null" ]; then COLS="$(get_columns "${SCH}" "${TBL}")"; fi
               echo "[IMPORTER] Loading ${SCH}.${TBL} with columns: ${COLS}"
 
-              # Server-side COPY; no psql meta-commands
               cat ${INDIR}/*.csv \
                 | /home/yugabyte/bin/ysqlsh "${PGURL}" -v ON_ERROR_STOP=1 -q \
                     -c "COPY ${SCH}.${TBL} (${COLS}) FROM STDIN WITH (FORMAT csv, HEADER ${HDR});"
@@ -550,7 +540,6 @@ spec:
             : "${LOCATION:=}"
             if [ -n "${LOCATION}" ]; then BQ_LOC_FLAG=(--location="${LOCATION}"); else BQ_LOC_FLAG=(); fi
 
-            # Wait for the plan, but also detect NO_TABLES if it appears later
             i=0
             while [ ! -s /work/plan.tsv ]; do
               if [ -f /work/NO_TABLES ]; then
@@ -700,7 +689,7 @@ spec:
         volumeMounts: [{ name: kafka-logs, mountPath: /tmp/kraft-combined-logs }]
 
 # ============================================================================
-# Kafka Connect (wave 4) — with broker-probe sidecar (not an initContainer)
+# Kafka Connect (wave 4) — with Vault-injected GCP keyfile (no broker-probe)
 # ============================================================================
 ---
 apiVersion: v1
@@ -726,8 +715,20 @@ spec:
   template:
     metadata:
       labels: { app: kafka-connect }
-      annotations: { linkerd.io/inject: "disabled" }
+      annotations:
+        linkerd.io/inject: "disabled"
+        # Inject GCP key for BigQuery sink into THIS pod
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: "data-bootstrap"
+        vault.hashicorp.com/agent-pre-populate-only: "true"
+        vault.hashicorp.com/exit-on-error: "false"
+        vault.hashicorp.com/agent-inject-secret-gcp-key.json: "secret/data/kafka/bq/config"
+        vault.hashicorp.com/agent-inject-template-gcp-key.json: |
+          {{- with secret "secret/data/kafka/bq/config" -}}
+          {{ .Data.data.sa_json }}
+          {{- end -}}
     spec:
+      serviceAccountName: bq-yb-bootstrap
       volumes:
       - { name: plugins, emptyDir: {} }
       initContainers:
@@ -778,7 +779,6 @@ spec:
               name: kafka-cluster-id
               key: CLUSTER_ID
 
-        # Debezium/KC config
         - { name: BOOTSTRAP_SERVERS, value: "kafka.kafka.svc.cluster.local:9092" }
         - { name: GROUP_ID, value: "connect-cluster" }
         - { name: CONFIG_STORAGE_TOPIC, value: "_connect-configs" }
@@ -796,14 +796,13 @@ spec:
         - { name: KEY_CONVERTER_SCHEMAS_ENABLE, value: "true" }
         - { name: VALUE_CONVERTER_SCHEMAS_ENABLE, value: "true" }
 
-        # Narrow plugin path for faster, safer classpath
         - { name: CONNECT_PLUGIN_PATH, value: "/plugins/wepay-kafka-connect-bigquery,/plugins/yugabytedb" }
 
-        # More verbose logging in the worker + connectors
         - { name: CONNECT_LOG4J_ROOT_LOGLEVEL, value: "DEBUG" }
         - { name: CONNECT_LOG4J_LOGGERS, value: "org.apache.kafka.connect.runtime.rest=WARN,io.debezium=DEBUG,io.debezium.connector.yugabytedb=DEBUG,com.wepay.kafka.connect.bigquery=DEBUG" }
 
         - { name: KAFKA_HEAP_OPTS, value: "-Xms256m -Xmx512m" }
+        - { name: GOOGLE_APPLICATION_CREDENTIALS, value: "/vault/secrets/gcp-key.json" }
         ports:
         - { containerPort: 8083 }
         readinessProbe:
@@ -814,20 +813,6 @@ spec:
           requests: { cpu: "250m", memory: "512Mi" }
           limits: { cpu: "1000m", memory: "1Gi" }
         volumeMounts: [{ name: plugins, mountPath: /plugins }]
-
-      - name: broker-probe
-        image: apache/kafka:3.9.0
-        command: ["/bin/bash","-lc"]
-        args:
-          - |
-            set -Eeuo pipefail
-            PS4='+ [PROBE] $(date -Is) '
-            set -x
-            while true; do
-              /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka.kafka.svc.cluster.local:9092 >/dev/null 2>&1 \
-                && echo "broker OK" || echo "broker UNREACHABLE"
-              sleep 10
-            done
 
 # ============================================================================
 # Kafka UI + oauth2-proxy (waves 45-47)
@@ -930,7 +915,7 @@ spec:
           valueFrom: { secretKeyRef: { name: oauth2-proxy-secrets, key: cookie_secret } }
 
 # ============================================================================
-# Continuous Annotation Watcher (wave 50) — safer auth, timeouts, validation
+# Continuous Annotation Watcher (wave 50)
 # ============================================================================
 ---
 apiVersion: apps/v1
@@ -1003,7 +988,6 @@ spec:
             set -x
             trap 'echo "[WATCHER] FAIL; dumping /state and last REST response"; ls -l /state || true; tail -c 5000 /tmp/resp.txt 2>/dev/null || true; exit 1' ERR
 
-            # Require all secrets/files we need
             for f in /vault/secrets/yb.env /vault/secrets/pgpass.env /vault/secrets/bq.env /vault/secrets/gcp-key.json; do
               i=0; while [ ! -s "$f" ]; do i=$((i+1)); [ $i -gt 120 ] && echo "vault secrets missing: $f" >&2 && exit 1; sleep 2; done
               . "$f" 2>/dev/null || true
@@ -1014,7 +998,6 @@ spec:
             PGUSER="${PGUSER:-vaultadmin}"
             echo "[WATCHER] PGHOST=$PGHOST PGPORT=$PGPORT PGUSER=$PGUSER PGDATABASE=${PGDATABASE:-<ignored>}"
 
-            # curl options with timeouts
             CURL_OPTS=(--connect-timeout 5 --max-time 25 -sS)
 
             esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
@@ -1142,7 +1125,6 @@ spec:
 
                   ensure_signal_table "$DB"
 
-                  # ---- Build source connector payloads: PUT=config-only, POST=name+config ----
                   {
                     echo '{'
                     echo '  "connector.class":"io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",'
@@ -1176,7 +1158,6 @@ spec:
                   api_post "${CONNECT_URL}/connectors"                       "/tmp/yb-source-${DB}.post.json"
                   api_get  "${CONNECT_URL}/connectors/yb-source-${DB}/status" || true
 
-                  # ---- Build BigQuery sink payloads: FILE key (no secrets in logs) ----
                   {
                     echo '{'
                     echo '  "connector.class":"com.wepay.kafka.connect.bigquery.BigQuerySinkConnector",'
