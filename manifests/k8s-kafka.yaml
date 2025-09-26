@@ -45,36 +45,6 @@ roleRef:
   name: bootstrap-ok-writer
 
 # ============================================================================
-# (NEW) Minimal RBAC in yugabyte ns so watcher can read master Endpoints
-# ============================================================================
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: yb-endpoints-reader
-  namespace: yugabyte
-  annotations: { argocd.argoproj.io/sync-wave: "0" }
-rules:
-- apiGroups: [""]
-  resources: ["endpoints"]
-  verbs: ["get","list","watch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: yb-endpoints-reader
-  namespace: yugabyte
-  annotations: { argocd.argoproj.io/sync-wave: "0" }
-subjects:
-- kind: ServiceAccount
-  name: bq-yb-bootstrap
-  namespace: kafka
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: yb-endpoints-reader
-
-# ============================================================================
 # Kafka cluster.id generator — namespace: kafka
 # ============================================================================
 ---
@@ -205,7 +175,7 @@ spec:
         - { name: PG_HOST, value: "yb-tserver-service.yugabyte.svc.cluster.local" }
         - { name: PG_PORT, value: "5433" }
         - { name: PG_DATABASE, value: "kafka" }
-        - { name: YB_MASTER_ADDRESSES, value: "yb-master-service.yugabyte.svc.cluster.local:7100" }  # unchanged; watcher will override dynamically
+        - { name: YB_MASTER_ADDRESSES, value: "yb-master-service.yugabyte.svc.cluster.local:7100" }
         - { name: BQ_BOOTSTRAP_LOCATION, value: "US" }
         - { name: BQ_BOOTSTRAP_PROJECT, value: "k8s-kafka-774d" }
         - { name: BQ_PROJECT, value: "k8s-kafka-774d" }
@@ -570,7 +540,7 @@ spec:
             : "${PROJECT:?missing PROJECT}"
             : "${BUCKET:?missing BUCKET}"
             : "${LOCATION:=}"
-            if [ -n "${LOCATION}"]; then BQ_LOC_FLAG=(--location="${LOCATION}"); else BQ_LOC_FLAG=(); fi
+            if [ -n "${LOCATION}" ]; then BQ_LOC_FLAG=(--location="${LOCATION}"); else BQ_LOC_FLAG=(); fi
 
             i=0
             while [ ! -s /work/plan.tsv ]; do
@@ -713,10 +683,8 @@ spec:
         - { name: KAFKA_PROCESS_ROLES, value: "broker,controller" }
         - { name: KAFKA_CONTROLLER_LISTENER_NAMES, value: "CONTROLLER" }
         - { name: KAFKA_LISTENERS, value: "PLAINTEXT://:9092,CONTROLLER://:9093" }
-        # CHANGED: use svc.internal.lan to match cluster DNS
         - { name: KAFKA_ADVERTISED_LISTENERS, value: "PLAINTEXT://kafka.kafka.svc.internal.lan:9092" }
         - { name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP, value: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT" }
-        # CHANGED: use svc.internal.lan so controller registration resolves
         - { name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "1@kafka-0.kafka-hs.kafka.svc.internal.lan:9093" }
         - { name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "1" }
         - { name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "1" }
@@ -761,8 +729,6 @@ data:
     log4j.appender.stdout=org.apache.log4j.ConsoleAppender
     log4j.appender.stdout.layout=org.apache.log4j.PatternLayout
     log4j.appender.stdout.layout.ConversionPattern=[%d{ISO8601}] %-5p %c - %m%n
-
-    # Turn down the REST noise, turn up Debezium + YB connector for diagnostics
     log4j.logger.org.apache.kafka.connect.runtime.rest=WARN
     log4j.logger.org.apache.kafka.connect.runtime=INFO
     log4j.logger.io.debezium=DEBUG
@@ -806,6 +772,7 @@ spec:
           items:
             - key: log4j.properties
               path: log4j.properties
+      - { name: kafka-config, emptyDir: {} }   # <— makes /kafka/config writable to silence cp warnings
       initContainers:
       - name: install-bq
         image: confluentinc/cp-kafka-connect:7.6.1
@@ -816,8 +783,7 @@ spec:
             PS4='+ [INSTALL-BQ] $(date -Is) '
             set -x
             mkdir -p /plugins
-            confluent-hub install --no-prompt --component-dir /plugins \
-              wepay/kafka-connect-bigquery:2.5.7
+            confluent-hub install --no-prompt --component-dir /plugins wepay/kafka-connect-bigquery:2.5.7
         volumeMounts: [{ name: plugins, mountPath: /plugins }]
 
       - name: fetch-yb-debezium
@@ -851,15 +817,19 @@ spec:
             secretKeyRef:
               name: kafka-cluster-id
               key: CLUSTER_ID
-        - name: CONNECT_REST_HOST_NAME
-          value: "0.0.0.0"
-        - name: CONNECT_REST_ADVERTISED_HOST_NAME
-          value: "kafka-connect.kafka.svc.internal.lan"
-        - name: CONNECT_REST_ADVERTISED_PORT
-          value: "8083"
-        - name: KAFKA_LOG4J_OPTS
-          value: "-Dlog4j.configuration=file:/kafka/etc/log4j.properties"
-        # CHANGED: remove CONNECT_LOG4J_* envs to avoid log4j config errors
+
+        # REST/advertised host
+        - { name: CONNECT_REST_HOST_NAME, value: "0.0.0.0" }
+        - { name: CONNECT_REST_ADVERTISED_PORT, value: "8083" }
+        - { name: CONNECT_REST_ADVERTISED_HOST_NAME, value: "kafka-connect.kafka.svc.internal.lan" }
+        - { name: ADVERTISED_HOST_NAME, value: "kafka-connect.kafka.svc.internal.lan" }  # Debezium's script also reads this
+        - { name: REST_HOST_NAME, value: "0.0.0.0" }
+        - { name: REST_PORT, value: "8083" }
+
+        # Logging
+        - { name: KAFKA_LOG4J_OPTS, value: "-Dlog4j.configuration=file:/kafka/etc/log4j.properties" }
+
+        # Kafka
         - { name: BOOTSTRAP_SERVERS, value: "kafka.kafka.svc.internal.lan:9092" }
         - { name: GROUP_ID, value: "connect-cluster" }
         - { name: CONFIG_STORAGE_TOPIC, value: "_connect-configs" }
@@ -869,18 +839,19 @@ spec:
         - { name: OFFSET_STORAGE_REPLICATION_FACTOR,  value: "1" }
         - { name: STATUS_STORAGE_REPLICATION_FACTOR,  value: "1" }
 
-        - { name: REST_ADVERTISED_HOST_NAME, value: "kafka-connect.kafka.svc.internal.lan" }
-        - { name: REST_PORT, value: "8083" }
-
+        # Converters
         - { name: KEY_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
         - { name: VALUE_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
         - { name: KEY_CONVERTER_SCHEMAS_ENABLE, value: "true" }
         - { name: VALUE_CONVERTER_SCHEMAS_ENABLE, value: "true" }
 
+        # Plugins
         - { name: CONNECT_PLUGIN_PATH, value: "/plugins,/plugins/share/java,/plugins/share/confluent-hub-components,/plugins/yugabytedb" }
 
+        # Resources & GCP
         - { name: KAFKA_HEAP_OPTS, value: "-Xms256m -Xmx512m" }
         - { name: GOOGLE_APPLICATION_CREDENTIALS, value: "/vault/secrets/gcp-key.json" }
+
         ports:
         - { containerPort: 8083 }
         readinessProbe:
@@ -897,8 +868,9 @@ spec:
           requests: { cpu: "250m", memory: "768Mi" }
           limits: { cpu: "1000m", memory: "1.5Gi" }
         volumeMounts:
-          - { name: plugins, mountPath: /plugins }
-          - { name: log4j,  mountPath: /kafka/etc }
+          - { name: plugins,      mountPath: /plugins }
+          - { name: log4j,       mountPath: /kafka/etc }
+          - { name: kafka-config, mountPath: /kafka/config }  # writable
 
 # ============================================================================
 # Kafka UI + oauth2-proxy (waves 45-47)
@@ -1014,7 +986,37 @@ spec:
           limits: { cpu: "300m", memory: "256Mi" }
 
 # ============================================================================
-# Continuous Annotation Watcher (wave 50)
+# RBAC to read YB master Endpoints (namespace: yugabyte)
+# ============================================================================
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: yb-endpoints-reader
+  namespace: yugabyte
+  annotations: { argocd.argoproj.io/sync-wave: "49" }
+rules:
+- apiGroups: [""]
+  resources: ["endpoints","endpointslices"]
+  verbs: ["get","list","watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: yb-endpoints-reader
+  namespace: yugabyte
+  annotations: { argocd.argoproj.io/sync-wave: "49" }
+subjects:
+- kind: ServiceAccount
+  name: bq-yb-bootstrap
+  namespace: kafka
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: yb-endpoints-reader
+
+# ============================================================================
+# Continuous Annotation Watcher (wave 50) — now resolves YB master Endpoints
 # ============================================================================
 ---
 apiVersion: apps/v1
@@ -1080,10 +1082,7 @@ spec:
         - { name: CONNECT_URL, value: "http://kafka-connect.kafka.svc.internal.lan:8083" }
         - { name: SERVER_PREFIX, value: "yb" }
         - { name: SCAN_INTERVAL, value: "30" }
-        # NEW: tell watcher which Service to read for master endpoints
-        - { name: YB_MASTER_SVC_NS, value: "yugabyte" }
-        - { name: YB_MASTER_SVC_NAME, value: "yb-master-service" }
-        - { name: YB_MASTER_PORT, value: "7100" }
+        - { name: YB_MASTER_RPC_PORT, value: "7100" }
         command: ["/bin/bash","-lc"]
         args:
           - |
@@ -1100,33 +1099,7 @@ spec:
             PGHOST="${PGHOST:-yb-tserver-service.yugabyte.svc.cluster.local}"
             PGPORT="${PGPORT:-5433}"
             PGUSER="${PGUSER:-vaultadmin}"
-
-            K8S_API="https://kubernetes.default.svc"
-            K8S_TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
-            K8S_CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-            YB_MASTER_SVC_NS="${YB_MASTER_SVC_NS:-yugabyte}"
-            YB_MASTER_SVC_NAME="${YB_MASTER_SVC_NAME:-yb-master-service}"
-            YB_MASTER_PORT="${YB_MASTER_PORT:-7100}"
-
-            resolve_yb_masters() {
-              local url="${K8S_API}/api/v1/namespaces/${YB_MASTER_SVC_NS}/endpoints/${YB_MASTER_SVC_NAME}"
-              # Pull the endpoint IPs and format as ip:port list
-              curl -fsS --cacert "$K8S_CACERT" -H "Authorization: Bearer $K8S_TOKEN" "$url" \
-                | tr '\n' ' ' \
-                | sed -n 's/.*"addresses":[[]\([^]]]*\)].*/\1/p' \
-                | grep -oE '"ip"[[:space:]]*:[[:space:]]*"[^"]+"' \
-                | awk -v P="$YB_MASTER_PORT" -F'"' '{print $4 ":" P}' \
-                | paste -sd',' -
-            }
-
-            # Dynamically discover masters; fall back to whatever came from Vault if discovery returns nothing
-            DISCOVERED="$(resolve_yb_masters || true)"
-            if [ -n "$DISCOVERED" ]; then
-              YB_MASTER_ADDRESSES="$DISCOVERED"
-            fi
-
             echo "[WATCHER] PGHOST=$PGHOST PGPORT=$PGPORT PGUSER=$PGUSER PGDATABASE=${PGDATABASE:-<ignored>}"
-            echo "[WATCHER] YB_MASTER_ADDRESSES=${YB_MASTER_ADDRESSES:-<unset>} (svc ${YB_MASTER_SVC_NS}/${YB_MASTER_SVC_NAME})"
 
             CURL_OPTS=(--connect-timeout 5 --max-time 120 -sS)
             RETRIES=3
@@ -1138,21 +1111,35 @@ spec:
             api_post()  { local u="$1" f="$2" i; for i in $(seq 1 $RETRIES); do code=$(curl "${CURL_OPTS[@]}" -D /tmp/h.txt -o /tmp/resp.txt -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @"$f" -X POST "$u" || true); [ "$code" != "000" ] && break; sleep "$SLEEP_BETWEEN"; done; echo "POST $u -> $code"; tail -c 2000 /tmp/resp.txt; }
             api_delete(){ local u="$1"; code=$(curl "${CURL_OPTS[@]}" -D /tmp/h.txt -o /tmp/resp.txt -w '%{http_code}' -X DELETE "$u" || true); echo "DELETE $u -> $code"; tail -c 2000 /tmp/resp.txt; }
 
-            validate_config() {
-              local plugin="$1" file="$2"
-              local url="${CONNECT_URL}/connector-plugins/${plugin}/config/validate"
-              local code i
-              for i in $(seq 1 $RETRIES); do
-                code=$(curl "${CURL_OPTS[@]}" -D /tmp/h.txt -o /tmp/validate.txt -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @"$file" -X PUT "$url" || true)
-                [ "$code" != "000" ] && break
-                sleep "$SLEEP_BETWEEN"
-              done
-              echo "VALIDATE ${plugin} -> $code"
-              tail -c 2000 /tmp/validate.txt 2>/dev/null || true
+            # --- NEW: resolve master addresses from a Service Endpoints list
+            get_master_addrs_from_service() {
+              local fqdn="$1" ns svc port iplist token cacert api
+              port="${YB_MASTER_RPC_PORT:-7100}"
+              # Extract <svc>.<ns>.svc....
+              svc="$(printf '%s' "$fqdn" | awk -F. '{print $(NF-5)}')"
+              ns="$(printf '%s' "$fqdn" | awk -F. '{print $(NF-4)}')"
+              [ -z "$svc" ] && svc="$fqdn"
+              [ -z "$ns" ] && ns="yugabyte"
+              token="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+              cacert="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+              api="https://kubernetes.default.svc/api/v1/namespaces/${ns}/endpoints/${svc}"
+              curl -fsS --cacert "$cacert" -H "Authorization: Bearer $token" "$api" -o /tmp/ep.json || { echo "No endpoints for ${fqdn}"; return 1; }
+              iplist="$(grep -oE '"ip"[[:space:]]*:[[:space:]]*"[^"]+"' /tmp/ep.json | awk -F'"' '{print $4}' | awk -v p="$port" '{printf "%s:%s,", $0, p}' | sed 's/,$//')"
+              printf '%s' "$iplist"
             }
 
-            until curl -fsS "${CONNECT_URL}/connectors" >/dev/null 2>&1; do echo "[WATCHER] waiting for connect REST…"; sleep 3; done
-            echo "== Connector plugins =="; curl -fsS "${CONNECT_URL}/connector-plugins" | sed 's/.*/  &/'; echo "======================="
+            build_master_addrs() {
+              local src="${YB_MASTER_ADDRESSES:-}"
+              if [ -z "$src" ]; then
+                echo ""
+              elif printf '%s' "$src" | grep -q ','; then
+                printf '%s' "$src"
+              elif printf '%s' "$src" | grep -q '\.svc\.'; then
+                get_master_addrs_from_service "$src" || printf '%s' "$src"
+              else
+                printf '%s' "$src"
+              fi
+            }
 
             list_dbs() {
               for DB in yugabyte postgres "${PGDATABASE:-}"; do
@@ -1220,12 +1207,8 @@ spec:
             SCAN_INTERVAL="${SCAN_INTERVAL:-30}"
 
             while :; do
-              # Re-resolve masters periodically (handles reschedules/leader changes)
-              DISCOVERED="$(resolve_yb_masters || true)"
-              if [ -n "$DISCOVERED" ] && [ "$DISCOVERED" != "${YB_MASTER_ADDRESSES:-}" ]; then
-                echo "[WATCHER] Updated YB masters: ${DISCOVERED}"
-                YB_MASTER_ADDRESSES="$DISCOVERED"
-              fi
+              MASTER_ADDRS="$(build_master_addrs)"
+              echo "[WATCHER] master.addresses='${MASTER_ADDRS}' (source='${YB_MASTER_ADDRESSES:-<unset>}')"
 
               mapfile -t DBS < <(list_dbs)
               echo "[WATCHER] DBs: ${DBS[*]}"
@@ -1235,12 +1218,10 @@ spec:
                 PLAN="$(get_plan_for_db "$DB")"
                 echo "[WATCHER] ${DB} plan lines: $(printf '%s\n' "$PLAN" | grep -c '|' || true)"
 
-                SIG="$(
-                  { printf '%s\n' "$PLAN"; echo "$YB_MASTER_ADDRESSES"; echo "$PGHOST"; echo "$PGPORT"; echo "$SERVER_PREFIX"; } \
-                  | sha256sum | awk '{print $1}'
-                )"
-
+                # Include master addresses in the signature so connector configs roll when endpoints change
+                SIG="$(printf "%s\n%s\n" "$PLAN" "$MASTER_ADDRS" | sha256sum | awk '{print $1}')"
                 LAST="/state/${DB}.plan.sig"
+
                 if [ ! -f "$LAST" ] || [ "$SIG" != "$(cat "$LAST" 2>/dev/null || echo)" ]; then
                   printf '%s' "$SIG" > "$LAST"
                   printf '%s\n' "$PLAN" > "/state/${DB}.plan.tsv"
@@ -1279,8 +1260,8 @@ spec:
                     echo '  "tasks.max":"1",'
                     echo "  \"database.hostname\":\"$(esc "$PGHOST")\","
                     echo "  \"database.port\":\"$(esc "$PGPORT")\","
-                    if [ -n "${YB_MASTER_ADDRESSES:-}" ]; then
-                      echo "  \"database.master.addresses\":\"$(esc "$YB_MASTER_ADDRESSES")\","
+                    if [ -n "$MASTER_ADDRS" ]; then
+                      echo "  \"database.master.addresses\":\"$(esc "$MASTER_ADDRS")\","
                     fi
                     echo "  \"database.user\":\"$(esc "$PGUSER")\","
                     echo "  \"database.password\":\"$(esc "$PGPASSWORD")\","
@@ -1300,7 +1281,11 @@ spec:
                   { echo '{ "name":"yb-source-'"${DB}"'", "config": '; cat "/tmp/yb-source-${DB}.put.json"; echo ' }'; } > "/tmp/yb-source-${DB}.post.json"
 
                   echo "--- validating source config (yb-source-${DB}) ---"
-                  validate_config "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector" "/tmp/yb-source-${DB}.put.json" || true
+                  # Best-effort validation; not fatal
+                  curl -fsS -H 'Content-Type: application/json' --data-binary @"/tmp/yb-source-${DB}.put.json" \
+                    -X PUT "${CONNECT_URL}/connector-plugins/io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector/config/validate" \
+                    -o /tmp/validate.txt || true
+                  tail -c 2000 /tmp/validate.txt 2>/dev/null || true
 
                   api_put  "${CONNECT_URL}/connectors/yb-source-${DB}/config" "/tmp/yb-source-${DB}.put.json" || \
                   api_post "${CONNECT_URL}/connectors"                       "/tmp/yb-source-${DB}.post.json"
@@ -1325,7 +1310,10 @@ spec:
                   { echo '{ "name":"bq-sink-'"${DB}"'", "config": '; cat "/tmp/bq-sink-${DB}.put.json"; echo ' }'; } > "/tmp/bq-sink-${DB}.post.json"
 
                   echo "--- validating sink config (bq-sink-${DB}) ---"
-                  validate_config "com.wepay.kafka.connect.bigquery.BigQuerySinkConnector" "/tmp/bq-sink-${DB}.put.json" || true
+                  curl -fsS -H 'Content-Type: application/json' --data-binary @"/tmp/bq-sink-${DB}.put.json" \
+                    -X PUT "${CONNECT_URL}/connector-plugins/com.wepay.kafka.connect.bigquery.BigQuerySinkConnector/config/validate" \
+                    -o /tmp/validate.txt || true
+                  tail -c 2000 /tmp/validate.txt 2>/dev/null || true
 
                   api_put  "${CONNECT_URL}/connectors/bq-sink-${DB}/config" "/tmp/bq-sink-${DB}.put.json" || \
                   api_post "${CONNECT_URL}/connectors"                      "/tmp/bq-sink-${DB}.post.json"
