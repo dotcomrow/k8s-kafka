@@ -93,7 +93,6 @@ spec:
     metadata:
       annotations: { linkerd.io/inject: "disabled" }
     spec:
-      
       restartPolicy: Never
       serviceAccountName: kafka-clusterid-gen
       volumes: [{ name: work, emptyDir: {} }]
@@ -161,7 +160,6 @@ spec:
   template:
     metadata: { annotations: { linkerd.io/inject: "disabled" } }
     spec:
-      
       restartPolicy: Never
       serviceAccountName: default
       volumes: [{ name: root-token, secret: { secretName: vault-root-token } }]
@@ -277,7 +275,6 @@ spec:
           PGPASSWORD={{ .Data.data.value }}
           {{- end -}}
     spec:
-      
       restartPolicy: Never
       serviceAccountName: bq-yb-bootstrap
       containers:
@@ -378,7 +375,6 @@ spec:
           PGPASSWORD={{ .Data.data.value }}
           {{- end -}}
     spec:
-      
       serviceAccountName: bq-yb-bootstrap
       restartPolicy: Never
       terminationGracePeriodSeconds: 30
@@ -393,7 +389,7 @@ spec:
             set -Eeuo pipefail
             PS4='+ [PLANNER] $(date -Is) '
             set -x
-            trap 'echo "[PLANNER] FAIL: env:"; env | sort; echo "--- plan.tsv ---"; cat /work/plan.tsv 2>/dev/null || true; exit 1' ERR
+            trap 'echo "[PLANNER] FAIL: env:"; env | sort; echo "--- plan.tsv ---"; cat /work/plan.tsv 2>/div/null || true; exit 1' ERR
 
             for f in /vault/secrets/pg.env /vault/secrets/pg-admin.env; do
               i=0; while [ ! -s "$f" ]; do
@@ -560,7 +556,7 @@ spec:
               [ -z "${SCH}" ] && continue
               : "${PREFIX:=${TBL}}"; : "${FMT:=CSV}"; : "${HDR:=true}"
 
-              if [ -z "${BQMAP}" ]; then
+              if [ -z "${BQMAP}" ] && [ -n "${PROJECT}" ]; then
                 echo "[CLOUDSDK] Skipping ${SCH}.${TBL}: empty BQ mapping"
                 continue
               fi
@@ -645,7 +641,6 @@ spec:
       labels: { app: kafka }
       annotations: { linkerd.io/inject: "disabled" }
     spec:
-      
       securityContext:
         fsGroup: 1000
       volumes: [{ name: kafka-logs, emptyDir: {} }]
@@ -684,9 +679,11 @@ spec:
         - { name: KAFKA_PROCESS_ROLES, value: "broker,controller" }
         - { name: KAFKA_CONTROLLER_LISTENER_NAMES, value: "CONTROLLER" }
         - { name: KAFKA_LISTENERS, value: "PLAINTEXT://:9092,CONTROLLER://:9093" }
-        - { name: KAFKA_ADVERTISED_LISTENERS, value: "PLAINTEXT://kafka.kafka.svc.cluster.local:9092" }
+        # CHANGED: use svc.internal.lan to match cluster DNS
+        - { name: KAFKA_ADVERTISED_LISTENERS, value: "PLAINTEXT://kafka.kafka.svc.internal.lan:9092" }
         - { name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP, value: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT" }
-        - { name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "1@kafka-0.kafka-hs.kafka.svc.cluster.local:9093" }
+        # CHANGED: use svc.internal.lan so controller registration resolves
+        - { name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "1@kafka-0.kafka-hs.kafka.svc.internal.lan:9093" }
         - { name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "1" }
         - { name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "1" }
         - { name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR, value: "1" }
@@ -744,7 +741,6 @@ spec:
           {{- end -}}
         vault.hashicorp.com/agent-inject-permissions-gcp-key.json: "0644"
     spec:
-      
       serviceAccountName: bq-yb-bootstrap
       terminationGracePeriodSeconds: 30
       securityContext:
@@ -797,7 +793,7 @@ spec:
               name: kafka-cluster-id
               key: CLUSTER_ID
 
-        - { name: BOOTSTRAP_SERVERS, value: "kafka.kafka.svc.cluster.local:9092" }
+        - { name: BOOTSTRAP_SERVERS, value: "kafka.kafka.svc.internal.lan:9092" }   # match DNS suffix
         - { name: GROUP_ID, value: "connect-cluster" }
         - { name: CONFIG_STORAGE_TOPIC, value: "_connect-configs" }
         - { name: OFFSET_STORAGE_TOPIC,  value: "_connect-offsets" }
@@ -806,7 +802,7 @@ spec:
         - { name: OFFSET_STORAGE_REPLICATION_FACTOR,  value: "1" }
         - { name: STATUS_STORAGE_REPLICATION_FACTOR,  value: "1" }
 
-        - { name: REST_ADVERTISED_HOST_NAME, value: "kafka-connect.kafka.svc.cluster.local" }
+        - { name: REST_ADVERTISED_HOST_NAME, value: "kafka-connect.kafka.svc.internal.lan" }
         - { name: REST_PORT, value: "8083" }
 
         - { name: KEY_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
@@ -865,14 +861,13 @@ spec:
       labels: { app: kafka-ui }
       annotations: { linkerd.io/inject: "disabled" }
     spec:
-      
       containers:
       - name: ui
         image: provectuslabs/kafka-ui:v0.7.2
         ports: [{ containerPort: 8080, name: http }]
         env:
         - { name: KAFKA_CLUSTERS_0_NAME, value: "local" }
-        - { name: KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS, value: "kafka.kafka.svc.cluster.local:9092" }
+        - { name: KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS, value: "kafka.kafka.svc.internal.lan:9092" }
         readinessProbe:
           httpGet: { path: /, port: http }
           initialDelaySeconds: 10
@@ -917,7 +912,6 @@ spec:
       labels: { app: oauth2-proxy }
       annotations: { linkerd.io/inject: "disabled" }
     spec:
-      
       containers:
       - name: proxy
         image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
@@ -976,7 +970,6 @@ spec:
         vault.hashicorp.com/agent-pre-populate-only: "true"
         vault.hashicorp.com/exit-on-error: "false"
 
-        # YB/PG connection
         vault.hashicorp.com/agent-inject-secret-yb.env: "secret/data/kafka/pgconfig"
         vault.hashicorp.com/agent-inject-template-yb.env: |
           {{- with secret "secret/data/kafka/pgconfig" -}}
@@ -992,7 +985,6 @@ spec:
           PGPASSWORD={{ .Data.data.value }}
           {{- end -}}
 
-        # BQ config (project/dataset + JSON key file)
         vault.hashicorp.com/agent-inject-secret-bq.env: "secret/data/kafka/bq/config"
         vault.hashicorp.com/agent-inject-template-bq.env: |
           {{- with secret "secret/data/kafka/bq/config" -}}
@@ -1006,7 +998,6 @@ spec:
           {{- end -}}
         vault.hashicorp.com/agent-inject-permissions-gcp-key.json: "0644"
     spec:
-      
       serviceAccountName: bq-yb-bootstrap
       securityContext:
         fsGroup: 1000
@@ -1019,9 +1010,9 @@ spec:
         volumeMounts:
         - { name: state, mountPath: /state }
         env:
-        - { name: CONNECT_URL, value: "http://kafka-connect.kafka.svc.cluster.local:8083" }
+        - { name: CONNECT_URL, value: "http://kafka-connect.kafka.svc.internal.lan:8083" }
         - { name: SERVER_PREFIX, value: "yb" }
-        - { name: SCAN_INTERVAL, value: "30" }   # seconds
+        - { name: SCAN_INTERVAL, value: "30" }
         command: ["/bin/bash","-lc"]
         args:
           - |
@@ -1040,7 +1031,6 @@ spec:
             PGUSER="${PGUSER:-vaultadmin}"
             echo "[WATCHER] PGHOST=$PGHOST PGPORT=$PGPORT PGUSER=$PGUSER PGDATABASE=${PGDATABASE:-<ignored>}"
 
-            # Longer REST timeouts; retries for heavier operations (validation/creates)
             CURL_OPTS=(--connect-timeout 5 --max-time 120 -sS)
             RETRIES=3
             SLEEP_BETWEEN=5
@@ -1226,7 +1216,7 @@ spec:
                   { echo '{ "name":"bq-sink-'"${DB}"'", "config": '; cat "/tmp/bq-sink-${DB}.put.json"; echo ' }'; } > "/tmp/bq-sink-${DB}.post.json"
 
                   echo "--- validating sink config (bq-sink-${DB}) ---"
-                  validate_config "com.wepay.kafka.connect.bigQuery.BigQuerySinkConnector" "/tmp/bq-sink-${DB}.put.json" || true
+                  validate_config "com.wepay.kafka.connect.bigquery.BigQuerySinkConnector" "/tmp/bq-sink-${DB}.put.json" || true
 
                   api_put  "${CONNECT_URL}/connectors/bq-sink-${DB}/config" "/tmp/bq-sink-${DB}.put.json" || \
                   api_post "${CONNECT_URL}/connectors"                      "/tmp/bq-sink-${DB}.post.json"
