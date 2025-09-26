@@ -240,7 +240,101 @@ spec:
         volumeMounts: [{ name: root-token, mountPath: /vault-token, readOnly: true }]
 
 # ============================================================================
-# One-shot Backfill Job (wave 2) — namespace: kafka
+# DB init job (wave 2) — uses vaultadmin superuser to create DB & publication
+# ============================================================================
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: yb-db-init
+  namespace: kafka
+  annotations: { argocd.argoproj.io/sync-wave: "2" }
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      annotations:
+        linkerd.io/inject: "disabled"
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: "data-bootstrap"
+        vault.hashicorp.com/agent-pre-populate-only: "true"
+        vault.hashicorp.com/exit-on-error: "false"
+        vault.hashicorp.com/agent-inject-secret-pg.env: "secret/data/kafka/pgconfig"
+        vault.hashicorp.com/agent-inject-template-pg.env: |
+          {{- with secret "secret/data/kafka/pgconfig" -}}
+          {{ with .Data.data.host }}PGHOST={{ . }}{{ end }}
+          {{ with .Data.data.port }}PGPORT={{ . }}{{ end }}
+          {{ with .Data.data.database }}PGDATABASE={{ . }}{{ end }}
+          {{ with .Data.data.user }}PGUSER={{ . }}{{ end }}
+          {{- end -}}
+        vault.hashicorp.com/agent-inject-secret-pg-admin.env: "secret/data/vaultadmin"
+        vault.hashicorp.com/agent-inject-template-pg-admin.env: |
+          {{- with secret "secret/data/vaultadmin" -}}
+          PGPASSWORD={{ .Data.data.value }}
+          {{- end -}}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: bq-yb-bootstrap
+      containers:
+      - name: initdb
+        image: yugabytedb/yugabyte:latest
+        command: ["/bin/bash","-lc"]
+        args:
+          - |
+            set -Eeuo pipefail
+            PS4='+ [DBINIT] $(date -Is) '
+            set -x
+
+            for f in /vault/secrets/pg.env /vault/secrets/pg-admin.env; do
+              i=0; while [ ! -s "$f" ]; do
+                i=$((i+1)); [ $i -gt 120 ] && echo "[DBINIT] missing $f" >&2 && exit 1; sleep 2
+              done
+              . "$f"
+            done
+
+            : "${PGHOST:=yb-tserver-service.yugabyte.svc.cluster.local}"
+            : "${PGPORT:=5433}"
+            : "${PGDATABASE:=kafka}"
+            : "${PGUSER:=vaultadmin}"
+            export PGPASSWORD
+
+            # Find a control DB we can connect to as vaultadmin
+            CONTROL_DB=""
+            for DB in yugabyte postgres; do
+              /home/yugabyte/bin/ysqlsh -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$DB" -Atc "select 1" >/dev/null 2>&1 && { CONTROL_DB="$DB"; break; }
+            done
+            [ -z "$CONTROL_DB" ] && { echo "[DBINIT] cannot reach control DB as $PGUSER"; exit 1; }
+
+            DBNAME="$PGDATABASE"
+
+            # Create target DB if needed (owned by vaultadmin)
+            /home/yugabyte/bin/ysqlsh -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$CONTROL_DB" -v ON_ERROR_STOP=1 \
+              -v dbname="$DBNAME" -c "
+              DO $$
+              BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = :'dbname') THEN
+                  EXECUTE format('CREATE DATABASE %I OWNER vaultadmin', :'dbname');
+                END IF;
+              END$$;
+              "
+
+            # Create Debezium signal table + publication in target DB
+            /home/yugabyte/bin/ysqlsh -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$DBNAME" -v ON_ERROR_STOP=1 -c "
+              CREATE TABLE IF NOT EXISTS public.debezium_signal (
+                id varchar(64) PRIMARY KEY,
+                type varchar(32) NOT NULL,
+                data varchar(2048)
+              );
+              DO $$
+              BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'dbz_publication') THEN
+                  CREATE PUBLICATION dbz_publication FOR ALL TABLES;
+                END IF;
+              END$$;
+            "
+
+# ============================================================================
+# One-shot Backfill Job (wave 3) — namespace: kafka
 # ============================================================================
 ---
 apiVersion: batch/v1
@@ -249,7 +343,7 @@ metadata:
   name: bq-to-yb-bootstrap
   namespace: kafka
   labels: { app: bq-yb-bootstrap }
-  annotations: { argocd.argoproj.io/sync-wave: "2" }
+  annotations: { argocd.argoproj.io/sync-wave: "3" }
 spec:
   backoffLimit: 0
   activeDeadlineSeconds: 7200
@@ -838,7 +932,7 @@ spec:
           {{ with .Data.data.project }}BQ_PROJECT={{ . }}{{ end }}
           {{ with .Data.data.dataset }}BQ_DEFAULT_DATASET={{ . }}{{ end }}
           {{ with .Data.data.sa_json }}BQ_KEY_JSON={{ . | toJSON }}{{ end }}
-          {{- end }}
+          {{- end -}}
     spec:
       serviceAccountName: bq-yb-bootstrap
       volumes:
@@ -1002,6 +1096,8 @@ spec:
                     echo '  "snapshot.mode":"never",'
                     echo '  "incremental.snapshot.enabled":"true",'
                     echo '  "signal.data.collection":"public.debezium_signal",'
+                    echo '  "publication.name":"dbz_publication",'
+                    echo '  "publication.autocreate.mode":"disabled",'
                     echo '  "transforms":"unwrap",'
                     echo '  "transforms.unwrap.type":"io.debezium.connector.yugabytedb.transforms.YBExtractNewRecordState",'
                     echo '  "topic.creation.default.replication.factor":"1",'
