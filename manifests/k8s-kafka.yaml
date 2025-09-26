@@ -1074,8 +1074,9 @@ spec:
 
                   ensure_signal_table "$DB"
 
+                  # ---- Build source connector payloads: PUT=config-only, POST=name+config ----
                   {
-                    echo '{ "name":"yb-source-'"${DB}"'", "config": {'
+                    echo '{'
                     echo '  "connector.class":"io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",'
                     echo '  "tasks.max":"1",'
                     echo "  \"database.hostname\":\"$(esc "$PGHOST")\","
@@ -1096,14 +1097,16 @@ spec:
                     echo '  "topic.creation.default.replication.factor":"1",'
                     echo '  "topic.creation.default.partitions":"1",'
                     echo '  "topic.creation.default.cleanup.policy":"delete"'
-                    echo '} }'
-                  } > "/tmp/yb-source-${DB}.json"
+                    echo '}'
+                  } > "/tmp/yb-source-${DB}.put.json"
+                  { echo '{ "name":"yb-source-'"${DB}"'", "config": '; cat "/tmp/yb-source-${DB}.put.json"; echo ' }'; } > "/tmp/yb-source-${DB}.post.json"
 
-                  api_put  "${CONNECT_URL}/connectors/yb-source-${DB}/config" "/tmp/yb-source-${DB}.json" || \
-                  api_post "${CONNECT_URL}/connectors"                       "/tmp/yb-source-${DB}.json"
+                  api_put  "${CONNECT_URL}/connectors/yb-source-${DB}/config" "/tmp/yb-source-${DB}.put.json" || \
+                  api_post "${CONNECT_URL}/connectors"                       "/tmp/yb-source-${DB}.post.json"
 
+                  # ---- Build BQ sink payloads: PUT=config-only, POST=name+config ----
                   {
-                    echo '{ "name":"bq-sink-'"${DB}"'", "config": {'
+                    echo '{'
                     echo '  "connector.class":"com.wepay.kafka.connect.bigquery.BigQuerySinkConnector",'
                     echo '  "tasks.max":"1",'
                     echo "  \"topics\":\"$(esc "$TOPICS")\","
@@ -1116,11 +1119,12 @@ spec:
                     echo '  "allowBigQueryRequiredFieldRelaxation":"true",'
                     echo '  "keySource":"JSON",'
                     echo '  "keyfile": '"${BQ_KEY_JSON}"
-                    echo '} }'
-                  } > "/tmp/bq-sink-${DB}.json"
+                    echo '}'
+                  } > "/tmp/bq-sink-${DB}.put.json"
+                  { echo '{ "name":"bq-sink-'"${DB}"'", "config": '; cat "/tmp/bq-sink-${DB}.put.json"; echo ' }'; } > "/tmp/bq-sink-${DB}.post.json"
 
-                  api_put  "${CONNECT_URL}/connectors/bq-sink-${DB}/config" "/tmp/bq-sink-${DB}.json" || \
-                  api_post "${CONNECT_URL}/connectors"                     "/tmp/bq-sink-${DB}.json"
+                  api_put  "${CONNECT_URL}/connectors/bq-sink-${DB}/config" "/tmp/bq-sink-${DB}.put.json" || \
+                  api_post "${CONNECT_URL}/connectors"                      "/tmp/bq-sink-${DB}.post.json"
 
                   CUR_LIST_FILE="/state/${DB}.tables"
                   PREV_LIST="$(cat "$CUR_LIST_FILE" 2>/dev/null || true)"
