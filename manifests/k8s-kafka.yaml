@@ -115,29 +115,34 @@ spec:
         command: ["/bin/sh","-c"]
         args: 
         - |
-          set -eu
-          PS4='+ [APPLY] $(date -Is) '
-          set -x
-          trap 'echo "[APPLY] failed; recent state:"; ls -l /work || true; cat /tmp/ex.json 2>/dev/null || true' ERR
-          NAMESPACE="kafka"; SECRET_NAME="kafka-cluster-id"
-          API="https://kubernetes.default.svc"
-          TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
-          CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-          i=0; while [ ! -s /work/cluster.id ]; do
-            i=$((i+1)); [ $i -gt 120 ] && echo "timeout waiting for /work/cluster.id" && exit 1; sleep 1
-          done
-          CID="$(cat /work/cluster.id)"
-          code="$(curl -s -o /tmp/ex.json -w '%{http_code}' --cacert "$CACERT" \
-                 -H "Authorization: Bearer $TOKEN" \
-                 "$API/api/v1/namespaces/$NAMESPACE/secrets/$SECRET_NAME")"
-          [ "$code" = "200" ] && { echo "Secret exists; nothing to do."; exit 0; }
-          b64="$(printf '%s' "$CID" | base64 | tr -d '\n')"
-          printf '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"%s","namespace":"%s"},"type":"Opaque","data":{"CLUSTER_ID":"%s"}}' \
-            "$SECRET_NAME" "$NAMESPACE" "$b64" > /tmp/newsecret.json
-          curl -sS -D /tmp/h.txt -o /tmp/r.txt -X POST --cacert "$CACERT" -H "Authorization: Bearer $TOKEN" \
-            -H "Content-Type: application/json" --data-binary @/tmp/newsecret.json \
-            "$API/api/v1/namespaces/$NAMESPACE/secrets" && echo "Created secret."
-          echo "=== response headers ==="; cat /tmp/h.txt; echo "=== body ==="; cat /tmp/r.txt
+            set -eu
+            PS4='+ [APPLY] $(date -Is) '
+            set -x
+            trap 'echo "[APPLY] failed; recent state:"; ls -l /work || true; cat /tmp/ex.json 2>/dev/null || true' ERR
+
+            NAMESPACE="kafka"; SECRET_NAME="kafka-cluster-id"
+            API="https://kubernetes.default.svc"
+            TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+            CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+
+            i=0; while [ ! -s /work/cluster.id ]; do
+              i=$((i+1)); [ $i -gt 120 ] && echo "timeout waiting for /work/cluster.id" && exit 1; sleep 1
+            done
+            CID="$(cat /work/cluster.id)"
+
+            code="$(curl -s -o /tmp/ex.json -w '%{http_code}' --cacert "$CACERT" \
+                   -H "Authorization: Bearer $TOKEN" \
+                   "$API/api/v1/namespaces/$NAMESPACE/secrets/$SECRET_NAME")"
+            [ "$code" = "200" ] && { echo "Secret exists; nothing to do."; exit 0; }
+
+            b64="$(printf '%s' "$CID" | base64 | tr -d '\n')"
+            printf '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"%s","namespace":"%s"},"type":"Opaque","data":{"CLUSTER_ID":"%s"}}' \
+              "$SECRET_NAME" "$NAMESPACE" "$b64" > /tmp/newsecret.json
+
+            curl -sS -D /tmp/h.txt -o /tmp/r.txt -X POST --cacert "$CACERT" -H "Authorization: Bearer $TOKEN" \
+              -H "Content-Type: application/json" --data-binary @/tmp/newsecret.json \
+              "$API/api/v1/namespaces/$NAMESPACE/secrets" && echo "Created secret."
+            echo "=== response headers ==="; cat /tmp/h.txt; echo "=== body ==="; cat /tmp/r.txt
 
 # ============================================================================
 # Vault CONFIG job — namespace: vault
