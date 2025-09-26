@@ -720,6 +720,25 @@ spec:
   ports: [{ name: rest, port: 8083, targetPort: 8083 }]
   selector: { app: kafka-connect }
 ---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kafka-connect-log4j
+  namespace: kafka
+data:
+  log4j.properties: |
+    log4j.rootLogger=INFO, stdout
+    log4j.appender.stdout=org.apache.log4j.ConsoleAppender
+    log4j.appender.stdout.layout=org.apache.log4j.PatternLayout
+    log4j.appender.stdout.layout.ConversionPattern=[%d{ISO8601}] %-5p %c - %m%n
+
+    # Turn down the REST noise, turn up Debezium + YB connector for diagnostics
+    log4j.logger.org.apache.kafka.connect.runtime.rest=WARN
+    log4j.logger.org.apache.kafka.connect.runtime=INFO
+    log4j.logger.io.debezium=DEBUG
+    log4j.logger.io.debezium.connector.yugabytedb=DEBUG
+    log4j.logger.com.wepay.kafka.connect.bigquery=DEBUG
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -751,6 +770,12 @@ spec:
         fsGroup: 1000
       volumes:
       - { name: plugins, emptyDir: {} }
+      - name: log4j
+        configMap:
+          name: kafka-connect-log4j
+          items:
+            - key: log4j.properties
+              path: log4j.properties
       initContainers:
       - name: install-bq
         image: confluentinc/cp-kafka-connect:7.6.1
@@ -796,7 +821,16 @@ spec:
             secretKeyRef:
               name: kafka-cluster-id
               key: CLUSTER_ID
-
+        - name: CONNECT_REST_HOST_NAME
+          value: "0.0.0.0"
+        - name: CONNECT_REST_ADVERTISED_HOST_NAME
+          value: "kafka-connect.kafka.svc.internal.lan"
+        - name: CONNECT_REST_ADVERTISED_PORT
+          value: "8083"
+        - name: KAFKA_LOG4J_OPTS
+          value: "-Dlog4j.configuration=file:/kafka/etc/log4j.properties"
+        - name: CONNECT_LOG4J_ROOT_LOGLEVEL
+          value: "INFO"
         - { name: BOOTSTRAP_SERVERS, value: "kafka.kafka.svc.internal.lan:9092" }   # match DNS suffix
         - { name: GROUP_ID, value: "connect-cluster" }
         - { name: CONFIG_STORAGE_TOPIC, value: "_connect-configs" }
@@ -825,8 +859,9 @@ spec:
         - { containerPort: 8083 }
         readinessProbe:
           httpGet: { path: /connectors, port: 8083 }
-          initialDelaySeconds: 40
+          initialDelaySeconds: 60
           periodSeconds: 5
+          failureThreshold: 6
         livenessProbe:
           httpGet: { path: /, port: 8083 }
           initialDelaySeconds: 60
@@ -835,7 +870,9 @@ spec:
         resources:
           requests: { cpu: "250m", memory: "768Mi" }
           limits: { cpu: "1000m", memory: "1.5Gi" }
-        volumeMounts: [{ name: plugins, mountPath: /plugins }]
+        volumeMounts: 
+          - { name: plugins, mountPath: /plugins }
+          - { name: log4j,  mountPath: /kafka/etc }
 
 # ============================================================================
 # Kafka UI + oauth2-proxy (waves 45-47)
