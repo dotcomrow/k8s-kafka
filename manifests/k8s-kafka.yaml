@@ -990,6 +990,7 @@ spec:
             echo "[WATCHER] PGHOST=$PGHOST PGPORT=$PGPORT PGUSER=$PGUSER PGDATABASE=${PGDATABASE:-<ignored>}"
 
             esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+            api_get()   { local u="$1"; code=$(curl -sS -D /tmp/h.txt -o /tmp/resp.txt -w '%{http_code}' "$u" || true); echo "GET $u -> $code"; cat /tmp/resp.txt; }
             api_put()   { local u="$1" f="$2"; code=$(curl -sS -D /tmp/h.txt -o /tmp/resp.txt -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @"$f" -X PUT "$u" || true); echo "PUT $u -> $code"; cat /tmp/resp.txt; }
             api_post()  { local u="$1" f="$2"; code=$(curl -sS -D /tmp/h.txt -o /tmp/resp.txt -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @"$f" -X POST "$u" || true); echo "POST $u -> $code"; cat /tmp/resp.txt; }
             api_delete(){ local u="$1"; code=$(curl -sS -D /tmp/h.txt -o /tmp/resp.txt -w '%{http_code}' -X DELETE "$u" || true); echo "DELETE $u -> $code"; cat /tmp/resp.txt; }
@@ -1057,6 +1058,15 @@ spec:
               local DATA="{\"data-collections\": [\"${SCHEMA}.${TBL}\"]}"
               /home/yugabyte/bin/ysqlsh "$URL" -Atc "INSERT INTO public.debezium_signal(id,type,data) VALUES ('${ID}','execute-snapshot','${DATA}');" >/dev/null 2>&1 || true
               echo "signaled snapshot for ${DB}.${SCHEMA}.${TBL}"
+            }
+
+            validate_config() {
+              local plugin="$1" file="$2"
+              local url="${CONNECT_URL}/connector-plugins/${plugin}/config/validate"
+              local code
+              code=$(curl -sS -D /tmp/h.txt -o /tmp/validate.txt -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @"$file" -X PUT "$url" || true)
+              echo "VALIDATE ${plugin} -> $code"
+              cat /tmp/validate.txt
             }
 
             SERVER_PREFIX="${SERVER_PREFIX:-yb}"
@@ -1131,8 +1141,12 @@ spec:
                   } > "/tmp/yb-source-${DB}.put.json"
                   { echo '{ "name":"yb-source-'"${DB}"'", "config": '; cat "/tmp/yb-source-${DB}.put.json"; echo ' }'; } > "/tmp/yb-source-${DB}.post.json"
 
+                  echo "--- validating source config (yb-source-${DB}) ---"
+                  validate_config "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector" "/tmp/yb-source-${DB}.put.json" || true
+
                   api_put  "${CONNECT_URL}/connectors/yb-source-${DB}/config" "/tmp/yb-source-${DB}.put.json" || \
                   api_post "${CONNECT_URL}/connectors"                       "/tmp/yb-source-${DB}.post.json"
+                  api_get  "${CONNECT_URL}/connectors/yb-source-${DB}/status" || true
 
                   # ---- Build BQ sink payloads: PUT=config-only, POST=name+config ----
                   {
@@ -1148,13 +1162,17 @@ spec:
                     echo '  "allowNewBigQueryFields":"true",'
                     echo '  "allowBigQueryRequiredFieldRelaxation":"true",'
                     echo '  "keySource":"JSON",'
-                    echo "  \"keyfile\":\"$(esc "$BQ_KEY_JSON")\""
+                    echo '  "key": '"${BQ_KEY_JSON}"
                     echo '}'
                   } > "/tmp/bq-sink-${DB}.put.json"
                   { echo '{ "name":"bq-sink-'"${DB}"'", "config": '; cat "/tmp/bq-sink-${DB}.put.json"; echo ' }'; } > "/tmp/bq-sink-${DB}.post.json"
 
+                  echo "--- validating sink config (bq-sink-${DB}) ---"
+                  validate_config "com.wepay.kafka.connect.bigquery.BigQuerySinkConnector" "/tmp/bq-sink-${DB}.put.json" || true
+
                   api_put  "${CONNECT_URL}/connectors/bq-sink-${DB}/config" "/tmp/bq-sink-${DB}.put.json" || \
                   api_post "${CONNECT_URL}/connectors"                      "/tmp/bq-sink-${DB}.post.json"
+                  api_get  "${CONNECT_URL}/connectors/bq-sink-${DB}/status" || true
 
                   CUR_LIST_FILE="/state/${DB}.tables"
                   PREV_LIST="$(cat "$CUR_LIST_FILE" 2>/dev/null || true)"
