@@ -8,6 +8,7 @@ metadata:
   labels: { app: bq-yb-bootstrap }
   annotations:
     linkerd.io/inject: "disabled"
+    scheduler.alpha.kubernetes.io/node-selector: "dedicated=ctrl-node"
     field.cattle.io/projectId: "local:infrastructure"
 ---
 apiVersion: v1
@@ -92,7 +93,7 @@ spec:
     metadata:
       annotations: { linkerd.io/inject: "disabled" }
     spec:
-      nodeSelector: { dedicated: ctrl-node }
+      
       restartPolicy: Never
       serviceAccountName: kafka-clusterid-gen
       volumes: [{ name: work, emptyDir: {} }]
@@ -160,7 +161,7 @@ spec:
   template:
     metadata: { annotations: { linkerd.io/inject: "disabled" } }
     spec:
-      nodeSelector: { dedicated: ctrl-node }
+      
       restartPolicy: Never
       serviceAccountName: default
       volumes: [{ name: root-token, secret: { secretName: vault-root-token } }]
@@ -276,7 +277,7 @@ spec:
           PGPASSWORD={{ .Data.data.value }}
           {{- end -}}
     spec:
-      nodeSelector: { dedicated: ctrl-node }
+      
       restartPolicy: Never
       serviceAccountName: bq-yb-bootstrap
       containers:
@@ -377,7 +378,7 @@ spec:
           PGPASSWORD={{ .Data.data.value }}
           {{- end -}}
     spec:
-      nodeSelector: { dedicated: ctrl-node }
+      
       serviceAccountName: bq-yb-bootstrap
       restartPolicy: Never
       terminationGracePeriodSeconds: 30
@@ -644,7 +645,7 @@ spec:
       labels: { app: kafka }
       annotations: { linkerd.io/inject: "disabled" }
     spec:
-      nodeSelector: { dedicated: ctrl-node }
+      
       securityContext:
         fsGroup: 1000
       volumes: [{ name: kafka-logs, emptyDir: {} }]
@@ -743,7 +744,7 @@ spec:
           {{- end -}}
         vault.hashicorp.com/agent-inject-permissions-gcp-key.json: "0644"
     spec:
-      nodeSelector: { dedicated: ctrl-node }
+      
       serviceAccountName: bq-yb-bootstrap
       terminationGracePeriodSeconds: 30
       securityContext:
@@ -864,7 +865,7 @@ spec:
       labels: { app: kafka-ui }
       annotations: { linkerd.io/inject: "disabled" }
     spec:
-      nodeSelector: { dedicated: ctrl-node }
+      
       containers:
       - name: ui
         image: provectuslabs/kafka-ui:v0.7.2
@@ -916,7 +917,7 @@ spec:
       labels: { app: oauth2-proxy }
       annotations: { linkerd.io/inject: "disabled" }
     spec:
-      nodeSelector: { dedicated: ctrl-node }
+      
       containers:
       - name: proxy
         image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
@@ -1005,7 +1006,7 @@ spec:
           {{- end -}}
         vault.hashicorp.com/agent-inject-permissions-gcp-key.json: "0644"
     spec:
-      nodeSelector: { dedicated: ctrl-node }
+      
       serviceAccountName: bq-yb-bootstrap
       securityContext:
         fsGroup: 1000
