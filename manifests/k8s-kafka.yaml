@@ -221,7 +221,7 @@ spec:
             CFG_ARGS=""; [ -n "$BQ_PROJECT" ] && CFG_ARGS="$CFG_ARGS project=$BQ_PROJECT"
             [ -n "$BQ_DEFAULT_DATASET" ] && CFG_ARGS="$CFG_ARGS dataset=$BQ_DEFAULT_DATASET"
             [ -s /tmp/sa.json ] && CFG_ARGS="$CFG_ARGS sa_json=@/tmp/sa.json"
-            [ -n "$CFG_ARGS" ] && vault kv put secret/kafka/bq/config $CFG_ARGS >/div/null || true
+            [ -n "$CFG_ARGS" ] && vault kv put secret/kafka/bq/config $CFG_ARGS >/dev/null || true
             [ -s /tmp/sa.json ] && vault kv put secret/kafka/bq/exporter sa_json=@/tmp/sa.json >/dev/null && echo "→ Wrote secret/kafka/bq/exporter"
 
             vault policy write data-bootstrap - <<'EOP'
@@ -700,7 +700,7 @@ spec:
         volumeMounts: [{ name: kafka-logs, mountPath: /tmp/kraft-combined-logs }]
 
 # ============================================================================
-# Kafka Connect (wave 4)  — includes broker-probe sidecar
+# Kafka Connect (wave 4) — with broker-probe sidecar (not an initContainer)
 # ============================================================================
 ---
 apiVersion: v1
@@ -730,7 +730,6 @@ spec:
     spec:
       volumes:
       - { name: plugins, emptyDir: {} }
-      - { name: probe, emptyDir: {} }
       initContainers:
       - name: install-bq
         image: confluentinc/cp-kafka-connect:7.6.1
@@ -767,22 +766,6 @@ spec:
             echo "Could not find connector payload"; exit 1
         volumeMounts:
           - { name: plugins, mountPath: /out }
-
-      # Broker reachability sidecar (independent logs)
-      - name: broker-probe
-        image: apache/kafka:3.9.0
-        command: ["/bin/bash","-lc"]
-        args:
-          - |
-            set -Eeuo pipefail
-            PS4='+ [PROBE] $(date -Is) '
-            set -x
-            while true; do
-              /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka.kafka.svc.cluster.local:9092 >/dev/null 2>&1 \
-                && echo "broker OK" || echo "broker UNREACHABLE"
-              sleep 10
-            done
-        volumeMounts: [{ name: probe, mountPath: /probe }]
 
       containers:
       - name: connect
@@ -831,6 +814,20 @@ spec:
           requests: { cpu: "250m", memory: "512Mi" }
           limits: { cpu: "1000m", memory: "1Gi" }
         volumeMounts: [{ name: plugins, mountPath: /plugins }]
+
+      - name: broker-probe
+        image: apache/kafka:3.9.0
+        command: ["/bin/bash","-lc"]
+        args:
+          - |
+            set -Eeuo pipefail
+            PS4='+ [PROBE] $(date -Is) '
+            set -x
+            while true; do
+              /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka.kafka.svc.cluster.local:9092 >/dev/null 2>&1 \
+                && echo "broker OK" || echo "broker UNREACHABLE"
+              sleep 10
+            done
 
 # ============================================================================
 # Kafka UI + oauth2-proxy (waves 45-47)
@@ -1179,7 +1176,7 @@ spec:
                   api_post "${CONNECT_URL}/connectors"                       "/tmp/yb-source-${DB}.post.json"
                   api_get  "${CONNECT_URL}/connectors/yb-source-${DB}/status" || true
 
-                  # ---- Build BigQuery sink payloads: use FILE key (no secrets in logs) ----
+                  # ---- Build BigQuery sink payloads: FILE key (no secrets in logs) ----
                   {
                     echo '{'
                     echo '  "connector.class":"com.wepay.kafka.connect.bigquery.BigQuerySinkConnector",'
