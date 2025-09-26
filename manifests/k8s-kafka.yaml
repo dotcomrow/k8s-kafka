@@ -221,7 +221,7 @@ spec:
             CFG_ARGS=""; [ -n "$BQ_PROJECT" ] && CFG_ARGS="$CFG_ARGS project=$BQ_PROJECT"
             [ -n "$BQ_DEFAULT_DATASET" ] && CFG_ARGS="$CFG_ARGS dataset=$BQ_DEFAULT_DATASET"
             [ -s /tmp/sa.json ] && CFG_ARGS="$CFG_ARGS sa_json=@/tmp/sa.json"
-            [ -n "$CFG_ARGS" ] && vault kv put secret/kafka/bq/config $CFG_ARGS >/dev/null && echo "→ Wrote secret/kafka/bq/config"
+            [ -n "$CFG_ARGS" ] && vault kv put secret/kafka/bq/config $CFG_ARGS >/div/null || true
             [ -s /tmp/sa.json ] && vault kv put secret/kafka/bq/exporter sa_json=@/tmp/sa.json >/dev/null && echo "→ Wrote secret/kafka/bq/exporter"
 
             vault policy write data-bootstrap - <<'EOP'
@@ -700,7 +700,7 @@ spec:
         volumeMounts: [{ name: kafka-logs, mountPath: /tmp/kraft-combined-logs }]
 
 # ============================================================================
-# Kafka Connect (wave 4)
+# Kafka Connect (wave 4)  — includes broker-probe sidecar
 # ============================================================================
 ---
 apiVersion: v1
@@ -728,7 +728,9 @@ spec:
       labels: { app: kafka-connect }
       annotations: { linkerd.io/inject: "disabled" }
     spec:
-      volumes: [{ name: plugins, emptyDir: {} }]
+      volumes:
+      - { name: plugins, emptyDir: {} }
+      - { name: probe, emptyDir: {} }
       initContainers:
       - name: install-bq
         image: confluentinc/cp-kafka-connect:7.6.1
@@ -765,6 +767,23 @@ spec:
             echo "Could not find connector payload"; exit 1
         volumeMounts:
           - { name: plugins, mountPath: /out }
+
+      # Broker reachability sidecar (independent logs)
+      - name: broker-probe
+        image: apache/kafka:3.9.0
+        command: ["/bin/bash","-lc"]
+        args:
+          - |
+            set -Eeuo pipefail
+            PS4='+ [PROBE] $(date -Is) '
+            set -x
+            while true; do
+              /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka.kafka.svc.cluster.local:9092 >/dev/null 2>&1 \
+                && echo "broker OK" || echo "broker UNREACHABLE"
+              sleep 10
+            done
+        volumeMounts: [{ name: probe, mountPath: /probe }]
+
       containers:
       - name: connect
         image: quay.io/debezium/connect:1.9.7.Final
@@ -914,7 +933,7 @@ spec:
           valueFrom: { secretKeyRef: { name: oauth2-proxy-secrets, key: cookie_secret } }
 
 # ============================================================================
-# Continuous Annotation Watcher (wave 50) — cluster-wide, multi-DB, signals
+# Continuous Annotation Watcher (wave 50) — safer auth, timeouts, validation
 # ============================================================================
 ---
 apiVersion: apps/v1
@@ -936,6 +955,8 @@ spec:
         vault.hashicorp.com/role: "data-bootstrap"
         vault.hashicorp.com/agent-pre-populate-only: "true"
         vault.hashicorp.com/exit-on-error: "false"
+
+        # YB/PG connection
         vault.hashicorp.com/agent-inject-secret-yb.env: "secret/data/kafka/pgconfig"
         vault.hashicorp.com/agent-inject-template-yb.env: |
           {{- with secret "secret/data/kafka/pgconfig" -}}
@@ -950,12 +971,18 @@ spec:
           {{- with secret "secret/data/vaultadmin" -}}
           PGPASSWORD={{ .Data.data.value }}
           {{- end -}}
+
+        # BQ config (project/dataset + JSON key file)
         vault.hashicorp.com/agent-inject-secret-bq.env: "secret/data/kafka/bq/config"
         vault.hashicorp.com/agent-inject-template-bq.env: |
           {{- with secret "secret/data/kafka/bq/config" -}}
           {{ with .Data.data.project }}BQ_PROJECT={{ . }}{{ end }}
           {{ with .Data.data.dataset }}BQ_DEFAULT_DATASET={{ . }}{{ end }}
-          {{ with .Data.data.sa_json }}BQ_KEY_JSON={{ . | toJSON }}{{ end }}
+          {{- end -}}
+        vault.hashicorp.com/agent-inject-secret-gcp-key.json: "secret/data/kafka/bq/config"
+        vault.hashicorp.com/agent-inject-template-gcp-key.json: |
+          {{- with secret "secret/data/kafka/bq/config" -}}
+          {{ .Data.data.sa_json }}
           {{- end -}}
     spec:
       serviceAccountName: bq-yb-bootstrap
@@ -977,11 +1004,12 @@ spec:
             set -Eeuo pipefail
             PS4='+ [WATCHER] $(date -Is) '
             set -x
-            trap 'echo "[WATCHER] FAIL; dumping /state and last REST response"; ls -l /state || true; cat /tmp/resp.txt 2>/dev/null || true; exit 1' ERR
+            trap 'echo "[WATCHER] FAIL; dumping /state and last REST response"; ls -l /state || true; tail -c 5000 /tmp/resp.txt 2>/dev/null || true; exit 1' ERR
 
-            for f in /vault/secrets/yb.env /vault/secrets/pgpass.env /vault/secrets/bq.env; do
+            # Require all secrets/files we need
+            for f in /vault/secrets/yb.env /vault/secrets/pgpass.env /vault/secrets/bq.env /vault/secrets/gcp-key.json; do
               i=0; while [ ! -s "$f" ]; do i=$((i+1)); [ $i -gt 120 ] && echo "vault secrets missing: $f" >&2 && exit 1; sleep 2; done
-              . "$f"
+              . "$f" 2>/dev/null || true
             done
             export PGPASSWORD
             PGHOST="${PGHOST:-yb-tserver-service.yugabyte.svc.cluster.local}"
@@ -989,11 +1017,23 @@ spec:
             PGUSER="${PGUSER:-vaultadmin}"
             echo "[WATCHER] PGHOST=$PGHOST PGPORT=$PGPORT PGUSER=$PGUSER PGDATABASE=${PGDATABASE:-<ignored>}"
 
+            # curl options with timeouts
+            CURL_OPTS=(--connect-timeout 5 --max-time 25 -sS)
+
             esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
-            api_get()   { local u="$1"; code=$(curl -sS -D /tmp/h.txt -o /tmp/resp.txt -w '%{http_code}' "$u" || true); echo "GET $u -> $code"; cat /tmp/resp.txt; }
-            api_put()   { local u="$1" f="$2"; code=$(curl -sS -D /tmp/h.txt -o /tmp/resp.txt -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @"$f" -X PUT "$u" || true); echo "PUT $u -> $code"; cat /tmp/resp.txt; }
-            api_post()  { local u="$1" f="$2"; code=$(curl -sS -D /tmp/h.txt -o /tmp/resp.txt -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @"$f" -X POST "$u" || true); echo "POST $u -> $code"; cat /tmp/resp.txt; }
-            api_delete(){ local u="$1"; code=$(curl -sS -D /tmp/h.txt -o /tmp/resp.txt -w '%{http_code}' -X DELETE "$u" || true); echo "DELETE $u -> $code"; cat /tmp/resp.txt; }
+            api_get()   { local u="$1"; code=$(curl "${CURL_OPTS[@]}" -D /tmp/h.txt -o /tmp/resp.txt -w '%{http_code}' "$u" || true); echo "GET $u -> $code"; tail -c 2000 /tmp/resp.txt; }
+            api_put()   { local u="$1" f="$2"; code=$(curl "${CURL_OPTS[@]}" -D /tmp/h.txt -o /tmp/resp.txt -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @"$f" -X PUT "$u" || true); echo "PUT $u -> $code"; tail -c 2000 /tmp/resp.txt; }
+            api_post()  { local u="$1" f="$2"; code=$(curl "${CURL_OPTS[@]}" -D /tmp/h.txt -o /tmp/resp.txt -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @"$f" -X POST "$u" || true); echo "POST $u -> $code"; tail -c 2000 /tmp/resp.txt; }
+            api_delete(){ local u="$1"; code=$(curl "${CURL_OPTS[@]}" -D /tmp/h.txt -o /tmp/resp.txt -w '%{http_code}' -X DELETE "$u" || true); echo "DELETE $u -> $code"; tail -c 2000 /tmp/resp.txt; }
+
+            validate_config() {
+              local plugin="$1" file="$2"
+              local url="${CONNECT_URL}/connector-plugins/${plugin}/config/validate"
+              local code
+              code=$(curl "${CURL_OPTS[@]}" -D /tmp/h.txt -o /tmp/validate.txt -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @"$file" -X PUT "$url" || true)
+              echo "VALIDATE ${plugin} -> $code"
+              tail -c 2000 /tmp/validate.txt
+            }
 
             until curl -fsS "${CONNECT_URL}/connectors" >/dev/null 2>&1; do echo "[WATCHER] waiting for connect REST…"; sleep 3; done
             echo "== Connector plugins =="; curl -fsS "${CONNECT_URL}/connector-plugins" | sed 's/.*/  &/'; echo "======================="
@@ -1058,15 +1098,6 @@ spec:
               local DATA="{\"data-collections\": [\"${SCHEMA}.${TBL}\"]}"
               /home/yugabyte/bin/ysqlsh "$URL" -Atc "INSERT INTO public.debezium_signal(id,type,data) VALUES ('${ID}','execute-snapshot','${DATA}');" >/dev/null 2>&1 || true
               echo "signaled snapshot for ${DB}.${SCHEMA}.${TBL}"
-            }
-
-            validate_config() {
-              local plugin="$1" file="$2"
-              local url="${CONNECT_URL}/connector-plugins/${plugin}/config/validate"
-              local code
-              code=$(curl -sS -D /tmp/h.txt -o /tmp/validate.txt -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @"$file" -X PUT "$url" || true)
-              echo "VALIDATE ${plugin} -> $code"
-              cat /tmp/validate.txt
             }
 
             SERVER_PREFIX="${SERVER_PREFIX:-yb}"
@@ -1148,7 +1179,7 @@ spec:
                   api_post "${CONNECT_URL}/connectors"                       "/tmp/yb-source-${DB}.post.json"
                   api_get  "${CONNECT_URL}/connectors/yb-source-${DB}/status" || true
 
-                  # ---- Build BQ sink payloads: PUT=config-only, POST=name+config ----
+                  # ---- Build BigQuery sink payloads: use FILE key (no secrets in logs) ----
                   {
                     echo '{'
                     echo '  "connector.class":"com.wepay.kafka.connect.bigquery.BigQuerySinkConnector",'
@@ -1161,8 +1192,8 @@ spec:
                     echo '  "autoCreateTables":"true",'
                     echo '  "allowNewBigQueryFields":"true",'
                     echo '  "allowBigQueryRequiredFieldRelaxation":"true",'
-                    echo '  "keySource":"JSON",'
-                    echo '  "key": '"${BQ_KEY_JSON}"
+                    echo '  "keySource":"FILE",'
+                    echo '  "keyfile": "/vault/secrets/gcp-key.json"'
                     echo '}'
                   } > "/tmp/bq-sink-${DB}.put.json"
                   { echo '{ "name":"bq-sink-'"${DB}"'", "config": '; cat "/tmp/bq-sink-${DB}.put.json"; echo ' }'; } > "/tmp/bq-sink-${DB}.post.json"
