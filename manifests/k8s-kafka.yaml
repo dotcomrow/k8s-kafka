@@ -616,6 +616,27 @@ spec:
       securityContext:
         fsGroup: 1000
       volumes: [{ name: kafka-logs, emptyDir: {} }]
+      initContainers:
+      - name: format-storage
+        image: apache/kafka:3.9.0
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: CLUSTER_ID
+          valueFrom: { secretKeyRef: { name: kafka-cluster-id, key: CLUSTER_ID } }
+        command: ["/bin/bash","-lc"]
+        args: 
+        - |
+          set -Eeuo pipefail
+          PS4='+ [KAFKA-FMT] $(date -Is) '
+          set -x
+          META="/tmp/kraft-combined-logs/meta.properties"
+          if [ -f "$META" ]; then
+            echo "meta.properties present; not reformatting."; grep -E '^cluster\.id=' "$META" || true
+          else
+            /opt/kafka/bin/kafka-storage.sh format \
+              -t "${CLUSTER_ID}" -c /opt/kafka/config/kraft/server.properties --ignore-formatted
+          fi
+        volumeMounts: [{ name: kafka-logs, mountPath: /tmp/kraft-combined-logs }]
       containers:
       - name: broker
         image: apache/kafka:3.9.0
@@ -626,32 +647,18 @@ spec:
             secretKeyRef:
               name: kafka-cluster-id
               key: CLUSTER_ID
-
-        # REQUIRED for this image to use KRaft
-        - { name: KAFKA_ENABLE_KRAFT, value: "true" }
-
-        # KRaft config via server.properties keys (KAFKA_CFG_*)
         - { name: KAFKA_NODE_ID, value: "1" }
         - { name: KAFKA_PROCESS_ROLES, value: "broker,controller" }
         - { name: KAFKA_CONTROLLER_LISTENER_NAMES, value: "CONTROLLER" }
         - { name: KAFKA_LISTENERS, value: "PLAINTEXT://:9092,CONTROLLER://:9093" }
         - { name: KAFKA_ADVERTISED_LISTENERS, value: "PLAINTEXT://kafka.kafka.svc.cluster.local:9092" }
         - { name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP, value: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT" }
-        - { name: KAFKA_INTER_BROKER_LISTENER_NAME, value: "PLAINTEXT" }
         - { name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "1@kafka-0.kafka-hs.kafka.svc.cluster.local:9093" }
-
-        # Single-broker factors
         - { name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "1" }
         - { name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "1" }
         - { name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR, value: "1" }
         - { name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS, value: "0" }
-
-        # Data dir
-        - { name: KAFKA_LOG_DIRS, value: "/var/lib/kafka/data" }
-
-        # JVM / logging
-        - { name: KAFKA_HEAP_OPTS, value: "-Xms256m -Xmx512m" }
-
+        - { name: KAFKA_LOG_DIRS, value: "/tmp/kraft-combined-logs" }
         ports:
         - { containerPort: 9092 }
         - { containerPort: 9093 }
@@ -662,8 +669,7 @@ spec:
         resources:
           requests: { cpu: "250m", memory: "512Mi" }
           limits: { cpu: "1500m", memory: "2Gi" }
-        volumeMounts:
-        - { name: kafka-logs, mountPath: /var/lib/kafka/data }
+        volumeMounts: [{ name: kafka-logs, mountPath: /tmp/kraft-combined-logs }]
 
 # ============================================================================
 # Kafka Connect (wave 4) — Vault-injected GCP keyfile
@@ -789,19 +795,19 @@ spec:
 
         - { name: KAFKA_LOG4J_OPTS, value: "-Dlog4j.configuration=file:/kafka/etc/log4j.properties" }
 
-        - { name: BOOTSTRAP_SERVERS, value: "kafka.kafka.svc.cluster.local:9092" }
-        - { name: GROUP_ID, value: "connect-cluster" }
-        - { name: CONFIG_STORAGE_TOPIC, value: "_connect-configs" }
-        - { name: OFFSET_STORAGE_TOPIC,  value: "_connect-offsets" }
-        - { name: STATUS_STORAGE_TOPIC,  value: "_connect-status" }
-        - { name: CONFIG_STORAGE_REPLICATION_FACTOR, value: "1" }
-        - { name: OFFSET_STORAGE_REPLICATION_FACTOR,  value: "1" }
-        - { name: STATUS_STORAGE_REPLICATION_FACTOR,  value: "1" }
+        - { name: CONNECT_BOOTSTRAP_SERVERS, value: "kafka.kafka.svc.cluster.local:9092" }
+        - { name: CONNECT_GROUP_ID, value: "connect-cluster" }
+        - { name: CONNECT_CONFIG_STORAGE_TOPIC, value: "_connect-configs" }
+        - { name: CONNECT_OFFSET_STORAGE_TOPIC,  value: "_connect-offsets" }
+        - { name: CONNECT_STATUS_STORAGE_TOPIC,  value: "_connect-status" }
+        - { name: CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR, value: "1" }
+        - { name: CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR,  value: "1" }
+        - { name: CONNECT_STATUS_STORAGE_REPLICATION_FACTOR,  value: "1" }
 
-        - { name: KEY_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
-        - { name: VALUE_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
-        - { name: KEY_CONVERTER_SCHEMAS_ENABLE, value: "true" }
-        - { name: VALUE_CONVERTER_SCHEMAS_ENABLE, value: "true" }
+        - { name: CONNECT_KEY_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
+        - { name: CONNECT_VALUE_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
+        - { name: CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE, value: "true" }
+        - { name: CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE, value: "true" }
 
         - { name: CONNECT_PLUGIN_PATH, value: "/plugins,/plugins/share/java,/plugins/share/confluent-hub-components,/plugins/yugabytedb" }
 
@@ -1103,7 +1109,7 @@ spec:
             local URL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${DB}?sslmode=disable"
             local ID="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || date +%s%N)"
             local DATA="{\"data-collections\": [\"${SCHEMA}.${TBL}\"]}"
-            /home/yugabyte/bin/ysqlsh "$URL" -Atc "INSERT INTO public.debezium_signal(id,type,data) VALUES ('${ID}','execute-snapshot','${DATA}');" >/dev/null 2>/dev/null || true
+            /home/yugabyte/bin/ysqlsh "$URL" -Atc "INSERT INTO public.debezium_signal(id,type,data) VALUES ('${ID}','execute-snapshot','${DATA}');" >/dev/null 2>&1 || true
             echo "signaled snapshot for ${DB}.${SCHEMA}.${TBL}"
           }
 
@@ -1152,7 +1158,7 @@ spec:
 
                 ensure_signal_table "$DB"
 
-                # ----- SOURCE (YB/DBZ gRPC) -----
+                # ----- SOURCE CONNECTOR CONFIG -----
                 SRC_PUT="$(mktmp)"
                 {
                   echo '{'
@@ -1184,6 +1190,7 @@ spec:
                 api_put  "${CONNECT_URL}/connectors/yb-source-${DB}/config" "$SRC_PUT" || \
                 api_post "${CONNECT_URL}/connectors"                      "$SRC_POST"
 
+                # small poll for status
                 for i in $(seq 1 10); do
                   sleep 2
                   STATUS_CODE=$(curl -sS -o /tmp/s.json -w '%{http_code}' "${CONNECT_URL}/connectors/yb-source-${DB}/status" || true)
@@ -1191,7 +1198,7 @@ spec:
                 done
                 echo "yb-source-${DB} status ($STATUS_CODE):"; tail -c 2000 /tmp/s.json 2>/dev/null || true
 
-                # ----- BigQuery SINK -----
+                # ----- BigQuery SINK CONNECTOR CONFIG -----
                 SINK_PUT="$(mktmp)"
                 {
                   echo '{'
