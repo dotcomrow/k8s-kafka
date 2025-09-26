@@ -947,7 +947,7 @@ spec:
           limits: { cpu: "300m", memory: "256Mi" }
 
 # ============================================================================
-# Continuous Annotation Watcher (wave 50) — JDBC Yugabyte connector
+# Continuous Annotation Watcher (wave 50)
 # ============================================================================
 ---
 apiVersion: apps/v1
@@ -1157,11 +1157,11 @@ spec:
 
                 ensure_signal_table "$DB"
 
-                # ----- JDBC SOURCE CONNECTOR CONFIG -----
+                # ----- SOURCE CONNECTOR CONFIG (YB gRPC) -----
                 SRC_PUT="$(mktmp)"
                 {
                   echo '{'
-                  echo '  "connector.class":"io.debezium.connector.yugabytedb.YugabyteDBConnector",'
+                  echo '  "connector.class":"io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",'
                   echo '  "tasks.max":"1",'
                   echo "  \"database.hostname\":\"$(esc "$PGHOST")\","
                   echo "  \"database.port\":\"$(esc "$PGPORT")\","
@@ -1174,7 +1174,7 @@ spec:
                   echo '  "incremental.snapshot.enabled":"true",'
                   echo '  "signal.data.collection":"public.debezium_signal",'
                   echo '  "transforms":"unwrap",'
-                  echo '  "transforms.unwrap.type":"io.debezium.transforms.ExtractNewRecordState",'
+                  echo '  "transforms.unwrap.type":"io.debezium.connector.yugabytedb.transforms.YBExtractNewRecordState",'
                   echo '  "topic.creation.default.replication.factor":"1",'
                   echo '  "topic.creation.default.partitions":"1",'
                   echo '  "topic.creation.default.cleanup.policy":"delete"'
@@ -1183,7 +1183,7 @@ spec:
                 SRC_POST="$(mktmp)"; { echo '{ "name":"yb-source-'"${DB}"'", "config": '; cat "$SRC_PUT"; echo ' }'; } > "$SRC_POST"
 
                 echo "--- validating source config (yb-source-${DB}) ---"
-                validate_config "io.debezium.connector.yugabytedb.YugabyteDBConnector" "$SRC_PUT" || true
+                validate_config "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector" "$SRC_PUT" || true
 
                 api_put  "${CONNECT_URL}/connectors/yb-source-${DB}/config" "$SRC_PUT" || \
                 api_post "${CONNECT_URL}/connectors"                      "$SRC_POST"
@@ -1217,7 +1217,7 @@ spec:
                 SINK_POST="$(mktmp)"; { echo '{ "name":"bq-sink-'"${DB}"'", "config": '; cat "$SINK_PUT"; echo ' }'; } > "$SINK_POST"
 
                 echo "--- validating sink config (bq-sink-${DB}) ---"
-                validate_config "com.wepay.kafka.connect.bigQuery.BigQuerySinkConnector" "$SINK_PUT" || true || true
+                validate_config "com.wepay.kafka.connect.bigquery.BigQuerySinkConnector" "$SINK_PUT" || true
 
                 api_put  "${CONNECT_URL}/connectors/bq-sink-${DB}/config" "$SINK_PUT" || \
                 api_post "${CONNECT_URL}/connectors"                      "$SINK_POST"
