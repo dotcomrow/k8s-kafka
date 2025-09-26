@@ -389,7 +389,7 @@ spec:
             set -Eeuo pipefail
             PS4='+ [PLANNER] $(date -Is) '
             set -x
-            trap 'echo "[PLANNER] FAIL: env:"; env | sort; echo "--- plan.tsv ---"; cat /work/plan.tsv 2>/dev/null || true; exit 1' ERR
+            trap 'echo "[PLANNER] FAIL: env:"; env | sort; echo "--- plan.tsv ---"; cat /work/plan.tsv 2>/div/null || true; exit 1' ERR
 
             for f in /vault/secrets/pg.env /vault/secrets/pg-admin.env; do
               i=0; while [ ! -s "$f" ]; do
@@ -683,10 +683,10 @@ spec:
         - { name: KAFKA_PROCESS_ROLES, value: "broker,controller" }
         - { name: KAFKA_CONTROLLER_LISTENER_NAMES, value: "CONTROLLER" }
         - { name: KAFKA_LISTENERS, value: "PLAINTEXT://:9092,CONTROLLER://:9093" }
-        # CHANGED: use svc.internal.lan to match cluster DNS
+        # use svc.internal.lan to match cluster DNS
         - { name: KAFKA_ADVERTISED_LISTENERS, value: "PLAINTEXT://kafka.kafka.svc.internal.lan:9092" }
         - { name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP, value: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT" }
-        # CHANGED: use svc.internal.lan so controller registration resolves
+        # use svc.internal.lan for controller registration
         - { name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "1@kafka-0.kafka-hs.kafka.svc.internal.lan:9093" }
         - { name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "1" }
         - { name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "1" }
@@ -731,8 +731,7 @@ data:
     log4j.appender.stdout=org.apache.log4j.ConsoleAppender
     log4j.appender.stdout.layout=org.apache.log4j.PatternLayout
     log4j.appender.stdout.layout.ConversionPattern=[%d{ISO8601}] %-5p %c - %m%n
-
-    # REST noise down; Debezium + YB + BigQuery up
+    # Reduce REST spam; turn up Debezium + YB for diagnostics
     log4j.logger.org.apache.kafka.connect.runtime.rest=WARN
     log4j.logger.org.apache.kafka.connect.runtime=INFO
     log4j.logger.io.debezium=DEBUG
@@ -776,23 +775,26 @@ spec:
           items:
             - key: log4j.properties
               path: log4j.properties
+      - name: kafka-config
+        emptyDir: {}   # <-- writable /kafka/config to stop cp errors
       initContainers:
       - name: install-bq
         image: confluentinc/cp-kafka-connect:7.6.1
         command: ["/bin/bash","-lc"]
-        args: 
+        args:
           - |
             set -Eeuo pipefail
             PS4='+ [INSTALL-BQ] $(date -Is) '
             set -x
             mkdir -p /plugins
-            confluent-hub install --no-prompt --component-dir /plugins wepay/kafka-connect-bigquery:2.5.7
+            confluent-hub install --no-prompt --component-dir /plugins \
+              wepay/kafka-connect-bigquery:2.5.7
         volumeMounts: [{ name: plugins, mountPath: /plugins }]
 
       - name: fetch-yb-debezium
         image: quay.io/yugabyte/debezium-connector:dz.1.9.5.yb.grpc.2024.2.2
         command: ["/bin/sh","-lc"]
-        args: 
+        args:
           - |
             set -eu
             PS4='+ [FETCH-YB] $(date -Is) '
@@ -815,19 +817,6 @@ spec:
         image: quay.io/debezium/connect:1.9.7.Final
         imagePullPolicy: IfNotPresent
         env:
-        - name: CLUSTER_ID
-          valueFrom: { secretKeyRef: { name: kafka-cluster-id, key: CLUSTER_ID } }
-
-        # REST binding/advertising
-        - { name: CONNECT_REST_HOST_NAME, value: "0.0.0.0" }
-        - { name: CONNECT_REST_ADVERTISED_HOST_NAME, value: "kafka-connect.kafka.svc.internal.lan" }
-        - { name: CONNECT_REST_ADVERTISED_PORT, value: "8083" }
-
-        # Logging: mount at /kafka/config and point KAFKA_LOG4J_OPTS to it.
-        - { name: KAFKA_LOG4J_OPTS, value: "-Dlog4j.configuration=file:/kafka/config/log4j.properties" }
-        - { name: CONNECT_LOG4J_ROOT_LOGLEVEL, value: "INFO" }
-
-        # Kafka + Connect basics
         - { name: BOOTSTRAP_SERVERS, value: "kafka.kafka.svc.internal.lan:9092" }
         - { name: GROUP_ID, value: "connect-cluster" }
         - { name: CONFIG_STORAGE_TOPIC, value: "_connect-configs" }
@@ -837,37 +826,48 @@ spec:
         - { name: OFFSET_STORAGE_REPLICATION_FACTOR,  value: "1" }
         - { name: STATUS_STORAGE_REPLICATION_FACTOR,  value: "1" }
 
+        # REST — normalized (drop duplicate REST_* envs)
+        - { name: CONNECT_REST_HOST_NAME, value: "0.0.0.0" }
+        - { name: CONNECT_REST_PORT, value: "8083" }
+        - { name: CONNECT_REST_ADVERTISED_HOST_NAME, value: "kafka-connect.kafka.svc.internal.lan" }
+        - { name: CONNECT_REST_ADVERTISED_PORT, value: "8083" }
+
+        # Converters
         - { name: KEY_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
         - { name: VALUE_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
         - { name: KEY_CONVERTER_SCHEMAS_ENABLE, value: "true" }
         - { name: VALUE_CONVERTER_SCHEMAS_ENABLE, value: "true" }
 
+        # Plugins path
         - { name: CONNECT_PLUGIN_PATH, value: "/plugins,/plugins/share/java,/plugins/share/confluent-hub-components,/plugins/yugabytedb" }
+
+        # Logging: use only our file; DO NOT set CONNECT_LOG4J_* (they broke log4j)
+        - { name: KAFKA_LOG4J_OPTS, value: "-Dlog4j.configuration=file:/kafka/etc/log4j.properties" }
 
         - { name: KAFKA_HEAP_OPTS, value: "-Xms256m -Xmx512m" }
         - { name: GOOGLE_APPLICATION_CREDENTIALS, value: "/vault/secrets/gcp-key.json" }
 
         ports:
         - { containerPort: 8083 }
-
         readinessProbe:
           httpGet: { path: /connectors, port: 8083 }
-          initialDelaySeconds: 60
+          initialDelaySeconds: 45
           periodSeconds: 5
           failureThreshold: 6
+          timeoutSeconds: 5
         livenessProbe:
           httpGet: { path: /, port: 8083 }
-          initialDelaySeconds: 60
+          initialDelaySeconds: 45
           periodSeconds: 10
           failureThreshold: 6
-
+          timeoutSeconds: 5
         resources:
           requests: { cpu: "250m", memory: "768Mi" }
           limits: { cpu: "1000m", memory: "1.5Gi" }
-
         volumeMounts:
-          - { name: plugins, mountPath: /plugins }
-          - { name: log4j,  mountPath: /kafka/config }
+          - { name: plugins,      mountPath: /plugins }
+          - { name: log4j,       mountPath: /kafka/etc }
+          - { name: kafka-config, mountPath: /kafka/config }  # writable
 
 # ============================================================================
 # Kafka UI + oauth2-proxy (waves 45-47)
@@ -955,7 +955,7 @@ spec:
         args:
           - --provider=github
           - --http-address=0.0.0.0:4180
-          - --upstream=http://kafka-ui.kafka.svc.internal.lan:8080/
+          - --upstream=http://kafka-ui.kafka.svc.cluster.local:8080/
           - --redirect-url=https://kafka-gui.app.suncoast.systems/oauth2/callback
           - --cookie-secure=true
           - --cookie-samesite=lax
@@ -1202,7 +1202,7 @@ spec:
 
                   {
                     echo '{'
-                    echo '  "connector.class":"io.debezium.connector.yugabytedb.YugabyteDBConnector",'
+                    echo '  "connector.class":"io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",'
                     echo '  "tasks.max":"1",'
                     echo "  \"database.hostname\":\"$(esc "$PGHOST")\","
                     echo "  \"database.port\":\"$(esc "$PGPORT")\","
@@ -1227,7 +1227,7 @@ spec:
                   { echo '{ "name":"yb-source-'"${DB}"'", "config": '; cat "/tmp/yb-source-${DB}.put.json"; echo ' }'; } > "/tmp/yb-source-${DB}.post.json"
 
                   echo "--- validating source config (yb-source-${DB}) ---"
-                  validate_config "io.debezium.connector.yugabytedb.YugabyteDBConnector" "/tmp/yb-source-${DB}.put.json" || true
+                  validate_config "io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector" "/tmp/yb-source-${DB}.put.json" || true
 
                   api_put  "${CONNECT_URL}/connectors/yb-source-${DB}/config" "/tmp/yb-source-${DB}.put.json" || \
                   api_post "${CONNECT_URL}/connectors"                       "/tmp/yb-source-${DB}.post.json"
