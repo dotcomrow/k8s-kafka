@@ -146,25 +146,6 @@ spec:
         volumeMounts: [{ name: work, mountPath: /work }]
 
 # ============================================================================
-# Yugabyte — add headless service for masters (namespace: yugabyte)
-# ============================================================================
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: yb-master
-  namespace: yugabyte
-  annotations: { argocd.argoproj.io/sync-wave: "1" }
-spec:
-  clusterIP: None
-  selector:
-    app: yb-master
-  ports:
-  - name: rpc
-    port: 7100
-    targetPort: 7100
-
-# ============================================================================
 # Vault CONFIG job — namespace: vault
 # ============================================================================
 ---
