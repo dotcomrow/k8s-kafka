@@ -282,7 +282,7 @@ spec:
       serviceAccountName: bq-yb-bootstrap
       containers:
       - name: initdb
-        image: yugabytedb/yugabyte:2.20.2.0-b1
+        image: yugabytedb/yugabyte:latest
         command: ["/bin/bash","-lc"]
         args:
           - |
@@ -385,7 +385,7 @@ spec:
       volumes: [{ name: work, emptyDir: {} }]
       containers:
       - name: planner
-        image: yugabytedb/yugabyte:2.20.2.0-b1
+        image: yugabytedb/yugabyte:latest
         volumeMounts: [{ name: work, mountPath: /work }]
         command: ["/bin/bash","-lc"]
         args:
@@ -452,7 +452,7 @@ spec:
 
             [ -s /work/plan.tsv ] || echo "NO_TABLES" > /work/NO_TABLES
       - name: importer
-        image: yugabytedb/yugabyte:2.20.2.0-b1
+        image: yugabytedb/yugabyte:latest
         volumeMounts: [{ name: work, mountPath: /work }]
         command: ["/bin/bash","-lc"]
         args:
@@ -1015,7 +1015,7 @@ spec:
         emptyDir: {}
       containers:
       - name: watcher
-        image: yugabytedb/yugabyte:2.20.2.0-b1
+        image: yugabytedb/yugabyte:latest
         volumeMounts:
         - { name: state, mountPath: /state }
         env:
