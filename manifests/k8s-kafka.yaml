@@ -787,10 +787,11 @@ spec:
               name: kafka-cluster-id
               key: CLUSTER_ID
 
-        - { name: REST_HOST_NAME, value: "0.0.0.0" }
-        - { name: REST_PORT, value: "8083" }
-        - { name: REST_ADVERTISED_HOST_NAME, value: "kafka-connect.kafka.svc.internal.lan" }
-        - { name: REST_ADVERTISED_PORT, value: "8083" }
+        - { name: CONNECT_REST_HOST_NAME, value: "0.0.0.0" }
+        - { name: CONNECT_REST_PORT, value: "8083" }
+        - { name: CONNECT_REST_ADVERTISED_HOST_NAME, value: "kafka-connect.kafka.svc.internal.lan" }
+        - { name: CONNECT_REST_ADVERTISED_PORT, value: "8083" }
+        - { name: CONNECT_REST_REQUEST_TIMEOUT_MS, value: "120000" }  # 120s, avoids 500 timeouts on slow
 
         - { name: KAFKA_LOG4J_OPTS, value: "-Dlog4j.configuration=file:/kafka/etc/log4j.properties" }
 
@@ -1020,7 +1021,7 @@ spec:
           PS4='+ [WATCHER] $(date -Is) '
           set -x
 
-          esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\n'; }
+          esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\r\n'; }
           mkresp() { mktemp /tmp/resp.XXXXXX.txt; }
           mktmp() { mktemp /tmp/tmp.XXXXXX.json; }
 
@@ -1168,6 +1169,7 @@ spec:
                   echo "  \"database.user\":\"$(esc "$PGUSER")\","
                   echo "  \"database.password\":\"$(esc "$PGPASSWORD")\","
                   echo "  \"database.dbname\":\"$(esc "$DB")\","
+                  [ -n "${YB_MASTER_ADDRESSES:-}" ] && echo "  \"yb.master.addresses\":\"$(esc "$YB_MASTER_ADDRESSES")\","
                   echo "  \"database.server.name\":\"$(esc "${SERVER_PREFIX}_${DB}")\","
                   echo "  \"table.include.list\":\"$(esc "$TABLES")\","
                   echo '  "snapshot.mode":"initial",'
