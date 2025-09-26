@@ -780,31 +780,33 @@ spec:
       - name: install-bq
         image: confluentinc/cp-kafka-connect:7.6.1
         command: ["/bin/bash","-lc"]
-        args: |
-          set -Eeuo pipefail
-          PS4='+ [INSTALL-BQ] $(date -Is) '
-          set -x
-          mkdir -p /plugins
-          confluent-hub install --no-prompt --component-dir /plugins wepay/kafka-connect-bigquery:2.5.7
+        args: 
+          - |
+            set -Eeuo pipefail
+            PS4='+ [INSTALL-BQ] $(date -Is) '
+            set -x
+            mkdir -p /plugins
+            confluent-hub install --no-prompt --component-dir /plugins wepay/kafka-connect-bigquery:2.5.7
         volumeMounts: [{ name: plugins, mountPath: /plugins }]
 
       - name: fetch-yb-debezium
         image: quay.io/yugabyte/debezium-connector:dz.1.9.5.yb.grpc.2024.2.2
         command: ["/bin/sh","-lc"]
-        args: |
-          set -eu
-          PS4='+ [FETCH-YB] $(date -Is) '
-          set -x
-          mkdir -p /out/yugabytedb
-          for SRC in /plugins /kafka/connect /kafka/connectors /kafka/connect/yugabytedb /opt/kafka/connect /opt/kafka/plugins /debezium-connector /kafka; do
-            if [ -d "$SRC" ] && [ -n "$(ls -A "$SRC" 2>/dev/null || true)" ]; then
-              echo "Found YB connector payload at $SRC"
-              cp -R "$SRC"/* /out/yugabytedb/
-              find /out/yugabytedb -type f \( -iname '*cloudevents*.jar' -o -iname 'debezium-converter-cloud-events-*.jar' \) -print -delete || true
-              exit 0
-            fi
-          done
-          echo "Could not find connector payload"; exit 1
+        args: 
+          - |
+            set -eu
+            PS4='+ [FETCH-YB] $(date -Is) '
+            set -x
+            mkdir -p /out/yugabytedb
+            for SRC in /plugins /kafka/connect /kafka/connectors /kafka/connect/yugabytedb /opt/kafka/connect /opt/kafka/plugins /debezium-connector /kafka; do
+              if [ -d "$SRC" ] && [ -n "$(ls -A "$SRC" 2>/dev/null || true)" ]; then
+                echo "Found YB connector payload at $SRC"
+                cp -R "$SRC"/* /out/yugabytedb/
+                find /out/yugabytedb -type f \( -iname '*cloudevents*.jar' -o -iname 'debezium-converter-cloud-events-*.jar' \) -print -delete || true
+                exit 0
+              fi
+            done
+            echo "Could not find connector payload"; exit 1
         volumeMounts:
           - { name: plugins, mountPath: /out }
 
