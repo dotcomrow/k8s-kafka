@@ -175,7 +175,7 @@ spec:
         - { name: PG_HOST, value: "yb-tserver-service.yugabyte.svc.cluster.local" }
         - { name: PG_PORT, value: "5433" }
         - { name: PG_DATABASE, value: "kafka" }
-        - { name: YB_MASTER_ADDRESSES, value: "yb-master.yugabyte.svc.cluster.local:7100" }
+        - { name: YB_MASTER_ADDRESSES, value: "yb-master-service.yugabyte.svc.cluster.local:7100" }
         - { name: BQ_BOOTSTRAP_LOCATION, value: "US" }
         - { name: BQ_BOOTSTRAP_PROJECT, value: "k8s-kafka-774d" }
         - { name: BQ_PROJECT, value: "k8s-kafka-774d" }
