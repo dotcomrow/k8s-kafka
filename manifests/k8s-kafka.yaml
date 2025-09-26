@@ -95,54 +95,64 @@ spec:
     spec:
       restartPolicy: Never
       serviceAccountName: kafka-clusterid-gen
-      volumes: [{ name: work, emptyDir: {} }]
+      volumes:
+        - name: work
+          emptyDir: {}
+      initContainers:
+        - name: gen
+          image: busybox:1.36.1
+          command: ["/bin/sh","-c"]
+          args:
+            - |
+              set -eu
+              mkdir -p /work
+              CID="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || date +%s%N)"
+              echo "Generated cluster.id: ${CID}"
+              printf '%s' "${CID}" > /work/cluster.id
+              ls -l /work/cluster.id
+          volumeMounts: [{ name: work, mountPath: /work }]
       containers:
-      - name: gen
-        image: apache/kafka:3.9.0
-        command: ["/bin/bash","-lc"]
-        args: 
-        - |
-          set -Eeuo pipefail
-          PS4='+ [GEN] $(date -Is) '
-          set -x
-          CID="$("/opt/kafka/bin/kafka-storage.sh" random-uuid)"
-          echo "Generated cluster.id"
-          printf '%s' "${CID}" > /work/cluster.id
-          sleep 3
-        volumeMounts: [{ name: work, mountPath: /work }]
-      - name: apply
-        image: curlimages/curl:8.8.0
-        command: ["/bin/sh","-c"]
-        args: 
-        - |
-            set -eu
-            PS4='+ [APPLY] $(date -Is) '
-            set -x
-            trap 'echo "[APPLY] failed; recent state:"; ls -l /work || true; cat /tmp/ex.json 2>/dev/null || true' ERR
+        - name: apply
+          image: curlimages/curl:8.8.0
+          command: ["/bin/sh","-c"]
+          args:
+            - |
+              set -eu
+              PS4='+ [APPLY] $(date -Is) '
+              set -x
+              NAMESPACE="kafka"; SECRET_NAME="kafka-cluster-id"
+              API="https://kubernetes.default.svc"
+              TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+              CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 
-            NAMESPACE="kafka"; SECRET_NAME="kafka-cluster-id"
-            API="https://kubernetes.default.svc"
-            TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
-            CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+              # initContainer guarantees this exists, but keep a fallback just in case
+              if [ ! -s /work/cluster.id ]; then
+                CID="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || date +%s%N)"
+                printf '%s' "$CID" > /work/cluster.id
+              fi
+              CID="$(cat /work/cluster.id)"
 
-            i=0; while [ ! -s /work/cluster.id ]; do
-              i=$((i+1)); [ $i -gt 120 ] && echo "timeout waiting for /work/cluster.id" && exit 1; sleep 1
-            done
-            CID="$(cat /work/cluster.id)"
+              code="$(curl -s -o /tmp/ex.json -w '%{http_code}' --cacert "$CACERT" \
+                     -H "Authorization: Bearer $TOKEN" \
+                     "$API/api/v1/namespaces/$NAMESPACE/secrets/$SECRET_NAME" || true)"
 
-            code="$(curl -s -o /tmp/ex.json -w '%{http_code}' --cacert "$CACERT" \
-                   -H "Authorization: Bearer $TOKEN" \
-                   "$API/api/v1/namespaces/$NAMESPACE/secrets/$SECRET_NAME")"
-            [ "$code" = "200" ] && { echo "Secret exists; nothing to do."; exit 0; }
+              if [ "$code" = "200" ]; then
+                echo "Secret exists; nothing to do."
+                exit 0
+              fi
 
-            b64="$(printf '%s' "$CID" | base64 | tr -d '\n')"
-            printf '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"%s","namespace":"%s"},"type":"Opaque","data":{"CLUSTER_ID":"%s"}}' \
-              "$SECRET_NAME" "$NAMESPACE" "$b64" > /tmp/newsecret.json
+              b64="$(printf '%s' "$CID" | base64 | tr -d '\n')"
+              printf '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"%s","namespace":"%s"},"type":"Opaque","data":{"CLUSTER_ID":"%s"}}' \
+                "$SECRET_NAME" "$NAMESPACE" "$b64" > /tmp/newsecret.json
 
-            curl -sS -D /tmp/h.txt -o /tmp/r.txt -X POST --cacert "$CACERT" -H "Authorization: Bearer $TOKEN" \
-              -H "Content-Type: application/json" --data-binary @/tmp/newsecret.json \
-              "$API/api/v1/namespaces/$NAMESPACE/secrets" && echo "Created secret."
-            echo "=== response headers ==="; cat /tmp/h.txt; echo "=== body ==="; cat /tmp/r.txt
+              curl -sS -D /tmp/h.txt -o /tmp/r.txt -X POST --cacert "$CACERT" \
+                -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+                --data-binary @/tmp/newsecret.json \
+                "$API/api/v1/namespaces/$NAMESPACE/secrets" && echo "Created secret."
+
+              echo "=== response headers ==="; cat /tmp/h.txt
+              echo "=== body ==="; cat /tmp/r.txt
+          volumeMounts: [{ name: work, mountPath: /work }]
 
 # ============================================================================
 # Vault CONFIG job — namespace: vault
