@@ -651,9 +651,9 @@ spec:
         - { name: KAFKA_PROCESS_ROLES, value: "broker,controller" }
         - { name: KAFKA_CONTROLLER_LISTENER_NAMES, value: "CONTROLLER" }
         - { name: KAFKA_LISTENERS, value: "PLAINTEXT://:9092,CONTROLLER://:9093" }
-        - { name: KAFKA_ADVERTISED_LISTENERS, value: "PLAINTEXT://kafka.kafka.svc.internal.lan:9092" }
+        - { name: KAFKA_ADVERTISED_LISTENERS, value: "PLAINTEXT://kafka.kafka.svc.cluster.local:9092" }
         - { name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP, value: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT" }
-        - { name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "1@kafka-0.kafka-hs.kafka.svc.internal.lan:9093" }
+        - { name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "1@kafka-0.kafka-hs.kafka.svc.cluster.local:9093" }
         - { name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "1" }
         - { name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "1" }
         - { name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR, value: "1" }
@@ -789,25 +789,25 @@ spec:
 
         - { name: CONNECT_REST_HOST_NAME, value: "0.0.0.0" }
         - { name: CONNECT_REST_PORT, value: "8083" }
-        - { name: CONNECT_REST_ADVERTISED_HOST_NAME, value: "kafka-connect.kafka.svc.internal.lan" }
+        - { name: CONNECT_REST_ADVERTISED_HOST_NAME, value: "kafka-connect.kafka.svc.cluster.local" }
         - { name: CONNECT_REST_ADVERTISED_PORT, value: "8083" }
-        - { name: CONNECT_REST_REQUEST_TIMEOUT_MS, value: "120000" }  # 120s, avoids 500 timeouts on slow
+        - { name: CONNECT_REST_REQUEST_TIMEOUT_MS, value: "120000" }
 
         - { name: KAFKA_LOG4J_OPTS, value: "-Dlog4j.configuration=file:/kafka/etc/log4j.properties" }
 
-        - { name: BOOTSTRAP_SERVERS, value: "kafka.kafka.svc.internal.lan:9092" }
-        - { name: GROUP_ID, value: "connect-cluster" }
-        - { name: CONFIG_STORAGE_TOPIC, value: "_connect-configs" }
-        - { name: OFFSET_STORAGE_TOPIC,  value: "_connect-offsets" }
-        - { name: STATUS_STORAGE_TOPIC,  value: "_connect-status" }
-        - { name: CONFIG_STORAGE_REPLICATION_FACTOR, value: "1" }
-        - { name: OFFSET_STORAGE_REPLICATION_FACTOR,  value: "1" }
-        - { name: STATUS_STORAGE_REPLICATION_FACTOR,  value: "1" }
+        - { name: CONNECT_BOOTSTRAP_SERVERS, value: "kafka.kafka.svc.cluster.local:9092" }
+        - { name: CONNECT_GROUP_ID, value: "connect-cluster" }
+        - { name: CONNECT_CONFIG_STORAGE_TOPIC, value: "_connect-configs" }
+        - { name: CONNECT_OFFSET_STORAGE_TOPIC,  value: "_connect-offsets" }
+        - { name: CONNECT_STATUS_STORAGE_TOPIC,  value: "_connect-status" }
+        - { name: CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR, value: "1" }
+        - { name: CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR,  value: "1" }
+        - { name: CONNECT_STATUS_STORAGE_REPLICATION_FACTOR,  value: "1" }
 
-        - { name: KEY_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
-        - { name: VALUE_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
-        - { name: KEY_CONVERTER_SCHEMAS_ENABLE, value: "true" }
-        - { name: VALUE_CONVERTER_SCHEMAS_ENABLE, value: "true" }
+        - { name: CONNECT_KEY_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
+        - { name: CONNECT_VALUE_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
+        - { name: CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE, value: "true" }
+        - { name: CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE, value: "true" }
 
         - { name: CONNECT_PLUGIN_PATH, value: "/plugins,/plugins/share/java,/plugins/share/confluent-hub-components,/plugins/yugabytedb" }
 
@@ -868,7 +868,7 @@ spec:
         ports: [{ containerPort: 8080, name: http }]
         env:
         - { name: KAFKA_CLUSTERS_0_NAME, value: "local" }
-        - { name: KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS, value: "kafka.kafka.svc.internal.lan:9092" }
+        - { name: KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS, value: "kafka.kafka.svc.cluster.local:9092" }
         readinessProbe:
           httpGet: { path: /, port: http }
           initialDelaySeconds: 10
@@ -1011,7 +1011,7 @@ spec:
         volumeMounts:
         - { name: state, mountPath: /state }
         env:
-        - { name: CONNECT_URL, value: "http://kafka-connect.kafka.svc.internal.lan:8083" }
+        - { name: CONNECT_URL, value: "http://kafka-connect.kafka.svc.cluster.local:8083" }
         - { name: SERVER_PREFIX, value: "yb" }
         - { name: SCAN_INTERVAL, value: "30" }
         command: ["/bin/bash","-lc"]
@@ -1021,7 +1021,7 @@ spec:
           PS4='+ [WATCHER] $(date -Is) '
           set -x
 
-          esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\r\n'; }
+          esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e ':a;N;$!ba;s/[\r\n]//g'; }
           mkresp() { mktemp /tmp/resp.XXXXXX.txt; }
           mktmp() { mktemp /tmp/tmp.XXXXXX.json; }
 
@@ -1043,9 +1043,9 @@ spec:
             . "$f" 2>/dev/null || true
           done
           export PGPASSWORD
-          PGHOST="${PGHOST:-yb-tserver-service.yugabyte.svc.cluster.local}"
-          PGPORT="${PGPORT:-5433}"
-          PGUSER="${PGUSER:-vaultadmin}"
+          PGHOST="$(printf '%s' "$PGHOST" | tr -d '\r\n')"
+          PGPORT="$(printf '%s' "$PGPORT" | tr -d '\r\n')"
+          PGUSER="$(printf '%s' "$PGUSER" | tr -d '\r\n')"
           echo "[WATCHER] PGHOST=$PGHOST PGPORT=$PGPORT PGUSER=$PGUSER PGDATABASE=${PGDATABASE:-<ignored>}"
 
           until curl -fsS "${CONNECT_URL}/connectors" >/dev/null 2>&1; do echo "[WATCHER] waiting for connect REST…"; sleep 3; done
@@ -1158,7 +1158,7 @@ spec:
 
                 ensure_signal_table "$DB"
 
-                # ----- JDBC SOURCE CONNECTOR CONFIG -----
+                # ----- SOURCE CONNECTOR CONFIG -----
                 SRC_PUT="$(mktmp)"
                 {
                   echo '{'
