@@ -8,7 +8,6 @@ metadata:
   labels: { app: bq-yb-bootstrap }
   annotations:
     linkerd.io/inject: "disabled"
-    scheduler.alpha.kubernetes.io/node-selector: "dedicated=ctrl-node"
     field.cattle.io/projectId: "local:infrastructure"
 ---
 apiVersion: v1
@@ -90,7 +89,10 @@ metadata:
 spec:
   backoffLimit: 0
   template:
+    metadata:
+      annotations: { linkerd.io/inject: "disabled" }
     spec:
+      nodeSelector: { dedicated: ctrl-node }
       restartPolicy: Never
       serviceAccountName: kafka-clusterid-gen
       volumes: [{ name: work, emptyDir: {} }]
@@ -104,7 +106,7 @@ spec:
             PS4='+ [GEN] $(date -Is) '
             set -x
             CID="$("/opt/kafka/bin/kafka-storage.sh" random-uuid)"
-            echo "Generated cluster.id: ${CID}"
+            echo "Generated cluster.id"
             printf '%s' "${CID}" > /work/cluster.id
             sleep 3
         volumeMounts: [{ name: work, mountPath: /work }]
@@ -113,7 +115,7 @@ spec:
         command: ["/bin/sh","-c"]
         args:
           - |
-            set -Eeuo pipefail
+            set -eu
             PS4='+ [APPLY] $(date -Is) '
             set -x
             trap 'echo "[APPLY] failed; recent state:"; ls -l /work || true; cat /tmp/ex.json 2>/dev/null || true' ERR
@@ -158,6 +160,7 @@ spec:
   template:
     metadata: { annotations: { linkerd.io/inject: "disabled" } }
     spec:
+      nodeSelector: { dedicated: ctrl-node }
       restartPolicy: Never
       serviceAccountName: default
       volumes: [{ name: root-token, secret: { secretName: vault-root-token } }]
@@ -182,7 +185,7 @@ spec:
         command: ["/bin/sh","-c"]
         args:
           - |
-            set -Eeuo pipefail
+            set -eu
             PS4='+ [VAULTCFG] $(date -Is) '
             set -x
             trap 'echo "[VAULTCFG] failed; dumping debug"; env | sort; exit 1' ERR
@@ -199,7 +202,7 @@ spec:
             : "${BQ_BOOTSTRAP_PROJECT:=}"; : "${BQ_BOOTSTRAP_BUCKET:=}"; : "${BQ_BOOTSTRAP_LOCATION:=}"
             : "${BQ_PROJECT:=}"; : "${BQ_DEFAULT_DATASET:=}"
 
-            echo "→ Pulling GCP SA JSON from Vault (masked in logs)…"
+            echo "→ Pulling GCP SA JSON from Vault (masked)…"
             BQ_SA_JSON="$(vault kv get -field=value secret/k8s-kafka-gcp-service-account-json 2>/dev/null || true)"
             [ -n "$BQ_SA_JSON" ] && printf '%s' "$BQ_SA_JSON" > /tmp/sa.json || true
 
@@ -273,11 +276,12 @@ spec:
           PGPASSWORD={{ .Data.data.value }}
           {{- end -}}
     spec:
+      nodeSelector: { dedicated: ctrl-node }
       restartPolicy: Never
       serviceAccountName: bq-yb-bootstrap
       containers:
       - name: initdb
-        image: yugabytedb/yugabyte:latest
+        image: yugabytedb/yugabyte:2.20.2.0-b1
         command: ["/bin/bash","-lc"]
         args:
           - |
@@ -373,13 +377,14 @@ spec:
           PGPASSWORD={{ .Data.data.value }}
           {{- end -}}
     spec:
+      nodeSelector: { dedicated: ctrl-node }
       serviceAccountName: bq-yb-bootstrap
       restartPolicy: Never
       terminationGracePeriodSeconds: 30
       volumes: [{ name: work, emptyDir: {} }]
       containers:
       - name: planner
-        image: yugabytedb/yugabyte:latest
+        image: yugabytedb/yugabyte:2.20.2.0-b1
         volumeMounts: [{ name: work, mountPath: /work }]
         command: ["/bin/bash","-lc"]
         args:
@@ -446,7 +451,7 @@ spec:
 
             [ -s /work/plan.tsv ] || echo "NO_TABLES" > /work/NO_TABLES
       - name: importer
-        image: yugabytedb/yugabyte:latest
+        image: yugabytedb/yugabyte:2.20.2.0-b1
         volumeMounts: [{ name: work, mountPath: /work }]
         command: ["/bin/bash","-lc"]
         args:
@@ -502,7 +507,7 @@ spec:
                 sleep 2
               done
               if [ -z "${COLS}" ] || [ "${COLS}" = "null" ]; then COLS="$(get_columns "${SCH}" "${TBL}")"; fi
-              echo "[IMPORTER] Loading ${SCH}.${TBL} with columns: ${COLS}"
+              echo "[IMPORTER] Loading ${SCH}.${TBL}"
 
               cat ${INDIR}/*.csv \
                 | /home/yugabyte/bin/ysqlsh "${PGURL}" -v ON_ERROR_STOP=1 -q \
@@ -575,7 +580,7 @@ spec:
         command: ["/bin/sh","-lc"]
         args:
           - |
-            set -Eeuo pipefail
+            set -eu
             PS4='+ [FLAGGER] $(date -Is) '
             set -x
             API="https://kubernetes.default.svc"
@@ -639,6 +644,9 @@ spec:
       labels: { app: kafka }
       annotations: { linkerd.io/inject: "disabled" }
     spec:
+      nodeSelector: { dedicated: ctrl-node }
+      securityContext:
+        fsGroup: 1000
       volumes: [{ name: kafka-logs, emptyDir: {} }]
       initContainers:
       - name: format-storage
@@ -686,6 +694,13 @@ spec:
         ports:
         - { containerPort: 9092 }
         - { containerPort: 9093 }
+        readinessProbe:
+          tcpSocket: { port: 9092 }
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        resources:
+          requests: { cpu: "250m", memory: "512Mi" }
+          limits: { cpu: "1500m", memory: "2Gi" }
         volumeMounts: [{ name: kafka-logs, mountPath: /tmp/kraft-combined-logs }]
 
 # ============================================================================
@@ -728,8 +743,11 @@ spec:
           {{- end -}}
         vault.hashicorp.com/agent-inject-permissions-gcp-key.json: "0644"
     spec:
+      nodeSelector: { dedicated: ctrl-node }
       serviceAccountName: bq-yb-bootstrap
       terminationGracePeriodSeconds: 30
+      securityContext:
+        fsGroup: 1000
       volumes:
       - { name: plugins, emptyDir: {} }
       initContainers:
@@ -742,8 +760,6 @@ spec:
             PS4='+ [INSTALL-BQ] $(date -Is) '
             set -x
             mkdir -p /plugins
-            apt-get update >/dev/null 2>&1 || true
-            apt-get install -y unzip curl >/dev/null 2>&1 || true
             confluent-hub install --no-prompt --component-dir /plugins \
               wepay/kafka-connect-bigquery:2.5.7
         volumeMounts: [{ name: plugins, mountPath: /plugins }]
@@ -753,13 +769,13 @@ spec:
         command: ["/bin/sh","-lc"]
         args:
           - |
-            set -Eeuo pipefail
+            set -eu
             PS4='+ [FETCH-YB] $(date -Is) '
             set -x
             mkdir -p /out/yugabytedb
             for SRC in /plugins /kafka/connect /kafka/connectors /kafka/connect/yugabytedb /opt/kafka/connect /opt/kafka/plugins /debezium-connector /kafka; do
               if [ -d "$SRC" ] && [ -n "$(ls -A "$SRC" 2>/dev/null || true)" ]; then
-                echo "Found connector payload at $SRC"
+                echo "Found YB connector payload at $SRC"
                 cp -R "$SRC"/* /out/yugabytedb/
                 find /out/yugabytedb -type f \( -iname '*cloudevents*.jar' -o -iname 'debezium-converter-cloud-events-*.jar' \) -print -delete || true
                 exit 0
@@ -797,7 +813,7 @@ spec:
         - { name: KEY_CONVERTER_SCHEMAS_ENABLE, value: "true" }
         - { name: VALUE_CONVERTER_SCHEMAS_ENABLE, value: "true" }
 
-        - { name: CONNECT_PLUGIN_PATH, value: "/plugins/wepay-kafka-connect-bigquery,/plugins/yugabytedb" }
+        - { name: CONNECT_PLUGIN_PATH, value: "/plugins,/plugins/share/java,/plugins/share/confluent-hub-components,/plugins/yugabytedb" }
 
         - { name: CONNECT_LOG4J_ROOT_LOGLEVEL, value: "DEBUG" }
         - { name: CONNECT_LOG4J_LOGGERS, value: "org.apache.kafka.connect.runtime.rest=WARN,io.debezium=DEBUG,io.debezium.connector.yugabytedb=DEBUG,com.wepay.kafka.connect.bigquery=DEBUG" }
@@ -810,9 +826,14 @@ spec:
           httpGet: { path: /connectors, port: 8083 }
           initialDelaySeconds: 40
           periodSeconds: 5
+        livenessProbe:
+          httpGet: { path: /, port: 8083 }
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          failureThreshold: 6
         resources:
-          requests: { cpu: "250m", memory: "512Mi" }
-          limits: { cpu: "1000m", memory: "1Gi" }
+          requests: { cpu: "250m", memory: "768Mi" }
+          limits: { cpu: "1000m", memory: "1.5Gi" }
         volumeMounts: [{ name: plugins, mountPath: /plugins }]
 
 # ============================================================================
@@ -843,6 +864,7 @@ spec:
       labels: { app: kafka-ui }
       annotations: { linkerd.io/inject: "disabled" }
     spec:
+      nodeSelector: { dedicated: ctrl-node }
       containers:
       - name: ui
         image: provectuslabs/kafka-ui:v0.7.2
@@ -850,6 +872,13 @@ spec:
         env:
         - { name: KAFKA_CLUSTERS_0_NAME, value: "local" }
         - { name: KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS, value: "kafka.kafka.svc.cluster.local:9092" }
+        readinessProbe:
+          httpGet: { path: /, port: http }
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        resources:
+          requests: { cpu: "100m", memory: "128Mi" }
+          limits: { cpu: "500m", memory: "512Mi" }
 
 ---
 apiVersion: v1
@@ -887,6 +916,7 @@ spec:
       labels: { app: oauth2-proxy }
       annotations: { linkerd.io/inject: "disabled" }
     spec:
+      nodeSelector: { dedicated: ctrl-node }
       containers:
       - name: proxy
         image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
@@ -913,6 +943,13 @@ spec:
           valueFrom: { secretKeyRef: { name: oauth2-proxy-secrets, key: client_secret } }
         - name: OAUTH2_PROXY_COOKIE_SECRET
           valueFrom: { secretKeyRef: { name: oauth2-proxy-secrets, key: cookie_secret } }
+        readinessProbe:
+          httpGet: { path: /ping, port: http }
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          requests: { cpu: "50m", memory: "64Mi" }
+          limits: { cpu: "300m", memory: "256Mi" }
 
 # ============================================================================
 # Continuous Annotation Watcher (wave 50)
@@ -968,13 +1005,16 @@ spec:
           {{- end -}}
         vault.hashicorp.com/agent-inject-permissions-gcp-key.json: "0644"
     spec:
+      nodeSelector: { dedicated: ctrl-node }
       serviceAccountName: bq-yb-bootstrap
+      securityContext:
+        fsGroup: 1000
       volumes:
       - name: state
         emptyDir: {}
       containers:
       - name: watcher
-        image: yugabytedb/yugabyte:latest
+        image: yugabytedb/yugabyte:2.20.2.0-b1
         volumeMounts:
         - { name: state, mountPath: /state }
         env:
@@ -999,21 +1039,28 @@ spec:
             PGUSER="${PGUSER:-vaultadmin}"
             echo "[WATCHER] PGHOST=$PGHOST PGPORT=$PGPORT PGUSER=$PGUSER PGDATABASE=${PGDATABASE:-<ignored>}"
 
-            CURL_OPTS=(--connect-timeout 5 --max-time 25 -sS)
+            # Longer REST timeouts; retries for heavier operations (validation/creates)
+            CURL_OPTS=(--connect-timeout 5 --max-time 120 -sS)
+            RETRIES=3
+            SLEEP_BETWEEN=5
 
             esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
             api_get()   { local u="$1"; code=$(curl "${CURL_OPTS[@]}" -D /tmp/h.txt -o /tmp/resp.txt -w '%{http_code}' "$u" || true); echo "GET $u -> $code"; tail -c 2000 /tmp/resp.txt; }
-            api_put()   { local u="$1" f="$2"; code=$(curl "${CURL_OPTS[@]}" -D /tmp/h.txt -o /tmp/resp.txt -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @"$f" -X PUT "$u" || true); echo "PUT $u -> $code"; tail -c 2000 /tmp/resp.txt; }
-            api_post()  { local u="$1" f="$2"; code=$(curl "${CURL_OPTS[@]}" -D /tmp/h.txt -o /tmp/resp.txt -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @"$f" -X POST "$u" || true); echo "POST $u -> $code"; tail -c 2000 /tmp/resp.txt; }
+            api_put()   { local u="$1" f="$2" i; for i in $(seq 1 $RETRIES); do code=$(curl "${CURL_OPTS[@]}" -D /tmp/h.txt -o /tmp/resp.txt -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @"$f" -X PUT "$u" || true); [ "$code" != "000" ] && break; sleep "$SLEEP_BETWEEN"; done; echo "PUT $u -> $code"; tail -c 2000 /tmp/resp.txt; }
+            api_post()  { local u="$1" f="$2" i; for i in $(seq 1 $RETRIES); do code=$(curl "${CURL_OPTS[@]}" -D /tmp/h.txt -o /tmp/resp.txt -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @"$f" -X POST "$u" || true); [ "$code" != "000" ] && break; sleep "$SLEEP_BETWEEN"; done; echo "POST $u -> $code"; tail -c 2000 /tmp/resp.txt; }
             api_delete(){ local u="$1"; code=$(curl "${CURL_OPTS[@]}" -D /tmp/h.txt -o /tmp/resp.txt -w '%{http_code}' -X DELETE "$u" || true); echo "DELETE $u -> $code"; tail -c 2000 /tmp/resp.txt; }
 
             validate_config() {
               local plugin="$1" file="$2"
               local url="${CONNECT_URL}/connector-plugins/${plugin}/config/validate"
-              local code
-              code=$(curl "${CURL_OPTS[@]}" -D /tmp/h.txt -o /tmp/validate.txt -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @"$file" -X PUT "$url" || true)
+              local code i
+              for i in $(seq 1 $RETRIES); do
+                code=$(curl "${CURL_OPTS[@]}" -D /tmp/h.txt -o /tmp/validate.txt -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @"$file" -X PUT "$url" || true)
+                [ "$code" != "000" ] && break
+                sleep "$SLEEP_BETWEEN"
+              done
               echo "VALIDATE ${plugin} -> $code"
-              tail -c 2000 /tmp/validate.txt
+              tail -c 2000 /tmp/validate.txt 2>/dev/null || true
             }
 
             until curl -fsS "${CONNECT_URL}/connectors" >/dev/null 2>&1; do echo "[WATCHER] waiting for connect REST…"; sleep 3; done
@@ -1178,7 +1225,7 @@ spec:
                   { echo '{ "name":"bq-sink-'"${DB}"'", "config": '; cat "/tmp/bq-sink-${DB}.put.json"; echo ' }'; } > "/tmp/bq-sink-${DB}.post.json"
 
                   echo "--- validating sink config (bq-sink-${DB}) ---"
-                  validate_config "com.wepay.kafka.connect.bigquery.BigQuerySinkConnector" "/tmp/bq-sink-${DB}.put.json" || true
+                  validate_config "com.wepay.kafka.connect.bigQuery.BigQuerySinkConnector" "/tmp/bq-sink-${DB}.put.json" || true
 
                   api_put  "${CONNECT_URL}/connectors/bq-sink-${DB}/config" "/tmp/bq-sink-${DB}.put.json" || \
                   api_post "${CONNECT_URL}/connectors"                      "/tmp/bq-sink-${DB}.post.json"
@@ -1209,3 +1256,10 @@ spec:
 
               sleep "${SCAN_INTERVAL}"
             done
+        resources:
+          requests: { cpu: "200m", memory: "256Mi" }
+          limits: { cpu: "1000m", memory: "1Gi" }
+        readinessProbe:
+          exec: { command: ["/bin/sh","-lc","test -s /vault/secrets/yb.env -a -s /vault/secrets/pgpass.env || true"] }
+          initialDelaySeconds: 10
+          periodSeconds: 10
