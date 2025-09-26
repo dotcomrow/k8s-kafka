@@ -463,7 +463,12 @@ spec:
             set -x
             trap 'echo "[IMPORTER] FAIL; listing /work"; ls -R /work || true; exit 1' ERR
 
-            if [ -f /work/NO_TABLES ]; then echo "[IMPORTER] NO_TABLES flag set; exiting."; touch /work/DONE; exit 0; fi
+            # Exit early if the planner already decided there's nothing to do
+            if [ -f /work/NO_TABLES ]; then
+              echo "[IMPORTER] NO_TABLES flag set; exiting."
+              touch /work/DONE
+              exit 0
+            fi
 
             . /vault/secrets/pg.env
             . /vault/secrets/pg-admin.env
@@ -474,8 +479,17 @@ spec:
             : "${PGUSER:=vaultadmin}"
             PGURL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}?sslmode=disable"
 
-            i=0; while [ ! -s /work/plan.tsv ]; do
-              i=$((i+1)); [ $i -gt 300 ] && echo "Timeout waiting for plan.tsv" && exit 1; sleep 2
+            # Wait for the plan, but also detect NO_TABLES if it appears later
+            i=0
+            while [ ! -s /work/plan.tsv ]; do
+              if [ -f /work/NO_TABLES ]; then
+                echo "[IMPORTER] NO_TABLES flag appeared while waiting; exiting."
+                touch /work/DONE
+                exit 0
+              fi
+              i=$((i+1))
+              [ $i -gt 300 ] && echo "Timeout waiting for plan.tsv" && exit 1
+              sleep 2
             done
 
             get_columns() {
@@ -520,7 +534,10 @@ spec:
             set -x
             trap 'echo "[CLOUDSDK] FAIL; list /work"; ls -R /work || true; exit 1' ERR
 
-            if [ -f /work/NO_TABLES ]; then echo "[CLOUDSDK] NO_TABLES flag; skipping."; exit 0; fi
+            if [ -f /work/NO_TABLES ]; then
+              echo "[CLOUDSDK] NO_TABLES flag; skipping."
+              exit 0
+            fi
 
             for f in /vault/secrets/bootstrap.env /vault/secrets/gcp-key.json; do
               j=0; while [ ! -s "$f" ]; do
@@ -533,13 +550,26 @@ spec:
             : "${LOCATION:=}"
             if [ -n "${LOCATION}" ]; then BQ_LOC_FLAG=(--location="${LOCATION}"); else BQ_LOC_FLAG=(); fi
 
-            i=0; while [ ! -s /work/plan.tsv ]; do
-              i=$((i+1)); [ $i -gt 300 ] && echo "Timeout waiting for plan.tsv" && exit 1; sleep 2
+            # Wait for the plan, but also detect NO_TABLES if it appears later
+            i=0
+            while [ ! -s /work/plan.tsv ]; do
+              if [ -f /work/NO_TABLES ]; then
+                echo "[CLOUDSDK] NO_TABLES flag appeared while waiting; skipping."
+                exit 0
+              fi
+              i=$((i+1)); [ $i -gt 300 ] && echo "Timeout waiting for plan.tsv" && exit 1
+              sleep 2
             done
 
             while IFS='|' read -r SCH TBL BQMAP PREFIX FMT HDR COLS; do
               [ -z "${SCH}" ] && continue
               : "${PREFIX:=${TBL}}"; : "${FMT:=CSV}"; : "${HDR:=true}"
+
+              if [ -z "${BQMAP}" ]; then
+                echo "[CLOUDSDK] Skipping ${SCH}.${TBL}: empty BQ mapping"
+                continue
+              fi
+
               echo "[CLOUDSDK] Exporting ${BQMAP} → gs://${BUCKET}/bootstrap/${PREFIX}/${PREFIX}-*.csv"
               DEST_URI="gs://${BUCKET}/bootstrap/${PREFIX}/${PREFIX}-*.csv"
               bq "${BQ_LOC_FLAG[@]}" --project_id="${PROJECT}" extract \
