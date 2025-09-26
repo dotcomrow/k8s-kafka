@@ -615,77 +615,73 @@ spec:
     spec:
       securityContext:
         fsGroup: 1000
-      volumes:
-        - name: kafka-logs
-          emptyDir: {}
+      volumes: [{ name: kafka-logs, emptyDir: {} }]
       initContainers:
-        - name: format-storage
-          image: apache/kafka:3.9.0
-          imagePullPolicy: IfNotPresent
-          env:
-            - name: CLUSTER_ID
-              valueFrom:
-                secretKeyRef:
-                  name: kafka-cluster-id
-                  key: CLUSTER_ID
-          command: ["/bin/bash","-lc"]
-          args:
-            - |
-              set -Eeuo pipefail
-              PS4='+ [KAFKA-FMT] $(date -Is) '
-              set -x
-              META="/tmp/kraft-combined-logs/meta.properties"
-              if [ -f "$META" ]; then
-                echo "meta.properties present; not reformatting."; grep -E '^cluster\.id=' "$META" || true
-              else
-                /opt/kafka/bin/kafka-storage.sh format \
-                  -t "${CLUSTER_ID}" -c /opt/kafka/config/kraft/server.properties --ignore-formatted
-              fi
-          volumeMounts:
-            - { name: kafka-logs, mountPath: /tmp/kraft-combined-logs }
+      - name: format-storage
+        image: apache/kafka:3.9.0
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: CLUSTER_ID
+          valueFrom: { secretKeyRef: { name: kafka-cluster-id, key: CLUSTER_ID } }
+        command: ["/bin/bash","-lc"]
+        args: 
+        - |
+          set -Eeuo pipefail
+          PS4='+ [KAFKA-FMT] $(date -Is) '
+          set -x
+          META="/tmp/kraft-combined-logs/meta.properties"
+          if [ -f "$META" ]; then
+            echo "meta.properties present; not reformatting."; grep -E '^cluster\.id=' "$META" || true
+          else
+            /opt/kafka/bin/kafka-storage.sh format \
+              -t "${CLUSTER_ID}" -c /opt/kafka/config/kraft/server.properties --ignore-formatted
+          fi
+        volumeMounts: [{ name: kafka-logs, mountPath: /tmp/kraft-combined-logs }]
       containers:
-        - name: broker
-          image: apache/kafka:3.9.0
-          imagePullPolicy: IfNotPresent
-          env:
-            # cluster id for storage metadata
-            - name: CLUSTER_ID
-              valueFrom:
-                secretKeyRef:
-                  name: kafka-cluster-id
-                  key: CLUSTER_ID
+      - name: broker
+        image: apache/kafka:3.9.0
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: CLUSTER_ID
+          valueFrom:
+            secretKeyRef:
+              name: kafka-cluster-id
+              key: CLUSTER_ID
 
-            # >>> USE KAFKA_CFG_* KEYS (apache/kafka image expects these) <<<
-            - { name: KAFKA_CFG_NODE_ID, value: "1" }
-            - { name: KAFKA_CFG_PROCESS_ROLES, value: "broker,controller" }
-            - { name: KAFKA_CFG_CONTROLLER_LISTENER_NAMES, value: "CONTROLLER" }
-            - { name: KAFKA_CFG_LISTENERS, value: "PLAINTEXT://:9092,CONTROLLER://:9093" }
-            - { name: KAFKA_CFG_ADVERTISED_LISTENERS, value: "PLAINTEXT://kafka.kafka.svc.internal.lan:9092" }
-            - { name: KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP, value: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT" }
-            - { name: KAFKA_CFG_CONTROLLER_QUORUM_VOTERS, value: "1@kafka-0.kafka-hs.kafka.svc.internal.lan:9093" }
+        # Enable KRaft in the official apache/kafka image
+        - { name: KAFKA_ENABLE_KRAFT, value: "true" }
 
-            - { name: KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "1" }
-            - { name: KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "1" }
-            - { name: KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR, value: "1" }
-            - { name: KAFKA_CFG_GROUP_INITIAL_REBALANCE_DELAY_MS, value: "0" }
-            - { name: KAFKA_CFG_LOG_DIRS, value: "/tmp/kraft-combined-logs" }
+        # KRaft config (apache image reads KAFKA_CFG_* => server.properties keys)
+        - { name: KAFKA_CFG_NODE_ID, value: "1" }
+        - { name: KAFKA_CFG_PROCESS_ROLES, value: "broker,controller" }
+        - { name: KAFKA_CFG_CONTROLLER_LISTENER_NAMES, value: "CONTROLLER" }
+        - { name: KAFKA_CFG_LISTENERS, value: "PLAINTEXT://:9092,CONTROLLER://:9093" }
+        - { name: KAFKA_CFG_ADVERTISED_LISTENERS, value: "PLAINTEXT://kafka.kafka.svc.internal.lan:9092" }
+        - { name: KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP, value: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT" }
+        - { name: KAFKA_CFG_INTER_BROKER_LISTENER_NAME, value: "PLAINTEXT" }
+        - { name: KAFKA_CFG_CONTROLLER_QUORUM_VOTERS, value: "1@kafka-0.kafka-hs.kafka.svc.internal.lan:9093" }
 
-            # logging & JVM
-            - { name: KAFKA_LOG4J_OPTS, value: "-Dlog4j.configuration=file:/opt/kafka/config/log4j.properties" }
-            - { name: KAFKA_HEAP_OPTS, value: "-Xms256m -Xmx512m" }
+        - { name: KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "1" }
+        - { name: KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "1" }
+        - { name: KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR, value: "1" }
+        - { name: KAFKA_CFG_GROUP_INITIAL_REBALANCE_DELAY_MS, value: "0" }
+        - { name: KAFKA_CFG_LOG_DIRS, value: "/tmp/kraft-combined-logs" }
 
-          ports:
-            - { containerPort: 9092 }
-            - { containerPort: 9093 }
-          readinessProbe:
-            tcpSocket: { port: 9092 }
-            initialDelaySeconds: 10
-            periodSeconds: 5
-          resources:
-            requests: { cpu: "250m", memory: "512Mi" }
-            limits: { cpu: "1500m", memory: "2Gi" }
-          volumeMounts:
-            - { name: kafka-logs, mountPath: /tmp/kraft-combined-logs }
+        # logging & JVM
+        - { name: KAFKA_LOG4J_OPTS, value: "-Dlog4j.configuration=file:/opt/kafka/config/log4j.properties" }
+        - { name: KAFKA_HEAP_OPTS, value: "-Xms256m -Xmx512m" }
+
+        ports:
+        - { containerPort: 9092 }
+        - { containerPort: 9093 }
+        readinessProbe:
+          tcpSocket: { port: 9092 }
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        resources:
+          requests: { cpu: "250m", memory: "512Mi" }
+          limits: { cpu: "1500m", memory: "2Gi" }
+        volumeMounts: [{ name: kafka-logs, mountPath: /tmp/kraft-combined-logs }]
 
 # ============================================================================
 # Kafka Connect (wave 4) — Vault-injected GCP keyfile
@@ -805,25 +801,25 @@ spec:
 
         - { name: CONNECT_REST_HOST_NAME, value: "0.0.0.0" }
         - { name: CONNECT_REST_PORT, value: "8083" }
-        - { name: CONNECT_REST_ADVERTISED_HOST_NAME, value: "kafka-connect.kafka.svc.cluster.local" }
+        - { name: CONNECT_REST_ADVERTISED_HOST_NAME, value: "kafka-connect.kafka.svc.internal.lan" }
         - { name: CONNECT_REST_ADVERTISED_PORT, value: "8083" }
         - { name: CONNECT_REST_REQUEST_TIMEOUT_MS, value: "120000" }
 
         - { name: KAFKA_LOG4J_OPTS, value: "-Dlog4j.configuration=file:/kafka/etc/log4j.properties" }
 
-        - { name: CONNECT_BOOTSTRAP_SERVERS, value: "kafka.kafka.svc.cluster.local:9092" }
-        - { name: CONNECT_GROUP_ID, value: "connect-cluster" }
-        - { name: CONNECT_CONFIG_STORAGE_TOPIC, value: "_connect-configs" }
-        - { name: CONNECT_OFFSET_STORAGE_TOPIC,  value: "_connect-offsets" }
-        - { name: CONNECT_STATUS_STORAGE_TOPIC,  value: "_connect-status" }
-        - { name: CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR, value: "1" }
-        - { name: CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR,  value: "1" }
-        - { name: CONNECT_STATUS_STORAGE_REPLICATION_FACTOR,  value: "1" }
+        - { name: BOOTSTRAP_SERVERS, value: "kafka.kafka.svc.internal.lan:9092" }
+        - { name: GROUP_ID, value: "connect-cluster" }
+        - { name: CONFIG_STORAGE_TOPIC, value: "_connect-configs" }
+        - { name: OFFSET_STORAGE_TOPIC,  value: "_connect-offsets" }
+        - { name: STATUS_STORAGE_TOPIC,  value: "_connect-status" }
+        - { name: CONFIG_STORAGE_REPLICATION_FACTOR, value: "1" }
+        - { name: OFFSET_STORAGE_REPLICATION_FACTOR,  value: "1" }
+        - { name: STATUS_STORAGE_REPLICATION_FACTOR,  value: "1" }
 
-        - { name: CONNECT_KEY_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
-        - { name: CONNECT_VALUE_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
-        - { name: CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE, value: "true" }
-        - { name: CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE, value: "true" }
+        - { name: KEY_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
+        - { name: VALUE_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
+        - { name: KEY_CONVERTER_SCHEMAS_ENABLE, value: "true" }
+        - { name: VALUE_CONVERTER_SCHEMAS_ENABLE, value: "true" }
 
         - { name: CONNECT_PLUGIN_PATH, value: "/plugins,/plugins/share/java,/plugins/share/confluent-hub-components,/plugins/yugabytedb" }
 
@@ -884,7 +880,7 @@ spec:
         ports: [{ containerPort: 8080, name: http }]
         env:
         - { name: KAFKA_CLUSTERS_0_NAME, value: "local" }
-        - { name: KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS, value: "kafka.kafka.svc.cluster.local:9092" }
+        - { name: KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS, value: "kafka.kafka.svc.internal.lan:9092" }
         readinessProbe:
           httpGet: { path: /, port: http }
           initialDelaySeconds: 10
@@ -1027,7 +1023,7 @@ spec:
         volumeMounts:
         - { name: state, mountPath: /state }
         env:
-        - { name: CONNECT_URL, value: "http://kafka-connect.kafka.svc.cluster.local:8083" }
+        - { name: CONNECT_URL, value: "http://kafka-connect.kafka.svc.internal.lan:8083" }
         - { name: SERVER_PREFIX, value: "yb" }
         - { name: SCAN_INTERVAL, value: "30" }
         command: ["/bin/bash","-lc"]
@@ -1125,7 +1121,7 @@ spec:
             local URL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${DB}?sslmode=disable"
             local ID="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || date +%s%N)"
             local DATA="{\"data-collections\": [\"${SCHEMA}.${TBL}\"]}"
-            /home/yugabyte/bin/ysqlsh "$URL" -Atc "INSERT INTO public.debezium_signal(id,type,data) VALUES ('${ID}','execute-snapshot','${DATA}');" >/dev/null 2>&1 || true
+            /home/yugabyte/bin/ysqlsh "$URL" -Atc "INSERT INTO public.debezium_signal(id,type,data) VALUES ('${ID}','execute-snapshot','${DATA}');" >/dev/null 2>/dev/null || true
             echo "signaled snapshot for ${DB}.${SCHEMA}.${TBL}"
           }
 
@@ -1174,7 +1170,7 @@ spec:
 
                 ensure_signal_table "$DB"
 
-                # ----- SOURCE CONNECTOR CONFIG -----
+                # ----- SOURCE (YB/DBZ gRPC) -----
                 SRC_PUT="$(mktmp)"
                 {
                   echo '{'
@@ -1206,7 +1202,6 @@ spec:
                 api_put  "${CONNECT_URL}/connectors/yb-source-${DB}/config" "$SRC_PUT" || \
                 api_post "${CONNECT_URL}/connectors"                      "$SRC_POST"
 
-                # small poll for status
                 for i in $(seq 1 10); do
                   sleep 2
                   STATUS_CODE=$(curl -sS -o /tmp/s.json -w '%{http_code}' "${CONNECT_URL}/connectors/yb-source-${DB}/status" || true)
@@ -1214,7 +1209,7 @@ spec:
                 done
                 echo "yb-source-${DB} status ($STATUS_CODE):"; tail -c 2000 /tmp/s.json 2>/dev/null || true
 
-                # ----- BigQuery SINK CONNECTOR CONFIG -----
+                # ----- BigQuery SINK -----
                 SINK_PUT="$(mktmp)"
                 {
                   echo '{'
