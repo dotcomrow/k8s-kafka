@@ -603,6 +603,7 @@ kind: StatefulSet
 metadata:
   name: kafka
   namespace: kafka
+  annotations: { argocd.argoproj.io/sync-wave: "3" }
 spec:
   serviceName: kafka-hs
   replicas: 1
