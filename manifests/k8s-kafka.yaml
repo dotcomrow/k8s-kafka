@@ -689,7 +689,7 @@ spec:
         volumeMounts: [{ name: kafka-logs, mountPath: /tmp/kraft-combined-logs }]
 
 # ============================================================================
-# Kafka Connect (wave 4) — with Vault-injected GCP keyfile (no broker-probe)
+# Kafka Connect (wave 4) — Vault-injected GCP keyfile
 # ============================================================================
 ---
 apiVersion: v1
@@ -717,7 +717,6 @@ spec:
       labels: { app: kafka-connect }
       annotations:
         linkerd.io/inject: "disabled"
-        # Inject GCP key for BigQuery sink into THIS pod
         vault.hashicorp.com/agent-inject: "true"
         vault.hashicorp.com/role: "data-bootstrap"
         vault.hashicorp.com/agent-pre-populate-only: "true"
@@ -727,8 +726,10 @@ spec:
           {{- with secret "secret/data/kafka/bq/config" -}}
           {{ .Data.data.sa_json }}
           {{- end -}}
+        vault.hashicorp.com/agent-inject-permissions-gcp-key.json: "0644"
     spec:
       serviceAccountName: bq-yb-bootstrap
+      terminationGracePeriodSeconds: 30
       volumes:
       - { name: plugins, emptyDir: {} }
       initContainers:
@@ -788,7 +789,7 @@ spec:
         - { name: OFFSET_STORAGE_REPLICATION_FACTOR,  value: "1" }
         - { name: STATUS_STORAGE_REPLICATION_FACTOR,  value: "1" }
 
-        - { name: REST_ADVERTISED_HOST_NAME, value: "kafka-connect" }
+        - { name: REST_ADVERTISED_HOST_NAME, value: "kafka-connect.kafka.svc.cluster.local" }
         - { name: REST_PORT, value: "8083" }
 
         - { name: KEY_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
@@ -807,7 +808,7 @@ spec:
         - { containerPort: 8083 }
         readinessProbe:
           httpGet: { path: /connectors, port: 8083 }
-          initialDelaySeconds: 20
+          initialDelaySeconds: 40
           periodSeconds: 5
         resources:
           requests: { cpu: "250m", memory: "512Mi" }
@@ -849,7 +850,6 @@ spec:
         env:
         - { name: KAFKA_CLUSTERS_0_NAME, value: "local" }
         - { name: KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS, value: "kafka.kafka.svc.cluster.local:9092" }
-        # - { name: KAFKA_CLUSTERS_0_READONLY, value: "true" }
 
 ---
 apiVersion: v1
@@ -966,6 +966,7 @@ spec:
           {{- with secret "secret/data/kafka/bq/config" -}}
           {{ .Data.data.sa_json }}
           {{- end -}}
+        vault.hashicorp.com/agent-inject-permissions-gcp-key.json: "0644"
     spec:
       serviceAccountName: bq-yb-bootstrap
       volumes:
