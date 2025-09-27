@@ -417,16 +417,9 @@ spec:
                         ELSE NULL END AS jdesc
               FROM t
           ),
-          -- UPDATED WATCHER SQL (same shape as runtime watcher below):
           b AS (
-            SELECT schema, \"table\",
-                   COALESCE(
-                     CASE WHEN jdesc ? 'bootstrap' THEN jdesc->'bootstrap' ELSE NULL END,
-                     CASE WHEN jdesc ? 'debezium' AND (jdesc->'debezium') ? 'bootstrap'
-                          THEN (jdesc->'debezium')->'bootstrap' ELSE NULL END
-                   ) AS b
-              FROM j
-             WHERE jdesc IS NOT NULL
+            SELECT schema, \"table\", jdesc->'bootstrap' AS b
+              FROM j WHERE jdesc ? 'bootstrap'
           )
           SELECT schema, \"table\",
                  COALESCE(b->>'bq','') AS bq,
@@ -629,6 +622,8 @@ spec:
           set -euo pipefail
           PS4='+ [ENSURE-BQ] $(date -Is) '
           set -x
+
+          # Wait for Vault-injected files
           for f in /vault/secrets/bq.env /vault/secrets/gcp-key.json; do
             i=0; while [ ! -s "$f" ]; do i=$((i+1)); [ $i -gt 120 ] && echo "[ENSURE-BQ] missing $f" >&2 && exit 1; sleep 2; done
           done
@@ -636,8 +631,12 @@ spec:
           : "${BQ_PROJECT:?missing BQ_PROJECT}"
           : "${BQ_DEFAULT_DATASET:?missing BQ_DEFAULT_DATASET}"
           : "${LOCATION:=US}"
+
+          # Auth via SA JSON (no interactivity)
           gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}" >/dev/null 2>&1 || true
+
           echo "[ENSURE-BQ] Ensuring dataset ${BQ_PROJECT}:${BQ_DEFAULT_DATASET} (${LOCATION})"
+
           if bq --project_id="${BQ_PROJECT}" --location="${LOCATION}" show -d "${BQ_PROJECT}:${BQ_DEFAULT_DATASET}" >/dev/null 2>&1; then
             echo "[ENSURE-BQ] Dataset exists."
           else
@@ -751,6 +750,7 @@ spec:
           periodSeconds: 5
         resources:
           requests: { cpu: "250m", memory: "512Mi" }
+        ...
         volumeMounts: [{ name: kafka-logs, mountPath: /tmp/kraft-combined-logs }]
 
 # ============================================================================
@@ -780,6 +780,7 @@ data:
     log4j.appender.stdout=org.apache.log4j.ConsoleAppender
     log4j.appender.stdout.layout=org.apache.log4j.PatternLayout
     log4j.appender.stdout.layout.ConversionPattern=[%d{ISO8601}] %-5p %c - %m%n
+
     log4j.logger.org.apache.kafka.connect.runtime.rest=WARN
     log4j.logger.org.apache.kafka.connect.runtime=INFO
     log4j.logger.io.debezium=DEBUG
@@ -881,12 +882,18 @@ spec:
         imagePullPolicy: IfNotPresent
         env:
         - name: CLUSTER_ID
-          valueFrom: { secretKeyRef: { name: kafka-cluster-id, key: CLUSTER_ID } }
+          valueFrom:
+            secretKeyRef:
+              name: kafka-cluster-id
+              key: CLUSTER_ID
+
         - { name: REST_HOST_NAME, value: "0.0.0.0" }
         - { name: REST_PORT, value: "8083" }
         - { name: ADVERTISED_HOST_NAME, value: "kafka-connect.kafka.svc.internal.lan" }
         - { name: ADVERTISED_PORT, value: "8083" }
+
         - { name: KAFKA_LOG4J_OPTS, value: "-Dlog4j.configuration=file:/kafka/etc/log4j.properties" }
+
         - { name: BOOTSTRAP_SERVERS, value: "kafka.kafka.svc.internal.lan:9092" }
         - { name: GROUP_ID, value: "connect-cluster" }
         - { name: CONFIG_STORAGE_TOPIC, value: "_connect-configs" }
@@ -895,15 +902,20 @@ spec:
         - { name: CONFIG_STORAGE_REPLICATION_FACTOR, value: "1" }
         - { name: OFFSET_STORAGE_REPLICATION_FACTOR,  value: "1" }
         - { name: STATUS_STORAGE_REPLICATION_FACTOR,  value: "1" }
+
         - { name: KEY_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
         - { name: VALUE_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
         - { name: KEY_CONVERTER_SCHEMAS_ENABLE, value: "true" }
         - { name: VALUE_CONVERTER_SCHEMAS_ENABLE, value: "true" }
+
         - { name: CONNECT_PLUGIN_PATH, value: "/plugins,/plugins/share/java,/plugins/share/confluent-hub-components,/plugins/yugabytedb" }
+
         - { name: KAFKA_HEAP_OPTS, value: "-Xms256m -Xmx512m" }
         - { name: GOOGLE_APPLICATION_CREDENTIALS, value: "/vault/secrets/gcp-key.json" }
+
         ports:
         - { containerPort: 8083 }
+
         readinessProbe:
           httpGet: { path: /connectors, port: 8083 }
           initialDelaySeconds: 60
@@ -1036,6 +1048,7 @@ spec:
 
 # ============================================================================
 # Continuous Annotation Watcher (wave 50)
+#  — fixed DB stream-id extraction while keeping annotation gating —
 # ============================================================================
 ---
 apiVersion: apps/v1
@@ -1128,7 +1141,7 @@ spec:
           echo "[WATCHER] PGHOST=$PGHOST PGPORT=$PGPORT PGUSER=$PGUSER PGDATABASE=${PGDATABASE:-<ignored>} YB_MASTER_ADDRESSES=${YB_MASTER_ADDRESSES:-<unset>}"
 
           until curl -fsS "${CONNECT_URL}/connectors" >/dev/null 2>&1; do echo "[WATCHER] waiting for connect REST…"; sleep 3; done
-          echo "== Connector plugins =="; curl -fsS "${CONNECT_URL}/connector-plugins" | sed 's/.*/  &/'; echo "======================="
+          echo "== Connector plugins =="; curl -fsS "${CONNECT_URL}/connector-plugins" | sed 's/.*/  &/'; echo "=======================""
 
           list_dbs() {
             for DB in yugabyte postgres "${PGDATABASE:-}"; do
@@ -1143,7 +1156,6 @@ spec:
             return 1
           }
 
-          # ==== UPDATED WATCHER SQL ====
           get_plan_for_db() {
             local DB="$1"
             local URL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${DB}?sslmode=disable"
@@ -1163,14 +1175,8 @@ spec:
                 FROM t
               ),
               b AS (
-                SELECT schema, \"table\",
-                       COALESCE(
-                         CASE WHEN jdesc ? 'bootstrap' THEN jdesc->'bootstrap' ELSE NULL END,
-                         CASE WHEN jdesc ? 'debezium' AND (jdesc->'debezium') ? 'bootstrap'
-                              THEN (jdesc->'debezium')->'bootstrap' ELSE NULL END
-                       ) AS b
-                FROM j
-                WHERE jdesc IS NOT NULL
+                SELECT schema, \"table\", jdesc->'bootstrap' AS b
+                FROM j WHERE jdesc ? 'bootstrap'
               )
               SELECT schema, \"table\",
                     COALESCE(b->>'bq','') AS bq,
@@ -1183,7 +1189,6 @@ spec:
               ORDER BY schema, \"table\";
             " || true
           }
-          # ==== /UPDATED WATCHER SQL ====
 
           ensure_signal_table() {
             local DB="$1"
@@ -1245,34 +1250,59 @@ spec:
 
                 ensure_signal_table "$DB"
 
+                # ----- Ensure a DB Stream ID exists and fetch it -----
                 get_or_create_stream_id() {
                   local DB="$1"
                   local MASTERS="${YB_MASTER_ADDRESSES:-}"
                   [ -z "$MASTERS" ] && { echo "ERROR: YB_MASTER_ADDRESSES is required" >&2; return 1; }
+
                   extract32() { sed -n 's/.*\([0-9a-fA-F]\{32\}\).*/\1/p' | tr 'A-F' 'a-f' | head -n1; }
+
+                  # 1) Preferred: try direct namespace
                   local OUT SID
                   OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" list_change_data_streams ysql."$DB" 2>/dev/null || true)"
                   SID="$(printf '%s\n' "$OUT" | grep -Ei 'stream[_ ]?id|db_stream_id' | extract32)"
-                  if [ -z "$SID" ]; then
+                  if [ -n "$SID" ]; then
+                    echo "Using existing CDC stream (direct) for ${DB}: $SID" >&2
+                    printf '%s' "$SID"; return 0
+                  fi
+
+                  # 2) Global list; match the actual DB name (FIXED awk pattern using variable)
+                  OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" list_change_data_streams ysql 2>/dev/null || true)"
+                  SID="$(printf '%s\n' "$OUT" \
+                        | awk -v db="$DB" '
+                            BEGIN{RS=""; FS="\n"}
+                            $0 ~ ("namespace_name:[[:space:]]*" db) {
+                              for(i=1;i<=NF;i++) if (tolower($i) ~ /(stream[ _]?id|db_stream_id)/) {print $i}
+                            }' \
+                        | extract32)"
+                  if [ -n "$SID" ]; then
+                    echo "Using existing CDC stream (global) for ${DB}: $SID" >&2
+                    printf '%s' "$SID"; return 0
+                  fi
+
+                  # 3) Last resort in older builds: replication slots listing
+                  OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" list_replication_slots ysql."$DB" 2>/dev/null || true)"
+                  SID="$(printf '%s\n' "$OUT" | extract32)"
+                  if [ -n "$SID" ]; then
+                    echo "Using CDC stream from replication slots for ${DB}: $SID" >&2
+                    printf '%s' "$SID"; return 0
+                  fi
+
+                  # 4) Create stream, then re-search globally
+                  OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" create_change_data_stream ysql."$DB" 2>&1 || true)"
+                  SID="$(printf '%s\n' "$OUT" | grep -Ei 'stream[_ ]?id|db_stream_id' | extract32)"
+                  if [ -z "$SID" ] && printf '%s' "$OUT" | grep -qi 'already has replication slot'; then
                     OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" list_change_data_streams ysql 2>/dev/null || true)"
                     SID="$(printf '%s\n' "$OUT" \
-                      | awk -v db="$DB" 'BEGIN{RS="";FS="\n"}/namespace_name:[[:space:]]*db/{for(i=1;i<=NF;i++)if($i~/(stream[ _]?id|db_stream_id)/i)print $i}' \
-                      | extract32)"
+                          | awk -v db="$DB" '
+                              BEGIN{RS=""; FS="\n"}
+                              $0 ~ ("namespace_name:[[:space:]]*" db) {
+                                for(i=1;i<=NF;i++) if (tolower($i) ~ /(stream[ _]?id|db_stream_id)/) {print $i}
+                              }' \
+                          | extract32)"
                   fi
-                  if [ -z "$SID" ]; then
-                    OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" list_replication_slots ysql."$DB" 2>/dev/null || true)"
-                    SID="$(printf '%s\n' "$OUT" | extract32)"
-                  fi
-                  if [ -z "$SID" ]; then
-                    OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" create_change_data_stream ysql."$DB" 2>&1 || true)"
-                    SID="$(printf '%s\n' "$OUT" | grep -Ei 'stream[_ ]?id|db_stream_id' | extract32)"
-                    if [ -z "$SID" ] && printf '%s' "$OUT" | grep -qi 'already has replication slot'; then
-                      OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" list_change_data_streams ysql 2>/dev/null || true)"
-                      SID="$(printf '%s\n' "$OUT" \
-                        | awk -v db="$DB" 'BEGIN{RS="";FS="\n"}/namespace_name:[[:space:]]*db/{for(i=1;i<=NF;i++)if($i~/(stream[ _]?id|db_stream_id)/i)print $i}' \
-                        | extract32)"
-                    fi
-                  fi
+
                   if [ -z "$SID" ] || ! printf '%s' "$SID" | grep -qiE '^[0-9a-f]{32}$'; then
                     echo "ERROR: could not obtain a valid 32-hex CDC stream id for DB=${DB}" >&2
                     return 1
@@ -1283,6 +1313,7 @@ spec:
                 STREAM_ID="$(get_or_create_stream_id "$DB")" || { echo "ERROR: no CDC stream id; skipping DB ${DB}"; continue; }
                 echo "[WATCHER] DB=${DB} STREAM_ID=${STREAM_ID} (len=${#STREAM_ID})"
 
+                # ----- SOURCE CONNECTOR (YB gRPC) -----
                 SRC_PUT="$(mktmp)"
                 {
                   echo '{'
@@ -1323,6 +1354,7 @@ spec:
                 done
                 echo "yb-source-${DB} status ($STATUS_CODE):"; tail -c 2000 /tmp/s.json 2>/dev/null || true
 
+                # ----- BigQuery SINK CONNECTOR -----
                 SINK_PUT="$(mktmp)"
                 {
                   echo '{'
@@ -1352,6 +1384,7 @@ spec:
                 done
                 echo "bq-sink-${DB} status ($STATUS_CODE):"; tail -c 2000 /tmp/s2.json 2>/dev/null || true
 
+                # Signal once per table after connectors are present
                 printf '%s' "$TABLES" | tr ',' '\n' | while read -r FQ; do
                   [ -z "$FQ" ] && continue
                   ST="/state/${DB}.${FQ}.snap"
@@ -1360,6 +1393,7 @@ spec:
                     date -Is > "$ST"
                   fi
                 done
+
                 printf '%s' "$TABLES" > "/state/${DB}.tables"
               fi
             done
