@@ -623,6 +623,7 @@ spec:
           PS4='+ [ENSURE-BQ] $(date -Is) '
           set -x
 
+          # Wait for Vault-injected files
           for f in /vault/secrets/bq.env /vault/secrets/gcp-key.json; do
             i=0; while [ ! -s "$f" ]; do i=$((i+1)); [ $i -gt 120 ] && echo "[ENSURE-BQ] missing $f" >&2 && exit 1; sleep 2; done
           done
@@ -631,9 +632,11 @@ spec:
           : "${BQ_DEFAULT_DATASET:?missing BQ_DEFAULT_DATASET}"
           : "${LOCATION:=US}"
 
+          # Auth via SA JSON (no interactivity)
           gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}" >/dev/null 2>&1 || true
 
           echo "[ENSURE-BQ] Ensuring dataset ${BQ_PROJECT}:${BQ_DEFAULT_DATASET} (${LOCATION})"
+
           if bq --project_id="${BQ_PROJECT}" --location="${LOCATION}" show -d "${BQ_PROJECT}:${BQ_DEFAULT_DATASET}" >/dev/null 2>&1; then
             echo "[ENSURE-BQ] Dataset exists."
           else
@@ -1046,8 +1049,7 @@ spec:
           limits: { cpu: "300m", memory: "256Mi" }
 
 # ============================================================================
-# Continuous Annotation Watcher (wave 50)
-#  ——— FIX: list DB streams with --include_db_streams and set all stream-id keys ———
+# Continuous Annotation Watcher (wave 50) — FIXED CDC STREAM FETCH + SINK OVERRIDES
 # ============================================================================
 ---
 apiVersion: apps/v1
@@ -1204,76 +1206,41 @@ spec:
             echo "signaled snapshot for ${DB}.${SCHEMA}.${TBL}"
           }
 
-          SERVER_PREFIX="${SERVER_PREFIX:-yb}"
-          SCAN_INTERVAL="${SCAN_INTERVAL:-30}"
-
-          # >>> STREAM-ID LOOKUP <<<
+          # ---- CDC Stream fetch (robust) ----
           get_or_create_stream_id() {
             local DB="$1"
             local MASTERS="${YB_MASTER_ADDRESSES:-}"
             [ -z "$MASTERS" ] && { echo "ERROR: YB_MASTER_ADDRESSES is required" >&2; return 1; }
-
             extract32() { sed -n 's/.*\([0-9a-fA-F]\{32\}\).*/\1/p' | tr 'A-F' 'a-f' | head -n1; }
 
-            # (A) Preferred: list DB streams explicitly (include DB streams)
+            # 1) Try per-db listing (widely supported)
             local OUT SID
-            OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" list_change_data_streams ysql --include_db_streams 2>/dev/null || true)"
-            SID="$(printf '%s\n' "$OUT" \
-                  | awk -v db="$DB" '
-                      BEGIN{RS=""; FS="\n"}
-                      $0 ~ ("namespace_name:[[:space:]]*" db) {
-                        for(i=1;i<=NF;i++) if (tolower($i) ~ /(db_stream_id|stream[ _]?id)/) print $i
-                      }' \
-                  | extract32)"
-            if [ -n "$SID" ]; then
-              echo "Using existing CDC stream (global+db) for ${DB}: $SID" >&2
-              printf '%s' "$SID"; return 0
-            fi
-
-            # (B) Try namespaced form with include flag
-            OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" list_change_data_streams ysql."$DB" --include_db_streams 2>/dev/null || true)"
+            OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" list_change_data_streams ysql.${DB} 2>/dev/null || true)"
             SID="$(printf '%s\n' "$OUT" | grep -Ei 'db_stream_id|stream[ _]?id' | extract32)"
-            if [ -n "$SID" ]; then
-              echo "Using existing CDC stream (direct+db) for ${DB}: $SID" >&2
-              printf '%s' "$SID"; return 0
-            fi
+            if [ -n "$SID" ]; then printf '%s' "$SID"; return 0; fi
 
-            # (C) Legacy global (may hide DB streams)
+            # 2) Try global list and filter the DB stanza
             OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" list_change_data_streams ysql 2>/dev/null || true)"
             SID="$(printf '%s\n' "$OUT" \
-                  | awk -v db="$DB" '
-                      BEGIN{RS=""; FS="\n"}
-                      $0 ~ ("namespace_name:[[:space:]]*" db) {
-                        for(i=1;i<=NF;i++) if (tolower($i) ~ /(stream[ _]?id|db_stream_id)/) print $i
-                      }' \
+                  | awk -v db="$DB" 'BEGIN{RS=""; FS="\n"} $0 ~ ("namespace_name:[[:space:]]*" db) {for(i=1;i<=NF;i++) if (tolower($i) ~ /(db_stream_id|stream[ _]?id)/) print $i}' \
                   | extract32)"
+            if [ -n "$SID" ]; then printf '%s' "$SID"; return 0; fi
 
-            if [ -n "$SID" ]; then
-              echo "Using existing CDC stream (legacy global) for ${DB}: $SID" >&2
-              printf '%s' "$SID"; return 0
-            fi
-
-            # (D) As a last resort, attempt create then re-list including DB streams
-            OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" create_change_data_stream ysql."$DB" 2>&1 || true)"
-            if echo "$OUT" | grep -qi 'already has replication slot'; then
-              OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" list_change_data_streams ysql --include_db_streams 2>/dev/null || true)"
+            # 3) Create and parse response
+            OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" create_change_data_stream ysql.${DB} 2>&1 || true)"
+            SID="$(printf '%s\n' "$OUT" | grep -Ei 'db_stream_id|stream[ _]?id' | extract32)"
+            if [ -z "$SID" ] && printf '%s' "$OUT" | grep -qi 'already has replication slot'; then
+              OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" list_change_data_streams ysql 2>/dev/null || true)"
               SID="$(printf '%s\n' "$OUT" \
-                    | awk -v db="$DB" '
-                        BEGIN{RS=""; FS="\n"}
-                        $0 ~ ("namespace_name:[[:space:]]*" db) {
-                          for(i=1;i<=NF;i++) if (tolower($i) ~ /(db_stream_id|stream[ _]?id)/) print $i
-                        }' \
+                    | awk -v db="$DB" 'BEGIN{RS=""; FS="\n"} $0 ~ ("namespace_name:[[:space:]]*" db) {for(i=1;i<=NF;i++) if (tolower($i) ~ /(db_stream_id|stream[ _]?id)/) print $i}' \
                     | extract32)"
-            else
-              SID="$(printf '%s\n' "$OUT" | grep -Ei 'db_stream_id|stream[ _]?id' | extract32)"
             fi
 
-            if [ -z "$SID" ] || ! printf '%s' "$SID" | grep -qiE '^[0-9a-f]{32}$'; then
-              echo "ERROR: could not obtain a valid 32-hex CDC stream id for DB=${DB}" >&2
-              return 1
-            fi
-            printf '%s' "$SID"
+            [ -n "$SID" ] && printf '%s' "$SID" || { echo "ERROR: could not obtain CDC stream id for DB=${DB}" >&2; return 1; }
           }
+
+          SERVER_PREFIX="${SERVER_PREFIX:-yb}"
+          SCAN_INTERVAL="${SCAN_INTERVAL:-30}"
 
           while :; do
             mapfile -t DBS < <(list_dbs)
@@ -1320,7 +1287,7 @@ spec:
                 STREAM_ID="$(get_or_create_stream_id "$DB")" || { echo "ERROR: no CDC stream id; skipping DB ${DB}"; continue; }
                 echo "[WATCHER] DB=${DB} STREAM_ID=${STREAM_ID} (len=${#STREAM_ID})"
 
-                # ----- SOURCE CONNECTOR (YB gRPC) -----
+                # ----- SOURCE CONNECTOR (YB gRPC)
                 SRC_PUT="$(mktmp)"
                 {
                   echo '{'
@@ -1358,14 +1325,14 @@ spec:
                 api_put  "${CONNECT_URL}/connectors/yb-source-${DB}/config" "$SRC_PUT" || \
                 api_post "${CONNECT_URL}/connectors"                      "$SRC_POST"
 
-                for i in $(seq 1 15); do
+                for i in $(seq 1 10); do
                   sleep 2
                   STATUS_CODE=$(curl -sS -o /tmp/s.json -w '%{http_code}' "${CONNECT_URL}/connectors/yb-source-${DB}/status" || true)
                   [ "$STATUS_CODE" = "200" ] && break
                 done
                 echo "yb-source-${DB} status ($STATUS_CODE):"; tail -c 2000 /tmp/s.json 2>/dev/null || true
 
-                # ----- BigQuery SINK CONNECTOR -----
+                # ----- BigQuery SINK CONNECTOR (forced schemaless for compatibility)
                 SINK_PUT="$(mktmp)"
                 {
                   echo '{'
@@ -1380,7 +1347,12 @@ spec:
                   echo '  "allowNewBigQueryFields":"true",'
                   echo '  "allowBigQueryRequiredFieldRelaxation":"true",'
                   echo '  "keySource":"FILE",'
-                  echo '  "keyfile": "/vault/secrets/gcp-key.json"'
+                  echo '  "keyfile": "/vault/secrets/gcp-key.json",'
+                  # Per-connector converter overrides → schemaless
+                  echo '  "value.converter":"org.apache.kafka.connect.json.JsonConverter",'
+                  echo '  "value.converter.schemas.enable":"false",'
+                  echo '  "key.converter":"org.apache.kafka.connect.json.JsonConverter",'
+                  echo '  "key.converter.schemas.enable":"false"'
                   echo '}'
                 } > "$SINK_PUT"
                 SINK_POST="$(mktmp)"; { echo '{ "name":"bq-sink-'"${DB}"'", "config": '; cat "$SINK_PUT"; echo ' }'; } > "$SINK_POST"
@@ -1388,13 +1360,14 @@ spec:
                 api_put  "${CONNECT_URL}/connectors/bq-sink-${DB}/config" "$SINK_PUT" || \
                 api_post "${CONNECT_URL}/connectors"                      "$SINK_POST"
 
-                for i in $(seq 1 15); do
+                for i in $(seq 1 10); do
                   sleep 2
                   STATUS_CODE=$(curl -sS -o /tmp/s2.json -w '%{http_code}' "${CONNECT_URL}/connectors/bq-sink-${DB}/status" || true)
                   [ "$STATUS_CODE" = "200" ] && break
                 done
                 echo "bq-sink-${DB} status ($STATUS_CODE):"; tail -c 2000 /tmp/s2.json 2>/dev/null || true
 
+                # ensure we signal exactly once per table after connectors are present
                 printf '%s' "$TABLES" | tr ',' '\n' | while read -r FQ; do
                   [ -z "$FQ" ] && continue
                   ST="/state/${DB}.${FQ}.snap"
