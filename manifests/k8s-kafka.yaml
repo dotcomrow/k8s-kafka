@@ -1252,6 +1252,7 @@ spec:
                 ensure_signal_table "$DB"
 
                 # ----- SOURCE CONNECTOR (YB gRPC) -----
+                # ----- SOURCE CONNECTOR (YB gRPC) -----
                 SRC_PUT="$(mktmp)"
                 {
                   echo '{'
@@ -1263,6 +1264,11 @@ spec:
                   echo "  \"database.password\":\"$(esc "$PGPASSWORD")\","
                   echo "  \"database.dbname\":\"$(esc "$DB")\","
                   echo "  \"database.server.name\":\"$(esc "${SERVER_PREFIX}_${DB}")\","
+                  # >>> add this guard so we pass the masters from Vault <<<
+                  if [ -n "${YB_MASTER_ADDRESSES:-}" ]; then
+                    echo "  \"database.master.addresses\":\"$(esc "$YB_MASTER_ADDRESSES")\","
+                    echo "  \"yb.master.addresses\":\"$(esc "$YB_MASTER_ADDRESSES")\","
+                  fi
                   echo "  \"table.include.list\":\"$(esc "$TABLES")\","
                   echo '  "snapshot.mode":"initial",'
                   echo '  "incremental.snapshot.enabled":"true",'
