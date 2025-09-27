@@ -1252,72 +1252,7 @@ spec:
 
                 ensure_signal_table "$DB"
 
-                # ----- Ensure a DB Stream ID exists and fetch it -----
-                get_or_create_stream_id() {
-                  local DB="$1"
-                  local MASTERS="${YB_MASTER_ADDRESSES:-}"
-                  [ -z "$MASTERS" ] && { echo "ERROR: YB_MASTER_ADDRESSES is required" >&2; return 1; }
-
-                  extract32() { sed -n 's/.*\([0-9a-fA-F]\{32\}\).*/\1/p' | tr 'A-F' 'a-f' | head -n1; }
-
-                  # 1) Preferred: list streams for this namespace directly
-                  local OUT SID
-                  OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" list_change_data_streams ysql."$DB" 2>/dev/null || true)"
-                  SID="$(printf '%s\n' "$OUT" | grep -Ei 'stream[_ ]?id|db_stream_id' | extract32)"
-                  if [ -n "$SID" ]; then
-                    echo "Using existing CDC stream (direct) for ${DB}: $SID" >&2
-                    printf '%s' "$SID"; return 0
-                  fi
-
-                  # 2) Fallback: global list and filter the 'namespace_name: <DB>' block
-                  OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" list_change_data_streams ysql 2>/dev/null || true)"
-                  SID="$(printf '%s\n' "$OUT" \
-                        | awk -v db="$DB" '
-                            BEGIN{RS=""; FS="\n"}
-                            /namespace_name:[[:space:]]*db/ {
-                              for(i=1;i<=NF;i++) if ($i ~ /(stream[ _]?id|db_stream_id)/i) {print $i}
-                            }' \
-                        | extract32)"
-                  if [ -n "$SID" ]; then
-                    echo "Using existing CDC stream (global) for ${DB}: $SID" >&2
-                    printf '%s' "$SID"; return 0
-                  fi
-
-                  # 3) Last resort: some builds expose it via replication slots
-                  OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" list_replication_slots ysql."$DB" 2>/dev/null || true)"
-                  SID="$(printf '%s\n' "$OUT" | extract32)"
-                  if [ -n "$SID" ]; then
-                    echo "Using CDC stream from replication slots for ${DB}: $SID" >&2
-                    printf '%s' "$SID"; return 0
-                  fi
-
-                  # 4) Create stream (no before-image flags), then re-search globally
-                  OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" create_change_data_stream ysql."$DB" 2>&1 || true)"
-                  SID="$(printf '%s\n' "$OUT" | grep -Ei 'stream[_ ]?id|db_stream_id' | extract32)"
-                  if [ -z "$SID" ] && printf '%s' "$OUT" | grep -qi 'already has replication slot'; then
-                    OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" list_change_data_streams ysql 2>/dev/null || true)"
-                    SID="$(printf '%s\n' "$OUT" \
-                          | awk -v db="$DB" '
-                              BEGIN{RS=""; FS="\n"}
-                              /namespace_name:[[:space:]]*db/ {
-                                for(i=1;i<=NF;i++) if ($i ~ /(stream[ _]?id|db_stream_id)/i) {print $i}
-                              }' \
-                          | extract32)"
-                  fi
-
-                  if [ -z "$SID" ] || ! printf '%s' "$SID" | grep -qiE '^[0-9a-f]{32}$'; then
-                    echo "ERROR: could not obtain a valid 32-hex CDC stream id for DB=${DB}" >&2
-                    return 1
-                  fi
-                  printf '%s' "$SID"
-                }
-
-                STREAM_ID="$(get_or_create_stream_id "$DB")" || { echo "ERROR: no CDC stream id; skipping DB ${DB}"; continue; }
-                echo "[WATCHER] DB=${DB} STREAM_ID=${STREAM_ID} (len=${#STREAM_ID})"
-
-                [ -z "$STREAM_ID" ] && { echo "ERROR: could not obtain CDC stream id for ${DB}"; continue; }
-
-                # ----- SOURCE CONNECTOR (YB gRPC) -----
+                # ----- SOURCE CONNECTOR (YB gRPC) — stream-id removed -----
                 SRC_PUT="$(mktmp)"
                 {
                   echo '{'
@@ -1329,14 +1264,13 @@ spec:
                   echo "  \"database.password\":\"$(esc "$PGPASSWORD")\","
                   echo "  \"database.dbname\":\"$(esc "$DB")\","
                   echo "  \"database.server.name\":\"$(esc "${SERVER_PREFIX}_${DB}")\","
-                  echo "  \"database.streamid\":\"$(esc "$STREAM_ID")\","
                   if [ -n "${YB_MASTER_ADDRESSES:-}" ]; then
                     echo "  \"database.master.addresses\":\"$(esc "$YB_MASTER_ADDRESSES")\","
                     echo "  \"yb.master.addresses\":\"$(esc "$YB_MASTER_ADDRESSES")\","
+                    echo "  \"yugabyte.master.addresses\":\"$(esc "$YB_MASTER_ADDRESSES")\","
                   fi
                   echo "  \"table.include.list\":\"$(esc "$TABLES")\","
                   echo '  "snapshot.mode":"initial",'
-                  [ -n "${YB_MASTER_ADDRESSES:-}" ] && echo "  \"yugabyte.master.addresses\":\"$(esc "$YB_MASTER_ADDRESSES")\","
                   echo '  "incremental.snapshot.enabled":"true",'
                   echo '  "signal.data.collection":"public.debezium_signal",'
                   echo '  "transforms":"unwrap",'
