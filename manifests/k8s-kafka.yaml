@@ -223,7 +223,7 @@ spec:
           CFG_ARGS=""; [ -n "$BQ_PROJECT" ] && CFG_ARGS="$CFG_ARGS project=$BQ_PROJECT"
           [ -n "$BQ_DEFAULT_DATASET" ] && CFG_ARGS="$CFG_ARGS dataset=$BQ_DEFAULT_DATASET"
           [ -s /tmp/sa.json ] && CFG_ARGS="$CFG_ARGS sa_json=@/tmp/sa.json"
-          [ -n "$CFG_ARGS" ] && vault kv put secret/kafka/bq/config $CFG_ARGS >/divert || true
+          [ -n "$CFG_ARGS" ] && vault kv put secret/kafka/bq/config $CFG_ARGS >/dev/null || true
           [ -s /tmp/sa.json ] && vault kv put secret/kafka/bq/exporter sa_json=@/tmp/sa.json >/dev/null && echo "→ Wrote secret/kafka/bq/exporter"
           vault policy write data-bootstrap - <<'EOP'
           path "secret/data/kafka/pgconfig"     { capabilities = ["read"] }
@@ -617,11 +617,13 @@ spec:
         - { name: CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE, value: /vault/secrets/gcp-key.json }
         - { name: CLOUDSDK_CORE_DISABLE_PROMPTS, value: "1" }
         command: ["/bin/bash","-lc"]
-        args: 
+        args:
         - |
-          set -eu
+          set -euo pipefail
           PS4='+ [ENSURE-BQ] $(date -Is) '
           set -x
+
+          # Wait for Vault-injected files
           for f in /vault/secrets/bq.env /vault/secrets/gcp-key.json; do
             i=0; while [ ! -s "$f" ]; do i=$((i+1)); [ $i -gt 120 ] && echo "[ENSURE-BQ] missing $f" >&2 && exit 1; sleep 2; done
           done
@@ -629,15 +631,27 @@ spec:
           : "${BQ_PROJECT:?missing BQ_PROJECT}"
           : "${BQ_DEFAULT_DATASET:?missing BQ_DEFAULT_DATASET}"
           : "${LOCATION:=US}"
+
+          # Auth via SA JSON (no interactivity)
           gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}" >/dev/null 2>&1 || true
+
           echo "[ENSURE-BQ] Ensuring dataset ${BQ_PROJECT}:${BQ_DEFAULT_DATASET} (${LOCATION})"
-          if bq --project_id="${BQ_PROJECT}" --location="${LOCATION}" ls -d "${BQ_PROJECT}:${BQ_DEFAULT_DATASET}" >/dev/null 2>&1; then
+
+          if bq --project_id="${BQ_PROJECT}" --location="${LOCATION}" show -d "${BQ_PROJECT}:${BQ_DEFAULT_DATASET}" >/dev/null 2>&1; then
             echo "[ENSURE-BQ] Dataset exists."
           else
-            bq --project_id="${BQ_PROJECT}" --location="${LOCATION}" mk -d \
-              --description="Kafka Connect Sink default dataset" \
-              "${BQ_PROJECT}:${BQ_DEFAULT_DATASET}"
-            echo "[ENSURE-BQ] Dataset created."
+            OUT="$( bq --project_id="${BQ_PROJECT}" --location="${LOCATION}" mk -d \
+                    --description="Kafka Connect Sink default dataset" \
+                    "${BQ_PROJECT}:${BQ_DEFAULT_DATASET}" 2>&1 || true )"
+            if echo "$OUT" | grep -qi 'already exists'; then
+              echo "[ENSURE-BQ] Dataset already existed; continuing."
+            elif echo "$OUT" | grep -qi 'Access Denied'; then
+              echo "$OUT"; echo "[ENSURE-BQ] Missing bigquery.datasets.get/create on project ${BQ_PROJECT}"; exit 1
+            elif [ -n "$OUT" ]; then
+              echo "$OUT"; exit 1
+            else
+              echo "[ENSURE-BQ] Dataset created."
+            fi
           fi
 
 # ============================================================================
@@ -1127,7 +1141,7 @@ spec:
           PGUSER="${PGUSER:-vaultadmin}"
           echo "[WATCHER] PGHOST=$PGHOST PGPORT=$PGPORT PGUSER=$PGUSER PGDATABASE=${PGDATABASE:-<ignored>} YB_MASTER_ADDRESSES=${YB_MASTER_ADDRESSES:-<unset>}"
 
-          until curl -fsS "${CONNECT_URL}/connectors" >/devnull 2>&1; do echo "[WATCHER] waiting for connect REST…"; sleep 3; done
+          until curl -fsS "${CONNECT_URL}/connectors" >/dev/null 2>&1; do echo "[WATCHER] waiting for connect REST…"; sleep 3; done
           echo "== Connector plugins =="; curl -fsS "${CONNECT_URL}/connector-plugins" | sed 's/.*/  &/'; echo "======================="
 
           list_dbs() {
