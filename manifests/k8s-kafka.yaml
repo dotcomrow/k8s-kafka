@@ -1271,6 +1271,7 @@ spec:
                   fi
                   echo "  \"table.include.list\":\"$(esc "$TABLES")\","
                   echo '  "snapshot.mode":"initial",'
+                  echo "  \"yugabyte.master.addresses\":\"$(esc "$YB_MASTER_ADDRESSES")\","
                   echo '  "incremental.snapshot.enabled":"true",'
                   echo '  "signal.data.collection":"public.debezium_signal",'
                   echo '  "transforms":"unwrap",'
