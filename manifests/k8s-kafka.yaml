@@ -1140,7 +1140,7 @@ spec:
           echo "[WATCHER] PGHOST=$PGHOST PGPORT=$PGPORT PGUSER=$PGUSER PGDATABASE=${PGDATABASE:-<ignored>} YB_MASTER_ADDRESSES=${YB_MASTER_ADDRESSES:-<unset>}"
 
           until curl -fsS "${CONNECT_URL}/connectors" >/dev/null 2>&1; do echo "[WATCHER] waiting for connect REST…"; sleep 3; done
-          echo "== Connector plugins =="; curl -fsS "${CONNECT_URL}/connector-plugins" | sed 's/.*/  &/'; echo "=======================""
+          echo "== Connector plugins =="; curl -fsS "${CONNECT_URL}/connector-plugins" | sed 's/.*/  &/'; echo "======================="
 
           list_dbs() {
             for DB in yugabyte postgres "${PGDATABASE:-}"; do
