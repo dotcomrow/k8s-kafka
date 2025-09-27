@@ -1322,15 +1322,18 @@ spec:
                 done
                 echo "bq-sink-${DB} status ($STATUS_CODE):"; tail -c 2000 /tmp/s2.json 2>/dev/null || true
 
-                CUR_LIST_FILE="/state/${DB}.tables"
-                PREV_LIST="$(cat "$CUR_LIST_FILE" 2>/dev/null || true)"
-                printf '%s' "$TABLES" > "$CUR_LIST_FILE"
+                # ensure we signal exactly once per table after connectors are present
                 printf '%s' "$TABLES" | tr ',' '\n' | while read -r FQ; do
                   [ -z "$FQ" ] && continue
-                  if ! printf '%s\n' "$PREV_LIST" | tr ',' '\n' | grep -qx "$FQ"; then
+                  ST="/state/${DB}.${FQ}.snap"
+                  if [ ! -f "$ST" ]; then
                     signal_snapshot_table "$DB" "${FQ%%.*}" "${FQ#*.}"
+                    date -Is > "$ST"
                   fi
                 done
+
+                # (optional) keep a simple list of tables for visibility/debug
+                printf '%s' "$TABLES" > "/state/${DB}.tables"
               fi
             done
 
