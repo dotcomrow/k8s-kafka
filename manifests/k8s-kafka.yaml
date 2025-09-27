@@ -125,7 +125,6 @@ spec:
               TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
               CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 
-              # initContainer guarantees this exists, but keep a fallback just in case
               if [ ! -s /work/cluster.id ]; then
                 CID="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || date +%s%N)"
                 printf '%s' "$CID" > /work/cluster.id
@@ -668,7 +667,9 @@ spec:
           periodSeconds: 5
         resources:
           requests: { cpu: "250m", memory: "512Mi" }
-          limits: { cpu: "1500m", memory: "2Gi" }
+        limits:
+          cpu: "1500m"
+          memory: "2Gi"
         volumeMounts: [{ name: kafka-logs, mountPath: /tmp/kraft-combined-logs }]
 
 # ============================================================================
@@ -780,36 +781,44 @@ spec:
         image: quay.io/debezium/connect:1.9.7.Final
         imagePullPolicy: IfNotPresent
         env:
+        # --- Kafka cluster id (not used by connect, but kept if needed by tooling)
         - name: CLUSTER_ID
           valueFrom:
             secretKeyRef:
               name: kafka-cluster-id
               key: CLUSTER_ID
 
-        - { name: REST_HOST_NAME, value: "0.0.0.0" }
-        - { name: REST_PORT, value: "8083" }
-        - { name: ADVERTISED_HOST_NAME, value: "kafka-connect.kafka.svc.internal.lan" }
-        - { name: ADVERTISED_PORT, value: "8083" }
+        # --- REST interface
+        - { name: CONNECT_REST_HOST_NAME, value: "0.0.0.0" }
+        - { name: CONNECT_REST_PORT, value: "8083" }
+        - { name: CONNECT_REST_ADVERTISED_HOST_NAME, value: "kafka-connect.kafka.svc.internal.lan" }
+        - { name: CONNECT_REST_ADVERTISED_PORT, value: "8083" }
 
+        # --- Logging/JVM
         - { name: KAFKA_LOG4J_OPTS, value: "-Dlog4j.configuration=file:/kafka/etc/log4j.properties" }
-
-        - { name: BOOTSTRAP_SERVERS, value: "kafka.kafka.svc.internal.lan:9092" }
-        - { name: GROUP_ID, value: "connect-cluster" }
-        - { name: CONFIG_STORAGE_TOPIC, value: "_connect-configs" }
-        - { name: OFFSET_STORAGE_TOPIC,  value: "_connect-offsets" }
-        - { name: STATUS_STORAGE_TOPIC,  value: "_connect-status" }
-        - { name: CONFIG_STORAGE_REPLICATION_FACTOR, value: "1" }
-        - { name: OFFSET_STORAGE_REPLICATION_FACTOR,  value: "1" }
-        - { name: STATUS_STORAGE_REPLICATION_FACTOR,  value: "1" }
-
-        - { name: KEY_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
-        - { name: VALUE_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
-        - { name: KEY_CONVERTER_SCHEMAS_ENABLE, value: "true" }
-        - { name: VALUE_CONVERTER_SCHEMAS_ENABLE, value: "true" }
-
-        - { name: CONNECT_PLUGIN_PATH, value: "/plugins,/plugins/share/java,/plugins/share/confluent-hub-components,/plugins/yugabytedb" }
-
         - { name: KAFKA_HEAP_OPTS, value: "-Xms256m -Xmx512m" }
+
+        # --- Kafka & internal topics (FIX: ensure single-broker replication)
+        - { name: CONNECT_BOOTSTRAP_SERVERS, value: "kafka.kafka.svc.internal.lan:9092" }
+        - { name: CONNECT_GROUP_ID, value: "connect-cluster" }
+        - { name: CONNECT_CONFIG_STORAGE_TOPIC, value: "_connect-configs" }
+        - { name: CONNECT_OFFSET_STORAGE_TOPIC,  value: "_connect-offsets" }
+        - { name: CONNECT_STATUS_STORAGE_TOPIC,  value: "_connect-status" }
+        - { name: CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR, value: "1" }
+        - { name: CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR,  value: "1" }
+        - { name: CONNECT_STATUS_STORAGE_REPLICATION_FACTOR,  value: "1" }
+        - { name: CONNECT_CONFIG_STORAGE_PARTITIONS, value: "1" }
+        - { name: CONNECT_OFFSET_STORAGE_PARTITIONS,  value: "1" }
+        - { name: CONNECT_STATUS_STORAGE_PARTITIONS,  value: "1" }
+
+        # --- Converters
+        - { name: CONNECT_KEY_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
+        - { name: CONNECT_VALUE_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
+        - { name: CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE, value: "true" }
+        - { name: CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE, value: "true" }
+
+        # --- Plugins & GCP
+        - { name: CONNECT_PLUGIN_PATH, value: "/plugins,/plugins/share/java,/plugins/share/confluent-hub-components,/plugins/yugabytedb" }
         - { name: GOOGLE_APPLICATION_CREDENTIALS, value: "/vault/secrets/gcp-key.json" }
 
         ports:
@@ -1156,7 +1165,7 @@ spec:
 
                 ensure_signal_table "$DB"
 
-                # ----- SOURCE CONNECTOR CONFIG (YB gRPC) -----
+                # ----- SOURCE CONNECTOR CONFIG -----
                 SRC_PUT="$(mktmp)"
                 {
                   echo '{'
@@ -1167,12 +1176,6 @@ spec:
                   echo "  \"database.user\":\"$(esc "$PGUSER")\","
                   echo "  \"database.password\":\"$(esc "$PGPASSWORD")\","
                   echo "  \"database.dbname\":\"$(esc "$DB")\","
-                  # pass master addresses when available (safe to include multiple keys)
-                  if [ -n "${YB_MASTER_ADDRESSES:-}" ]; then
-                    echo "  \"master.addresses\":\"$(esc "$YB_MASTER_ADDRESSES")\","
-                    echo "  \"yb.master.addresses\":\"$(esc "$YB_MASTER_ADDRESSES")\","
-                    echo "  \"yugabyte.master.addresses\":\"$(esc "$YB_MASTER_ADDRESSES")\","
-                  fi
                   echo "  \"database.server.name\":\"$(esc "${SERVER_PREFIX}_${DB}")\","
                   echo "  \"table.include.list\":\"$(esc "$TABLES")\","
                   echo '  "snapshot.mode":"initial",'
@@ -1193,7 +1196,6 @@ spec:
                 api_put  "${CONNECT_URL}/connectors/yb-source-${DB}/config" "$SRC_PUT" || \
                 api_post "${CONNECT_URL}/connectors"                      "$SRC_POST"
 
-                # small poll for status (non-blocking if still starting)
                 for i in $(seq 1 10); do
                   sleep 2
                   STATUS_CODE=$(curl -sS -o /tmp/s.json -w '%{http_code}' "${CONNECT_URL}/connectors/yb-source-${DB}/status" || true)
