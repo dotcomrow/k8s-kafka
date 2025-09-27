@@ -866,6 +866,7 @@ spec:
           {{ with .Data.data.dataset }}BQ_DEFAULT_DATASET={{ . }}{{ end }}
           {{- end -}}
     spec:
+      serviceAccountName: bq-yb-bootstrap
       restartPolicy: Never
       containers:
       - name: bq
