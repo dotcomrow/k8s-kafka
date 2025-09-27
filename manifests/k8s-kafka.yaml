@@ -624,7 +624,8 @@ spec:
         - name: CLUSTER_ID
           valueFrom: { secretKeyRef: { name: kafka-cluster-id, key: CLUSTER_ID } }
         command: ["/bin/bash","-lc"]
-        args: |
+        args: 
+        - |
           set -Eeuo pipefail
           PS4='+ [KAFKA-FMT] $(date -Is) '
           set -x
