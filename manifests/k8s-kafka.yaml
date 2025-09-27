@@ -1214,45 +1214,46 @@ spec:
             local MASTERS="${YB_MASTER_ADDRESSES:-}"
             [ -z "$MASTERS" ] && { echo "ERROR: YB_MASTER_ADDRESSES is required" >&2; return 1; }
 
+            extract32() { sed -n 's/.*\([0-9a-fA-F]\{32\}\).*/\1/p' | tr 'A-F' 'a-f' | head -n1; }
+
+            # 1) Per-DB listing (include DB streams!)
             local OUT SID
-            # 1) Per-db list_change_data_streams
-            OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" list_change_data_streams ysql.${DB} 2>/dev/null || true)"
-            SID="$(printf '%s\n' "$OUT" | grep -Ei 'db_stream_id|stream[ _]?id' | extract32)"
+            OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" \
+                  --include_db_streams=true list_change_data_streams ysql.${DB} 2>/dev/null || true)"
+            SID="$(printf '%s\n' "$OUT" | grep -Ei '(db_stream_id|stream[ _]?id)' | extract32)"
             [ -n "$SID" ] && { printf '%s' "$SID"; return 0; }
 
-            # 2) Global list_change_data_streams filtered by namespace stanza
-            OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" list_change_data_streams ysql 2>/dev/null || true)"
+            # 2) Replication slots view (prints db_stream_id next to slot)
+            OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" \
+                  list_replication_slots ysql.${DB} 2>/dev/null || true)"
+            SID="$(printf '%s\n' "$OUT" | grep -Ei 'db_stream_id' | extract32)"
+            [ -n "$SID" ] && { printf '%s' "$SID"; return 0; }
+
+            # 3) Global list (include DB streams) and filter DB stanza
+            OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" \
+                  --include_db_streams=true list_change_data_streams ysql 2>/dev/null || true)"
             SID="$(printf '%s\n' "$OUT" \
-                  | awk -v db="$DB" 'BEGIN{RS=""; FS="\n"} $0 ~ ("namespace_name:[[:space:]]*" db) {for(i=1;i<=NF;i++) if (tolower($i) ~ /(db_stream_id|stream[ _]?id)/) print $i}' \
+                  | awk -v db="$DB" 'BEGIN{RS="";FS="\n"} $0 ~ ("namespace_name:[[:space:]]*" db) \
+                    {for(i=1;i<=NF;i++) if (tolower($i) ~ /(db_stream_id|stream[ _]?id)/) print $i}' \
                   | extract32)"
             [ -n "$SID" ] && { printf '%s' "$SID"; return 0; }
 
-            # 3) Try list_replication_slots (present on some builds)
-            if /home/yugabyte/bin/yb-admin help 2>/dev/null | grep -q 'list_replication_slots'; then
-              OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" list_replication_slots ysql.${DB} 2>/dev/null || true)"
-              SID="$(printf '%s\n' "$OUT" | extract32)"
-              [ -n "$SID" ] && { printf '%s' "$SID"; return 0; }
+            # 4) Create; if the namespace already has a slot, re-query (1)+(2)+(3) and use it
+            OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" \
+                  create_change_data_stream ysql.${DB} 2>&1 || true)"
+            SID="$(printf '%s\n' "$OUT" | grep -Ei '(db_stream_id|stream[ _]?id)' | extract32)"
+            if [ -z "$SID" ] && printf '%s' "$OUT" | grep -qi 'already has replication slot'; then
+              OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" \
+                    --include_db_streams=true list_change_data_streams ysql.${DB} 2>/dev/null || true)"
+              SID="$(printf '%s\n' "$OUT" | grep -Ei '(db_stream_id|stream[ _]?id)' | extract32)"
+              if [ -z "$SID" ]; then
+                OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" \
+                      list_replication_slots ysql.${DB} 2>/dev/null || true)"
+                SID="$(printf '%s\n' "$OUT" | grep -Ei 'db_stream_id' | extract32)"
+              fi
             fi
 
-            # 4) Inspect YSQL for existing replication slots (slot_name usually embeds the 32-hex id)
-            local URL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${DB}?sslmode=disable"
-            OUT="$(/home/yugabyte/bin/ysqlsh "$URL" -Atc "select slot_name from pg_replication_slots where database = '${DB}'" 2>/dev/null || true)"
-            SID="$(printf '%s\n' "$OUT" | extract32)"
-            [ -n "$SID" ] && { printf '%s' "$SID"; return 0; }
-
-            # 5) Create (only if we truly can't find one); if 'already has replication slot', re-list globally once more
-            OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" create_change_data_stream ysql.${DB} 2>&1 || true)"
-            SID="$(printf '%s\n' "$OUT" | grep -Ei 'db_stream_id|stream[ _]?id' | extract32)"
-            if [ -z "$SID" ] && printf '%s\n' "$OUT" | grep -qi 'already has replication slot'; then
-              OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" list_change_data_streams ysql 2>/dev/null || true)"
-              SID="$(printf '%s\n' "$OUT" \
-                    | awk -v db="$DB" 'BEGIN{RS=""; FS="\n"} $0 ~ ("namespace_name:[[:space:]]*" db) {for(i=1;i<=NF;i++) if (tolower($i) ~ /(db_stream_id|stream[ _]?id)/) print $i}' \
-                    | extract32)"
-            fi
-
-            [ -n "$SID" ] && { printf '%s' "$SID"; return 0; }
-            echo "ERROR: could not obtain CDC stream id for DB=${DB}" >&2
-            return 1
+            [ -n "$SID" ] && printf '%s' "$SID" || { echo "ERROR: could not obtain CDC stream id for DB=${DB}" >&2; return 1; }
           }
 
           SERVER_PREFIX="${SERVER_PREFIX:-yb}"
