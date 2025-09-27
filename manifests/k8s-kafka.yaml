@@ -191,7 +191,8 @@ spec:
         - { name: BQ_BOOTSTRAP_BUCKET, value: "suncoast-systems-yb-bootstrap" }
         - { name: BQ_DEFAULT_DATASET, value: "yugabyte_backup" }
         command: ["/bin/sh","-c"]
-        args: |
+        args: 
+        - |
           set -eu
           PS4='+ [VAULTCFG] $(date -Is) '
           set -x
@@ -279,7 +280,8 @@ spec:
       - name: initdb
         image: yugabytedb/yugabyte:latest
         command: ["/bin/bash","-lc"]
-        args: |
+        args: 
+        - |
           set -Eeuo pipefail
           PS4='+ [DBINIT] $(date -Is) '
           set -x
@@ -376,7 +378,8 @@ spec:
         image: yugabytedb/yugabyte:latest
         volumeMounts: [{ name: work, mountPath: /work }]
         command: ["/bin/bash","-lc"]
-        args: |
+        args: 
+        - |
           set -Eeuo pipefail
           PS4='+ [PLANNER] $(date -Is) '
           set -x
@@ -436,7 +439,8 @@ spec:
         image: yugabytedb/yugabyte:latest
         volumeMounts: [{ name: work, mountPath: /work }]
         command: ["/bin/bash","-lc"]
-        args: |
+        args: 
+        - |
           set -Eeuo pipefail
           PS4='+ [IMPORTER] $(date -Is) '
           set -x
@@ -496,7 +500,8 @@ spec:
         - { name: CLOUDSDK_CORE_DISABLE_PROMPTS, value: "1" }
         volumeMounts: [{ name: work, mountPath: /work }]
         command: ["/bin/bash","-lc"]
-        args: |
+        args: 
+        - |
           set -Eeuo pipefail
           PS4='+ [CLOUDSDK] $(date -Is) '
           set -x
@@ -544,7 +549,8 @@ spec:
         image: curlimages/curl:8.8.0
         volumeMounts: [{ name: work, mountPath: /work }]
         command: ["/bin/sh","-lc"]
-        args: |
+        args: 
+        - |
           set -eu
           PS4='+ [FLAGGER] $(date -Is) '
           set -x
@@ -739,7 +745,8 @@ spec:
       - name: install-bq
         image: confluentinc/cp-kafka-connect:7.6.1
         command: ["/bin/bash","-lc"]
-        args: |
+        args: 
+        - |
           set -Eeuo pipefail
           PS4='+ [INSTALL-BQ] $(date -Is) '
           set -x
@@ -750,7 +757,8 @@ spec:
       - name: fetch-yb-connector
         image: quay.io/yugabyte/debezium-connector:latest
         command: ["/bin/sh","-lc"]
-        args: |
+        args: 
+        - |
           set -eu
           PS4='+ [FETCH-YB] $(date -Is) '
           set -x
@@ -1004,7 +1012,8 @@ spec:
         - { name: SERVER_PREFIX, value: "yb" }
         - { name: SCAN_INTERVAL, value: "30" }
         command: ["/bin/bash","-lc"]
-        args: |
+        args: 
+        - |
           set -Eeuo pipefail
           PS4='+ [WATCHER] $(date -Is) '
           set -x
