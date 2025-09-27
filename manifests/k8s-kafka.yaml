@@ -421,12 +421,12 @@ spec:
             SELECT schema, \"table\", jdesc->'bootstrap' AS b
               FROM j WHERE jdesc ? 'bootstrap'
           )
-          SELECT schema, \"table\"
-               , COALESCE(b->>'bq','') AS bq
-               , COALESCE(b->>'gcs_prefix', \"table\") AS gcs_prefix
-               , COALESCE(b->>'format','CSV') AS format
-               , COALESCE(b->>'header','true') AS header
-               , COALESCE(b->>'columns','') AS columns
+          SELECT schema, \"table\",
+                 COALESCE(b->>'bq','') AS bq,
+                 COALESCE(b->>'gcs_prefix', \"table\") AS gcs_prefix,
+                 COALESCE(b->>'format','CSV') AS format,
+                 COALESCE(b->>'header','true') AS header,
+                 COALESCE(b->>'columns','') AS columns
             FROM b
            WHERE COALESCE( (b->>'enabled')::boolean, false ) = true;
           "
@@ -623,6 +623,7 @@ spec:
           PS4='+ [ENSURE-BQ] $(date -Is) '
           set -x
 
+          # Wait for Vault-injected files
           for f in /vault/secrets/bq.env /vault/secrets/gcp-key.json; do
             i=0; while [ ! -s "$f" ]; do i=$((i+1)); [ $i -gt 120 ] && echo "[ENSURE-BQ] missing $f" >&2 && exit 1; sleep 2; done
           done
@@ -631,6 +632,7 @@ spec:
           : "${BQ_DEFAULT_DATASET:?missing BQ_DEFAULT_DATASET}"
           : "${LOCATION:=US}"
 
+          # Auth via SA JSON (no interactivity)
           gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}" >/dev/null 2>&1 || true
 
           echo "[ENSURE-BQ] Ensuring dataset ${BQ_PROJECT}:${BQ_DEFAULT_DATASET} (${LOCATION})"
@@ -755,7 +757,6 @@ spec:
 
 # ============================================================================
 # Kafka Connect (wave 4) — Vault-injected GCP keyfile
-#  ——— CHANGE: upgrade Debezium Connect image to 2.6.1 for YB gRPC compatibility ———
 # ============================================================================
 ---
 apiVersion: v1
@@ -879,11 +880,14 @@ spec:
           done
       containers:
       - name: connect
-        image: quay.io/debezium/connect:2.6.1.Final
+        image: quay.io/debezium/connect:1.9.7.Final
         imagePullPolicy: IfNotPresent
         env:
         - name: CLUSTER_ID
-          valueFrom: { secretKeyRef: { name: kafka-cluster-id, key: CLUSTER_ID } }
+          valueFrom:
+            secretKeyRef:
+              name: kafka-cluster-id
+              key: CLUSTER_ID
 
         - { name: REST_HOST_NAME, value: "0.0.0.0" }
         - { name: REST_PORT, value: "8083" }
@@ -1046,7 +1050,7 @@ spec:
 
 # ============================================================================
 # Continuous Annotation Watcher (wave 50)
-#  ——— KEEP annotations, add resilient re-signaling + explicit stream-id logging ———
+#  ——— FIX: let Debezium manage CDC stream id; keep per-table annotations ———
 # ============================================================================
 ---
 apiVersion: apps/v1
@@ -1178,12 +1182,12 @@ spec:
                 FROM j WHERE jdesc ? 'bootstrap'
               )
               SELECT schema, \"table\",
-                     COALESCE(b->>'bq','') AS bq,
-                     COALESCE(b->>'gcs_prefix', \"table\") AS gcs_prefix,
-                     COALESCE(b->>'format','CSV') AS format,
-                     COALESCE(b->>'header','true') AS header,
-                     COALESCE(b->>'columns','') AS columns,
-                     COALESCE((b->>'enabled')::boolean,false) AS enabled
+                    COALESCE(b->>'bq','') AS bq,
+                    COALESCE(b->>'gcs_prefix', \"table\") AS gcs_prefix,
+                    COALESCE(b->>'format','CSV') AS format,
+                    COALESCE(b->>'header','true') AS header,
+                    COALESCE(b->>'columns','') AS columns,
+                    COALESCE((b->>'enabled')::boolean,false) AS enabled
               FROM b
               ORDER BY schema, \"table\";
             " || true
@@ -1200,48 +1204,8 @@ spec:
             local URL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${DB}?sslmode=disable"
             local ID="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || date +%s%N)"
             local DATA="{\"data-collections\": [\"${SCHEMA}.${TBL}\"]}"
-            echo "[WATCHER] signaling execute-snapshot for ${DB}.${SCHEMA}.${TBL} (id=${ID})"
-            /home/yugabyte/bin/ysqlsh "$URL" -v ON_ERROR_STOP=1 -Atc \
-              "INSERT INTO public.debezium_signal(id,type,data) VALUES ('${ID}','execute-snapshot','${DATA}');" >/dev/null 2>&1 || true
-          }
-
-          get_or_create_stream_id() {
-            local DB="$1"
-            local MASTERS="${YB_MASTER_ADDRESSES:-}"
-            [ -z "$MASTERS" ] && { echo "ERROR: YB_MASTER_ADDRESSES is required" >&2; return 1; }
-
-            extract32() { sed -n 's/.*\([0-9a-fA-F]\{32\}\).*/\1/p' | tr 'A-F' 'a-f' | head -n1; }
-
-            local OUT SID
-            OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" list_change_data_streams ysql."$DB" 2>/dev/null || true)"
-            SID="$(printf '%s\n' "$OUT" | grep -Ei 'stream[_ ]?id|db_stream_id' | extract32)"
-            if [ -n "$SID" ]; then echo "[WATCHER] using existing CDC stream for ${DB}: $SID"; printf '%s' "$SID"; return 0; fi
-
-            OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" list_change_data_streams ysql 2>/dev/null || true)"
-            SID="$(printf '%s\n' "$OUT" \
-                  | awk -v db="$DB" 'BEGIN{RS="";FS="\n"}/namespace_name:[[:space:]]*db/ {for(i=1;i<=NF;i++) if ($i ~ /(stream[ _]?id|db_stream_id)/i) print $i}' \
-                  | extract32)"
-            if [ -n "$SID" ]; then echo "[WATCHER] using CDC stream (global) for ${DB}: $SID"; printf '%s' "$SID"; return 0; fi
-
-            OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" list_replication_slots ysql."$DB" 2>/dev/null || true)"
-            SID="$(printf '%s\n' "$OUT" | extract32)"
-            if [ -n "$SID" ]; then echo "[WATCHER] using CDC stream from replication slots for ${DB}: $SID"; printf '%s' "$SID"; return 0; fi
-
-            OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" create_change_data_stream ysql."$DB" 2>&1 || true)"
-            SID="$(printf '%s\n' "$OUT" | grep -Ei 'stream[_ ]?id|db_stream_id' | extract32)"
-            if [ -z "$SID" ] && printf '%s' "$OUT" | grep -qi 'already has replication slot'; then
-              OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" list_change_data_streams ysql 2>/dev/null || true)"
-              SID="$(printf '%s\n' "$OUT" \
-                    | awk -v db="$DB" 'BEGIN{RS="";FS="\n"}/namespace_name:[[:space:]]*db/ {for(i=1;i<=NF;i++) if ($i ~ /(stream[ _]?id|db_stream_id)/i) print $i}' \
-                    | extract32)"
-            fi
-
-            if [ -z "$SID" ] || ! printf '%s' "$SID" | grep -qiE '^[0-9a-f]{32}$'; then
-              echo "ERROR: could not obtain a valid 32-hex CDC stream id for DB=${DB}" >&2
-              return 1
-            fi
-            echo "[WATCHER] created CDC stream for ${DB}: $SID"
-            printf '%s' "$SID"
+            /home/yugabyte/bin/ysqlsh "$URL" -Atc "INSERT INTO public.debezium_signal(id,type,data) VALUES ('${ID}','execute-snapshot','${DATA}');" >/dev/null 2>&1 || true
+            echo "signaled snapshot for ${DB}.${SCHEMA}.${TBL}"
           }
 
           SERVER_PREFIX="${SERVER_PREFIX:-yb}"
@@ -1290,9 +1254,7 @@ spec:
 
                 ensure_signal_table "$DB"
 
-                STREAM_ID="$(get_or_create_stream_id "$DB")" || { echo "ERROR: no CDC stream id; skipping DB ${DB}"; continue; }
-                echo "[WATCHER] DB=${DB} STREAM_ID=${STREAM_ID}"
-
+                # ----- SOURCE CONNECTOR (YB gRPC) -----
                 SRC_PUT="$(mktmp)"
                 {
                   echo '{'
@@ -1304,14 +1266,11 @@ spec:
                   echo "  \"database.password\":\"$(esc "$PGPASSWORD")\","
                   echo "  \"database.dbname\":\"$(esc "$DB")\","
                   echo "  \"database.server.name\":\"$(esc "${SERVER_PREFIX}_${DB}")\","
-                  echo "  \"database.streamid\":\"$(esc "$STREAM_ID")\","
                   if [ -n "${YB_MASTER_ADDRESSES:-}" ]; then
                     echo "  \"database.master.addresses\":\"$(esc "$YB_MASTER_ADDRESSES")\","
-                    echo "  \"yb.master.addresses\":\"$(esc "$YB_MASTER_ADDRESSES")\","
                   fi
                   echo "  \"table.include.list\":\"$(esc "$TABLES")\","
                   echo '  "snapshot.mode":"initial",'
-                  [ -n "${YB_MASTER_ADDRESSES:-}" ] && echo "  \"yugabyte.master.addresses\":\"$(esc "$YB_MASTER_ADDRESSES")\","
                   echo '  "incremental.snapshot.enabled":"true",'
                   echo '  "signal.data.collection":"public.debezium_signal",'
                   echo '  "transforms":"unwrap",'
@@ -1326,13 +1285,14 @@ spec:
                 api_put  "${CONNECT_URL}/connectors/yb-source-${DB}/config" "$SRC_PUT" || \
                 api_post "${CONNECT_URL}/connectors"                      "$SRC_POST"
 
-                for i in $(seq 1 10); do
-                  sleep 2
+                for i in $(seq 1 20); do
+                  sleep 3
                   STATUS_CODE=$(curl -sS -o /tmp/s.json -w '%{http_code}' "${CONNECT_URL}/connectors/yb-source-${DB}/status" || true)
                   [ "$STATUS_CODE" = "200" ] && break
                 done
                 echo "yb-source-${DB} status ($STATUS_CODE):"; tail -c 2000 /tmp/s.json 2>/dev/null || true
 
+                # ----- BigQuery SINK CONNECTOR -----
                 SINK_PUT="$(mktmp)"
                 {
                   echo '{'
@@ -1355,31 +1315,25 @@ spec:
                 api_put  "${CONNECT_URL}/connectors/bq-sink-${DB}/config" "$SINK_PUT" || \
                 api_post "${CONNECT_URL}/connectors"                      "$SINK_POST"
 
-                for i in $(seq 1 10); do
-                  sleep 2
+                for i in $(seq 1 20); do
+                  sleep 3
                   STATUS_CODE=$(curl -sS -o /tmp/s2.json -w '%{http_code}' "${CONNECT_URL}/connectors/bq-sink-${DB}/status" || true)
                   [ "$STATUS_CODE" = "200" ] && break
                 done
                 echo "bq-sink-${DB} status ($STATUS_CODE):"; tail -c 2000 /tmp/s2.json 2>/dev/null || true
 
-                printf '%s' "$TABLES" > "/state/${DB}.tables"
-              fi
-
-              # Always (re)signal snapshots on a cooldown to guarantee data appears
-              if [ -f "/state/${DB}.tables" ]; then
-                while IFS=',' read -r FQ; do
+                # signal a one-time incremental snapshot per new table (cooldown to avoid spam)
+                now_epoch="$(date +%s)"
+                printf '%s' "$TABLES" | tr ',' '\n' | while read -r FQ; do
                   [ -z "$FQ" ] && continue
                   ST="/state/${DB}.${FQ}.snap"
-                  NOW=$(date +%s); LAST=0
-                  [ -f "$ST" ] && LAST=$(date -d "$(cat "$ST" 2>/dev/null || echo 0)" +%s 2>/dev/null || echo 0)
-                  AGE=$((NOW - LAST))
-                  if [ ! -f "$ST" ] || [ "$AGE" -ge "$SNAPSHOT_COOLDOWN_SECS" ]; then
+                  if [ ! -f "$ST" ] || [ $((now_epoch - $(date -d "$(cat "$ST" 2>/dev/null || echo 0)" +%s 2>/dev/null || echo 0))) -ge "$SNAPSHOT_COOLDOWN_SECS" ]; then
                     signal_snapshot_table "$DB" "${FQ%%.*}" "${FQ#*.}"
                     date -Is > "$ST"
-                  else
-                    echo "[WATCHER] snapshot for ${DB}.${FQ} last signaled ${AGE}s ago; cooldown ${SNAPSHOT_COOLDOWN_SECS}s"
                   fi
-                done < "/state/${DB}.tables"
+                done
+
+                printf '%s' "$TABLES" > "/state/${DB}.tables"
               fi
             done
 
