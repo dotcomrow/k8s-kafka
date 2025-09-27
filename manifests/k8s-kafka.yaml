@@ -874,7 +874,8 @@ spec:
         - { name: GOOGLE_APPLICATION_CREDENTIALS, value: /vault/secrets/gcp-key.json }
         - { name: CLOUDSDK_CORE_DISABLE_PROMPTS, value: "1" }
         command: ["/bin/bash","-lc"]
-        args: |
+        args: 
+        - |
           set -euo pipefail
           . /vault/secrets/bq.env
           : "${BQ_PROJECT:?missing}"; : "${BQ_DEFAULT_DATASET:?missing}"
