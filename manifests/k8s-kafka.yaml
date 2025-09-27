@@ -733,100 +733,116 @@ spec:
     spec:
       serviceAccountName: bq-yb-bootstrap
       terminationGracePeriodSeconds: 30
-      securityContext:
-        fsGroup: 1000
+      securityContext: { fsGroup: 1000 }
       volumes:
       - { name: plugins, emptyDir: {} }
       - name: log4j
         configMap:
           name: kafka-connect-log4j
-          items:
-          - key: log4j.properties
-            path: log4j.properties
+          items: [{ key: log4j.properties, path: log4j.properties }]
       initContainers:
       - name: install-bq
         image: confluentinc/cp-kafka-connect:7.6.1
         command: ["/bin/bash","-lc"]
-        args: 
+        args:
         - |
           set -Eeuo pipefail
-          PS4='+ [INSTALL-BQ] $(date -Is) '
-          set -x
           mkdir -p /plugins
-          confluent-hub install --no-prompt --component-dir /plugins \
-            wepay/kafka-connect-bigquery:2.5.7
+          confluent-hub install --no-prompt --component-dir /plugins wepay/kafka-connect-bigquery:2.5.7
         volumeMounts: [{ name: plugins, mountPath: /plugins }]
       - name: fetch-yb-connector
         image: quay.io/yugabyte/debezium-connector:latest
         command: ["/bin/sh","-lc"]
-        args: 
+        args:
         - |
           set -eu
-          PS4='+ [FETCH-YB] $(date -Is) '
-          set -x
           mkdir -p /out/yugabytedb
           for SRC in /plugins /kafka/connect /kafka/connectors /kafka/connect/yugabytedb /opt/kafka/connect /opt/kafka/plugins /debezium-connector /kafka; do
             if [ -d "$SRC" ] && [ -n "$(ls -A "$SRC" 2>/dev/null || true)" ]; then
-              echo "Found YugabyteDB connector payload at $SRC"
               cp -R "$SRC"/* /out/yugabytedb/
-              find /out/yugabytedb -type f \( -iname '*cloudevents*.jar' -o -iname 'debezium-converter-cloud-events-*.jar' \) -print -delete || true
+              find /out/yugabytedb -type f \( -iname '*cloudevents*.jar' -o -iname 'debezium-converter-cloud-events-*.jar' \) -delete || true
               exit 0
             fi
           done
           echo "Could not find connector payload"; exit 1
-        volumeMounts:
-        - { name: plugins, mountPath: /out }
+        volumeMounts: [{ name: plugins, mountPath: /out }]
+      - name: precreate-internal-topics
+        image: apache/kafka:3.9.0
+        command: ["/bin/bash","-lc"]
+        args:
+        - |
+          set -euo pipefail
+          BS="kafka.kafka.svc.internal.lan:9092"
+          for i in $(seq 1 60); do
+            /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BS" --list >/dev/null 2>&1 && break
+            sleep 2
+          done
+          create() {
+            local t="$1" p="$2"
+            /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BS" \
+              --create --if-not-exists --topic "$t" --partitions "$p" --replication-factor 1 || true
+            /opt/kafka/bin/kafka-configs.sh --bootstrap-server "$BS" --alter --topic "$t" \
+              --add-config cleanup.policy=compact,compression.type=producer,segment.ms=604800000 || true
+          }
+          create "_connect-configs" 1
+          create "_connect-offsets"  1
+          create "_connect-status"   1
       containers:
       - name: connect
         image: quay.io/debezium/connect:1.9.7.Final
         imagePullPolicy: IfNotPresent
         env:
-        # --- Kafka cluster id (not used by connect, but kept if needed by tooling)
+        # (Some tooling reads this; not required by Connect)
         - name: CLUSTER_ID
-          valueFrom:
-            secretKeyRef:
-              name: kafka-cluster-id
-              key: CLUSTER_ID
+          valueFrom: { secretKeyRef: { name: kafka-cluster-id, key: CLUSTER_ID } }
 
-        # --- REST interface
-        - { name: CONNECT_REST_HOST_NAME, value: "0.0.0.0" }
-        - { name: CONNECT_REST_PORT, value: "8083" }
-        - { name: CONNECT_REST_ADVERTISED_HOST_NAME, value: "kafka-connect.kafka.svc.internal.lan" }
-        - { name: CONNECT_REST_ADVERTISED_PORT, value: "8083" }
+        # ------------ Un-prefixed vars (Debezium entrypoint checks these) ------------
+        - { name: BOOTSTRAP_SERVERS,            value: "kafka.kafka.svc.internal.lan:9092" }
+        - { name: GROUP_ID,                     value: "connect-cluster" }
+        - { name: CONFIG_STORAGE_TOPIC,         value: "_connect-configs" }
+        - { name: OFFSET_STORAGE_TOPIC,         value: "_connect-offsets" }
+        - { name: STATUS_STORAGE_TOPIC,         value: "_connect-status" }
+        - { name: CONFIG_STORAGE_REPLICATION_FACTOR, value: "1" }
+        - { name: OFFSET_STORAGE_REPLICATION_FACTOR,  value: "1" }
+        - { name: STATUS_STORAGE_REPLICATION_FACTOR,  value: "1" }
+        - { name: OFFSET_STORAGE_PARTITIONS,    value: "1" }
+        - { name: STATUS_STORAGE_PARTITIONS,    value: "1" }
+        - { name: KEY_CONVERTER,                value: "org.apache.kafka.connect.json.JsonConverter" }
+        - { name: VALUE_CONVERTER,              value: "org.apache.kafka.connect.json.JsonConverter" }
+        - { name: KEY_CONVERTER_SCHEMAS_ENABLE,   value: "true" }
+        - { name: VALUE_CONVERTER_SCHEMAS_ENABLE, value: "true" }
+        - { name: REST_HOST_NAME,               value: "0.0.0.0" }
+        - { name: REST_PORT,                    value: "8083" }
+        - { name: ADVERTISED_HOST_NAME,         value: "kafka-connect.kafka.svc.internal.lan" }
+        - { name: ADVERTISED_PORT,              value: "8083" }
 
-        # --- Logging/JVM
-        - { name: KAFKA_LOG4J_OPTS, value: "-Dlog4j.configuration=file:/kafka/etc/log4j.properties" }
-        - { name: KAFKA_HEAP_OPTS, value: "-Xms256m -Xmx512m" }
-
-        # --- Kafka & internal topics (FIX: ensure single-broker replication)
-        - { name: CONNECT_BOOTSTRAP_SERVERS, value: "kafka.kafka.svc.internal.lan:9092" }
-        - { name: CONNECT_GROUP_ID, value: "connect-cluster" }
-        - { name: CONNECT_CONFIG_STORAGE_TOPIC, value: "_connect-configs" }
-        - { name: CONNECT_OFFSET_STORAGE_TOPIC,  value: "_connect-offsets" }
-        - { name: CONNECT_STATUS_STORAGE_TOPIC,  value: "_connect-status" }
+        # ------------ CONNECT_* mirror (worker reads these directly too) ------------
+        - { name: CONNECT_BOOTSTRAP_SERVERS,            value: "kafka.kafka.svc.internal.lan:9092" }
+        - { name: CONNECT_GROUP_ID,                     value: "connect-cluster" }
+        - { name: CONNECT_CONFIG_STORAGE_TOPIC,         value: "_connect-configs" }
+        - { name: CONNECT_OFFSET_STORAGE_TOPIC,         value: "_connect-offsets" }
+        - { name: CONNECT_STATUS_STORAGE_TOPIC,         value: "_connect-status" }
         - { name: CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR, value: "1" }
         - { name: CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR,  value: "1" }
         - { name: CONNECT_STATUS_STORAGE_REPLICATION_FACTOR,  value: "1" }
-        - { name: CONNECT_CONFIG_STORAGE_PARTITIONS, value: "1" }
-        - { name: CONNECT_OFFSET_STORAGE_PARTITIONS,  value: "1" }
-        - { name: CONNECT_STATUS_STORAGE_PARTITIONS,  value: "1" }
-
-        # --- Converters
-        - { name: CONNECT_KEY_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
-        - { name: CONNECT_VALUE_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
-        - { name: CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE, value: "true" }
+        - { name: CONNECT_CONFIG_STORAGE_PARTITIONS,    value: "1" }
+        - { name: CONNECT_OFFSET_STORAGE_PARTITIONS,    value: "1" }
+        - { name: CONNECT_STATUS_STORAGE_PARTITIONS,    value: "1" }
+        - { name: CONNECT_KEY_CONVERTER,                value: "org.apache.kafka.connect.json.JsonConverter" }
+        - { name: CONNECT_VALUE_CONVERTER,              value: "org.apache.kafka.connect.json.JsonConverter" }
+        - { name: CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE,   value: "true" }
         - { name: CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE, value: "true" }
 
-        # --- Plugins & GCP
+        # ------------ Plugins & logging ------------
         - { name: CONNECT_PLUGIN_PATH, value: "/plugins,/plugins/share/java,/plugins/share/confluent-hub-components,/plugins/yugabytedb" }
         - { name: GOOGLE_APPLICATION_CREDENTIALS, value: "/vault/secrets/gcp-key.json" }
+        - { name: KAFKA_LOG4J_OPTS, value: "-Dlog4j.configuration=file:/kafka/etc/log4j.properties" }
+        - { name: KAFKA_HEAP_OPTS, value: "-Xms256m -Xmx512m" }
 
-        ports:
-        - { containerPort: 8083 }
-
+        ports: [{ containerPort: 8083 }]
         readinessProbe:
           httpGet: { path: /connectors, port: 8083 }
-          initialDelaySeconds: 60
+          initialDelaySeconds: 45
           periodSeconds: 5
           failureThreshold: 6
         livenessProbe:
@@ -836,7 +852,7 @@ spec:
           failureThreshold: 6
         resources:
           requests: { cpu: "250m", memory: "768Mi" }
-          limits: { cpu: "1000m", memory: "1.5Gi" }
+          limits:   { cpu: "1000m", memory: "1.5Gi" }
         volumeMounts:
         - { name: plugins, mountPath: /plugins }
         - { name: log4j,  mountPath: /kafka/etc }
