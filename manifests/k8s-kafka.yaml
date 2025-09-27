@@ -1206,6 +1206,27 @@ spec:
             echo "signaled snapshot for ${DB}.${SCHEMA}.${TBL}"
           }
 
+          # --- NEW: obtain (or create once) a CDC DB stream id per DB ---
+          get_or_create_stream_id() {
+            local DB="$1" f="/state/${DB}.streamid"
+            if [ -s "$f" ]; then cat "$f"; return 0; fi
+            if [ -z "${YB_MASTER_ADDRESSES:-}" ]; then
+              echo "[WATCHER] ERROR: YB_MASTER_ADDRESSES is empty; cannot create DB stream for $DB" >&2
+              return 1
+            fi
+            local out id
+            out=$(/home/yugabyte/bin/yb-admin --master_addresses "$YB_MASTER_ADDRESSES" \
+                  create_change_data_stream ysql."$DB" 2>&1 || true)
+            id=$(printf '%s\n' "$out" | awk -F': ' '/CDC Stream ID/{print $2}' | tr -d '\r\n')
+            if [ -z "$id" ]; then
+              echo "[WATCHER] ERROR: could not obtain DB stream id for $DB; yb-admin output:" >&2
+              echo "$out" >&2
+              return 1
+            fi
+            printf '%s' "$id" > "$f"
+            printf '%s' "$id"
+          }
+
           SERVER_PREFIX="${SERVER_PREFIX:-yb}"
           SCAN_INTERVAL="${SCAN_INTERVAL:-30}"
 
@@ -1251,7 +1272,9 @@ spec:
 
                 ensure_signal_table "$DB"
 
-                # ----- SOURCE CONNECTOR (YB gRPC) -----
+                # --- NEW: fetch/create the stream id and use it in source config ---
+                STREAM_ID="$(get_or_create_stream_id "$DB")" || { echo "[WATCHER] skipping $DB (no stream id)"; continue; }
+
                 # ----- SOURCE CONNECTOR (YB gRPC) -----
                 SRC_PUT="$(mktmp)"
                 {
@@ -1264,14 +1287,14 @@ spec:
                   echo "  \"database.password\":\"$(esc "$PGPASSWORD")\","
                   echo "  \"database.dbname\":\"$(esc "$DB")\","
                   echo "  \"database.server.name\":\"$(esc "${SERVER_PREFIX}_${DB}")\","
-                  # >>> add this guard so we pass the masters from Vault <<<
                   if [ -n "${YB_MASTER_ADDRESSES:-}" ]; then
                     echo "  \"database.master.addresses\":\"$(esc "$YB_MASTER_ADDRESSES")\","
                     echo "  \"yb.master.addresses\":\"$(esc "$YB_MASTER_ADDRESSES")\","
+                    echo "  \"yugabyte.master.addresses\":\"$(esc "$YB_MASTER_ADDRESSES")\","
                   fi
+                  echo "  \"database.streamid\":\"$(esc "$STREAM_ID")\","
                   echo "  \"table.include.list\":\"$(esc "$TABLES")\","
                   echo '  "snapshot.mode":"initial",'
-                  echo "  \"yugabyte.master.addresses\":\"$(esc "$YB_MASTER_ADDRESSES")\","
                   echo '  "incremental.snapshot.enabled":"true",'
                   echo '  "signal.data.collection":"public.debezium_signal",'
                   echo '  "transforms":"unwrap",'
