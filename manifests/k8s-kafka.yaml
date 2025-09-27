@@ -750,9 +750,9 @@ spec:
           periodSeconds: 5
         resources:
           requests: { cpu: "250m", memory: "512Mi" }
-        limits:
-          cpu: "1500m"
-          memory: "2Gi"
+          limits:
+            cpu: "1500m"
+            memory: "2Gi"
         volumeMounts: [{ name: kafka-logs, mountPath: /tmp/kraft-combined-logs }]
 
 # ============================================================================
