@@ -837,8 +837,6 @@ spec:
       - name: fetch-yb-connector
         image: quay.io/yugabyte/debezium-connector:latest
         env:
-        # Optional: set this to a ZIP/TGZ that contains the YugabyteDB gRPC Debezium connector.
-        # Example (you provide): https://<your-artifact-host>/debezium-connector-yugabytedb-grpc-<ver>.zip
         - name: YB_CONNECTOR_URL
           value: "https://github.com/yugabyte/debezium-connector-yugabytedb/releases/download/vdz.1.9.5.yb.grpc.2024.2.3/debezium-connector-yugabytedb-dz.1.9.5.yb.grpc.2024.2.3.jar"
         command: ["/bin/bash","-lc"]
@@ -851,21 +849,13 @@ spec:
           mkdir -p /plugins/yb
 
           have_yb() {
-            # Fast path: filename patterns (either order)
-            if find /plugins/yb -type f -iname '*yugabytedb*connector*.jar' -print -quit | grep -q .; then
-              return 0
-            fi
-            if find /plugins/yb -type f -iname '*connector*yugabytedb*.jar' -print -quit | grep -q .; then
-              return 0
-            fi
-            # Reliable path: look inside jars for the connector class
-            # (uses unzip -p which we already rely on elsewhere)
+            if find /plugins/yb -type f -iname '*yugabytedb*connector*.jar' -print -quit | grep -q .; then return 0; fi
+            if find /plugins/yb -type f -iname '*connector*yugabytedb*.jar' -print -quit | grep -q .; then return 0; fi
             while IFS= read -r j; do
               if unzip -p "$j" META-INF/services/org.apache.kafka.connect.connector.Connector 2>/dev/null \
-                  | grep -q 'io\.debezium\.connector\.yugabytedb\.YugabyteDBgRPCConnector'; then
+                   | grep -q 'io\.debezium\.connector\.yugabytedb\.YugabyteDBgRPCConnector'; then
                 return 0
               fi
-              # or check classes directly if services file isn’t present:
               if unzip -l "$j" 2>/dev/null | grep -q 'io/debezium/connector/yugabytedb/YugabyteDBgRPCConnector.class'; then
                 return 0
               fi
@@ -873,71 +863,68 @@ spec:
             return 1
           }
 
-          copy_if_dir() {
-            local d="$1"
-            if [ -d "$d" ]; then
-              cp -R "$d"/. /plugins/yb/
-            fi
-          }
+          copy_if_dir() { local d="$1"; [ -d "$d" ] && cp -R "$d"/. /plugins/yb/ || true; }
 
-          # 1) Try to copy Yugabyte-specific directories (present in some images)
-          for CAND in \
-            /kafka/connect/yugabytedb \
-            /opt/kafka/connect/yugabytedb \
-            /debezium-connector/yugabytedb \
-            /opt/debezium-connector/yugabytedb
-          do
-            copy_if_dir "$CAND"
+          # 1) Try image-provided dirs
+          for C in /kafka/connect/yugabytedb /opt/kafka/connect/yugabytedb /debezium-connector/yugabytedb /opt/debezium-connector/yugabytedb; do
+            copy_if_dir "$C"
           done
 
-          # 2) Copy Debezium Postgres bits (some YB builds rely on these)
-          for CAND in \
-            /kafka/connect/debezium-connector-postgres \
-            /opt/kafka/connect/yugabytedb/debezium-connector-postgres \
-            /debezium-connector/debezium-connector-postgres \
-            /kafka/connect/yugabytedb/debezium-connector-postgres
-          do
-            if [ -d "$CAND" ]; then
-              echo "[FETCH-YB] Copying PG connector from $CAND"
-              cp -R "$CAND"/. /plugins/yb/
+          # 2) Pull in Debezium Postgres dependency bundle (if available)
+          for C in /kafka/connect/debezium-connector-postgres /opt/kafka/connect/yugabytedb/debezium-connector-postgres /debezium-connector/debezium-connector-postgres /kafka/connect/yugabytedb/debezium-connector-postgres; do
+            if [ -d "$C" ]; then
+              echo "[FETCH-YB] Copying PG connector from $C"
+              cp -R "$C"/. /plugins/yb/
               break
             fi
           done
 
-          # 3) If gRPC jars still missing, optionally download from YB_CONNECTOR_URL
-          if ! have_yb; then
-            if [ -n "${YB_CONNECTOR_URL}" ]; then
-              echo "[FETCH-YB] Downloading YugabyteDB Debezium connector from ${YB_CONNECTOR_URL}"
-              TMP="$(mktemp -d /tmp/ybconn.XXXXXX)"
-              PKG="$TMP/pkg"
-              curl -fL --retry 5 --retry-delay 2 -o "$PKG" "${YB_CONNECTOR_URL}"
-
-              # Determine target filename from URL (strip query), fall back to .jar
-              BASENAME="$(basename "${YB_CONNECTOR_URL%%\?*}")"
-
-              if echo "$BASENAME" | grep -qiE '\.jar$'; then
-                cp "$PKG" "/plugins/yb/$BASENAME"
-              else
-                # Not a .jar? Try to unpack as zip/tar
-                mkdir -p "$TMP/unz" "$TMP/tar"
-                if unzip -q -d "$TMP/unz" "$PKG" >/dev/null 2>&1; then
-                  cp -R "$TMP/unz"/. /plugins/yb/ || true
-                else
-                  tar -xzf "$PKG" -C "$TMP/tar" >/dev/null 2>&1 || tar -xf "$PKG" -C "$TMP/tar" || true
-                  cp -R "$TMP/tar"/. /plugins/yb/ || true
-                fi
-              fi
-              rm -rf "$TMP"
+          # 3) Download gRPC jar if still missing
+          if ! have_yb && [ -n "${YB_CONNECTOR_URL:-}" ]; then
+            echo "[FETCH-YB] Downloading YugabyteDB Debezium connector from ${YB_CONNECTOR_URL}"
+            TMP="$(mktemp -d /tmp/ybconn.XXXXXX)"; PKG="$TMP/pkg"
+            curl -fL --retry 5 --retry-delay 2 -o "$PKG" "${YB_CONNECTOR_URL}"
+            BASENAME="$(basename "${YB_CONNECTOR_URL%%\?*}")"
+            if echo "$BASENAME" | grep -qiE '\.jar$'; then
+              cp "$PKG" "/plugins/yb/$BASENAME"
+            else
+              mkdir -p "$TMP/unz" "$TMP/tar"
+              unzip -q -d "$TMP/unz" "$PKG" >/dev/null 2>&1 || tar -xzf "$PKG" -C "$TMP/tar" >/dev/null 2>&1 || tar -xf "$PKG" -C "$TMP/tar" || true
+              cp -R "$TMP"/unz/. /plugins/yb/ 2>/dev/null || true
+              cp -R "$TMP"/tar/. /plugins/yb/ 2>/dev/null || true
             fi
+            rm -rf "$TMP"
           fi
 
-          # 4) Remove CloudEvents converters to avoid plugin scanner noise
+          # 4) Trim CloudEvents noise
           find /plugins/yb -type f \( -iname '*cloudevents*.jar' -o -iname 'debezium-converter-cloud-events-*.jar' \) -print -delete || true
 
-          # 5) Final presence check
+          # 5) **REPACK**: put jars into two subfolders so Connect loads dependencies together
+          mkdir -p /plugins/yb/debezium-postgres /plugins/yb/yugabytedb-grpc
+
+          classify_and_move() {
+            local j="$1"
+            # if jar declares or contains the Yugabyte gRPC connector, it goes to yugabytedb-grpc
+            if unzip -p "$j" META-INF/services/org.apache.kafka.connect.connector.Connector 2>/dev/null \
+                 | grep -q 'io\.debezium\.connector\.yugabytedb\.YugabyteDBgRPCConnector'; then
+              mv -f "$j" /plugins/yb/yugabytedb-grpc/
+              return
+            fi
+            if unzip -l "$j" 2>/dev/null | grep -q 'io/debezium/connector/yugabytedb/YugabyteDBgRPCConnector.class'; then
+              mv -f "$j" /plugins/yb/yugabytedb-grpc/
+              return
+            fi
+            # everything else (Debezium core, PG driver, guava, protobuf, etc.) -> debezium-postgres
+            mv -f "$j" /plugins/yb/debezium-postgres/
+          }
+
+          # Only repack jars in the top-level /plugins/yb (avoid re-moving already-sorted ones)
+          find /plugins/yb -maxdepth 1 -type f -name '*.jar' -print0 | while IFS= read -r -d '' J; do classify_and_move "$J"; done
+
+          # 6) Final presence check + listing
           if have_yb; then
-            echo "[FETCH-YB] YugabyteDB Debezium gRPC connector is present:"
-            ls -1 /plugins/yb | sed 's/^/  - /'
+            echo "[FETCH-YB] YugabyteDB gRPC connector present. Layout:"
+            find /plugins/yb -maxdepth 2 -type f -name '*.jar' | sed 's/^/  - /'
           else
             echo "[FETCH-YB] ERROR: YugabyteDB gRPC connector jars not found."
             echo "           Provide YB_CONNECTOR_URL to a ZIP/TGZ or JAR that contains the gRPC connector."
@@ -972,7 +959,7 @@ spec:
         - name: CONNECT_PLUGIN_DISCOVERY
           value: "only_scan"
         - name: CONNECT_PLUGIN_PATH
-          value: "/plugins/wepay-kafka-connect-bigquery,/plugins/yb"
+          value: "/plugins/wepay-kafka-connect-bigquery,/plugins/yb/debezium-postgres,/plugins/yb/yugabytedb-grpc"
         - name: CONNECT_BOOTSTRAP_SERVERS
           value: "kafka.kafka.svc.internal.lan:9092"
         - name: CONNECT_GROUP_ID
