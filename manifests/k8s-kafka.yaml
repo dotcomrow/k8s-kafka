@@ -854,9 +854,14 @@ spec:
             find /plugins/yb -type f -iname '*yugabytedb*connector*.jar' -print -quit | grep -q .
           }
 
-          copy_if_dir() { local d="$1"; [ -d "$d" ] && cp -R "$d"/. /plugins/yb/ || true; }
+          copy_if_dir() {
+            local d="$1"
+            if [ -d "$d" ]; then
+              cp -R "$d"/. /plugins/yb/
+            fi
+          }
 
-          # 1) Try to copy anything Yugabyte-specific from the image (if present)
+          # 1) Try to copy Yugabyte-specific directories (present in some images)
           for CAND in \
             /kafka/connect/yugabytedb \
             /opt/kafka/connect/yugabytedb \
@@ -866,7 +871,7 @@ spec:
             copy_if_dir "$CAND"
           done
 
-          # 2) Always copy Debezium PG connector contents (many YB builds rely on some of these)
+          # 2) Copy Debezium Postgres bits (some YB builds rely on these)
           for CAND in \
             /kafka/connect/debezium-connector-postgres \
             /opt/kafka/connect/yugabytedb/debezium-connector-postgres \
@@ -880,41 +885,41 @@ spec:
             fi
           done
 
-          # 3) If YB gRPC jars still missing, try to download an archive if YB_CONNECTOR_URL is set
+          # 3) If gRPC jars still missing, optionally download from YB_CONNECTOR_URL
           if ! have_yb; then
             if [ -n "${YB_CONNECTOR_URL}" ]; then
               echo "[FETCH-YB] Downloading YugabyteDB Debezium connector from ${YB_CONNECTOR_URL}"
-              TMP=/tmp/ybconn.$RANDOM.$$
-              mkdir -p "$TMP"
-              curl -fL --retry 5 --retry-delay 2 -o "$TMP/pkg" "${YB_CONNECTOR_URL}"
+              TMP="$(mktemp -d /tmp/ybconn.XXXXXX)"
+              PKG="${TMP}/pkg"
+              curl -fL --retry 5 --retry-delay 2 -o "${PKG}" "${YB_CONNECTOR_URL}"
 
-              # If it looks like a single JAR, just drop it into /plugins/yb
               if echo "${YB_CONNECTOR_URL}" | grep -qiE '\.jar($|\?)'; then
-                cp "$TMP/pkg" /plugins/yb/
+                # Single jar case
+                cp "${PKG}" /plugins/yb/
               else
-
-              # Try unzip, then tar if zip fails
-              if unzip -q -d "$TMP/unz" "$TMP/pkg" >/dev/null 2>&1; then
-                cp -R "$TMP/unz"/. /plugins/yb/ || true
-              else
-                mkdir -p "$TMP/tar"
-                tar -xzf "$TMP/pkg" -C "$TMP/tar" >/dev/null 2>&1 || tar -xof "$TMP/pkg" -C "$TMP/tar" || true
-                cp -R "$TMP/tar"/. /plugins/yb/ || true
+                # Archive case: try unzip first, then tar (gz/zip/other)
+                if unzip -q -d "${TMP}/unz" "${PKG}" >/dev/null 2>&1; then
+                  cp -R "${TMP}/unz"/. /plugins/yb/ || true
+                else
+                  mkdir -p "${TMP}/tar"
+                  tar -xzf "${PKG}" -C "${TMP}/tar" >/dev/null 2>&1 || tar -xf "${PKG}" -C "${TMP}/tar" >/dev/null 2>&1 || true
+                  cp -R "${TMP}/tar"/. /plugins/yb/ || true
+                fi
               fi
-              rm -rf "$TMP"
+              rm -rf "${TMP}"
             fi
           fi
 
-          # 4) Clean out CloudEvents converters to avoid plugin scanner errors
+          # 4) Remove CloudEvents converters to avoid plugin scanner noise
           find /plugins/yb -type f \( -iname '*cloudevents*.jar' -o -iname 'debezium-converter-cloud-events-*.jar' \) -print -delete || true
 
-          # 5) Final check
+          # 5) Final presence check
           if have_yb; then
-            echo "[FETCH-YB] YugabyteDB Debezium gRPC connector is present."
+            echo "[FETCH-YB] YugabyteDB Debezium gRPC connector is present:"
             ls -1 /plugins/yb | sed 's/^/  - /'
           else
             echo "[FETCH-YB] ERROR: YugabyteDB gRPC connector jars not found."
-            echo "           Provide YB_CONNECTOR_URL to a ZIP/TGZ that contains the gRPC connector."
+            echo "           Provide YB_CONNECTOR_URL to a ZIP/TGZ or JAR that contains the gRPC connector."
             exit 1
           fi
         volumeMounts:
