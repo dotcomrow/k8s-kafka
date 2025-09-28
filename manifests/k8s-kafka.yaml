@@ -1651,7 +1651,6 @@ spec:
                   echo '  "upsertEnabled":"true",'
                   echo '  "deleteEnabled":"true",'
                   echo '  "primaryKeyMode":"record_key",'
-                  echo '  "kafkaKeyFieldName":"pk",'
                   echo '  "enableRetries":"true",'
                   echo '  "bigQueryRetry":"6",'
                   echo '  "bigQueryRetryWait":"2000",'
