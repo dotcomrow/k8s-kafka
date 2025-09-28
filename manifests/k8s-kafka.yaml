@@ -1364,9 +1364,10 @@ spec:
                   echo '  "keySource":"FILE",'
                   echo '  "keyfile": "/vault/secrets/gcp-key.json",'
                   echo '  "value.converter":"org.apache.kafka.connect.json.JsonConverter",'
-                  echo '  "value.converter.schemas.enable":"false",'
+                  echo '  "value.converter.schemas.enable":"true",'
                   echo '  "key.converter":"org.apache.kafka.connect.json.JsonConverter",'
-                  echo '  "key.converter.schemas.enable":"false"'
+                  echo '  "key.converter.schemas.enable":"true",'
+                  echo '  "autoUpdateSchemas":"true"'
                   echo '}'
                 } > "$SINK_PUT"
                 SINK_POST="$(mktmp)"; { echo '{ "name":"bq-sink-'"${DB}"'", "config": '; cat "$SINK_PUT"; echo ' }'; } > "$SINK_POST"
