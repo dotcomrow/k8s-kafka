@@ -1233,13 +1233,25 @@ spec:
 
               OUTDIR="/state/in/${PREFIX}"; mkdir -p "$OUTDIR"
               DEST_URI="gs://${BUCKET}/bootstrap/${PREFIX}/${PREFIX}-*.csv"
-              echo "[CLOUDSDK] exporting ${BQMAP} -> ${DEST_URI}"
-              bq --location="${LOCATION}" --project_id="${PROJECT}" extract \
+              +              echo "[CLOUDSDK] exporting ${BQMAP} -> ${DEST_URI}"
+              # Try extract; capture output to detect 'Not found: Table ...'
+              set +e
+              EXTRACT_OUT="$( bq --location="${LOCATION}" --project_id="${PROJECT}" extract \
                 --destination_format="${FMT:-CSV}" --field_delimiter="," --print_header="${HDR:-true}" \
-                "${BQMAP}" "${DEST_URI}"
-              echo "[CLOUDSDK] copying to ${OUTDIR}"
-              gsutil -m -o "GSUtil:parallel_process_count=1" cp "gs://${BUCKET}/bootstrap/${PREFIX}/${PREFIX}-*.csv" "${OUTDIR}/"
-              touch "${OUTDIR}/READY"
+                "${BQMAP}" "${DEST_URI}" 2>&1 )"
+              RC=$?
+              set -e
+              if [ $RC -ne 0 ] && echo "$EXTRACT_OUT" | grep -q "Not found: Table"; then
+                echo "[CLOUDSDK] ${BQMAP} is missing; flagging NOT_FOUND and skipping export"
+                mkdir -p "${OUTDIR}"
+                : > "${OUTDIR}/NOT_FOUND"
+                : > "${OUTDIR}/READY"
+              else
+                [ $RC -eq 0 ] || { echo "$EXTRACT_OUT"; exit $RC; }
+                echo "[CLOUDSDK] copying to ${OUTDIR}"
+                gsutil -m -o "GSUtil:parallel_process_count=1" cp "gs://${BUCKET}/bootstrap/${PREFIX}/${PREFIX}-*.csv" "${OUTDIR}/"
+                touch "${OUTDIR}/READY"
+              fi
               rm -f "$rq"
             done
             sleep 2
@@ -1359,6 +1371,15 @@ spec:
               i=$((i+1)); [ $i -gt 360 ] && echo "[WATCHER] timeout waiting for ${READY}" >&2 && return 1
               sleep 2
             done
+
+            # If CloudSDK flagged BigQuery table as missing, skip CSV import and trigger a fresh snapshot
+            if [ -f "${INDIR}/NOT_FOUND" ]; then
+              echo "[WATCHER] ${BQMAP} not found in BigQuery; triggering Debezium snapshot to (re)create and load"
+              ensure_signal_table "$DB"
+              signal_snapshot_table "$DB" "$SCH" "$TBL"
+              date -Is > "$SEED_FLAG"
+              return 0
+            fi
 
             get_columns() {
               /home/yugabyte/bin/ysqlsh "${PGURL}" -q -A -t -c "
