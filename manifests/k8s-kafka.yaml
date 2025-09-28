@@ -840,7 +840,7 @@ spec:
         # Optional: set this to a ZIP/TGZ that contains the YugabyteDB gRPC Debezium connector.
         # Example (you provide): https://<your-artifact-host>/debezium-connector-yugabytedb-grpc-<ver>.zip
         - name: YB_CONNECTOR_URL
-          value: ""
+          value: "https://github.com/yugabyte/debezium-connector-yugabytedb/releases/download/vdz.1.9.5.yb.grpc.2024.2.3/debezium-connector-yugabytedb-dz.1.9.5.yb.grpc.2024.2.3.jar"
         command: ["/bin/bash","-lc"]
         args:
         - |
@@ -887,6 +887,11 @@ spec:
               TMP=/tmp/ybconn.$RANDOM.$$
               mkdir -p "$TMP"
               curl -fL --retry 5 --retry-delay 2 -o "$TMP/pkg" "${YB_CONNECTOR_URL}"
+
+              # If it looks like a single JAR, just drop it into /plugins/yb
+              if echo "${YB_CONNECTOR_URL}" | grep -qiE '\.jar($|\?)'; then
+                cp "$TMP/pkg" /plugins/yb/
+              else
 
               # Try unzip, then tar if zip fails
               if unzip -q -d "$TMP/unz" "$TMP/pkg" >/dev/null 2>&1; then
