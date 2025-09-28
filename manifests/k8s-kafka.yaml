@@ -1645,6 +1645,7 @@ spec:
                   # Do NOT generate/alter schemas or tables in BQ
                   echo '  "autoCreateTables":"false",'
                   echo '  "autoUpdateSchemas":"false",'
+                  echo '  "allowNewBigQueryFields": "false",'
 
                   # error handling / DLQ
                   echo '  "errors.tolerance":"all",'
@@ -1663,6 +1664,8 @@ spec:
                   echo '  "bigQueryRetryWait":"2000",'
                   echo '  "keySource":"FILE",'
                   echo '  "keyfile": "/vault/secrets/gcp-key.json",'
+                  echo '  "primaryKeyMode": "record_value",'
+                  echo '  "primaryKeyFields": "id",'
 
                   # converters (schemas enabled is fine with unwrap + primitive key)
                   echo '  "value.converter":"org.apache.kafka.connect.json.JsonConverter",'
