@@ -839,19 +839,24 @@ spec:
         command: ["/bin/sh","-lc"]
         args:
         - |
-          set -eu
-          PS4='+ [FETCH-YB] $(date -Is) '
-          set -x
-          mkdir -p /out/yugabytedb
-          for SRC in /plugins /kafka/connect /kafka/connectors /kafka/connect/yugabytedb /opt/kafka/connect /opt/kafka/plugins /debezium-connector /kafka; do
-            if [ -d "$SRC" ] && [ -n "$(ls -A "$SRC" 2>/dev/null || true)" ]; then
-              echo "Found YugabyteDB connector payload at $SRC"
-              cp -R "$SRC"/* /out/yugabytedb/
-              find /out/yugabytedb -type f \( -iname '*cloudevents*.jar' -o -iname 'debezium-converter-cloud-events-*.jar' \) -print -delete || true
-              exit 0
-            fi
-          done
-          echo "Could not find connector payload"; exit 1
+            set -eu
+            PS4='+ [FETCH-YB] $(date -Is) '
+            set -x
+            mkdir -p /out/yb
+            # Copy only the Debezium Yugabyte/Postgres connector directory (not the whole bundle)
+            for CAND in \
+              /kafka/connect/yugabytedb/debezium-connector-postgres \
+              /opt/kafka/connect/yugabytedb/debezium-connector-postgres \
+              /debezium-connector/debezium-connector-postgres \
+              /kafka/connect/debezium-connector-postgres; do
+              if [ -d "$CAND" ]; then
+                cp -R "$CAND" /out/yb/
+                break
+              fi
+            done
+            [ -d /out/yb/debezium-connector-postgres ] || { echo "YB PG connector not found"; exit 1; }
+            # Hard-delete CloudEvents converter jars if present
+            find /out/yb -type f \( -iname '*cloudevents*.jar' -o -iname 'debezium-converter-cloud-events-*.jar' \) -print -delete || true
         volumeMounts:
         - { name: plugins, mountPath: /out }
       - name: create-connect-topics
@@ -903,7 +908,7 @@ spec:
         - name: CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE
           value: "true"
         - name: CONNECT_PLUGIN_PATH
-          value: "/plugins,/plugins/share/java,/plugins/share/confluent-hub-components,/plugins/yugabytedb"
+          value: "/plugins/wepay-kafka-connect-bigquery,/plugins/yb/debezium-connector-postgres"
         - name: CONNECT_REST_ADVERTISED_HOST_NAME
           value: "kafka-connect.kafka.svc.internal.lan"
         - name: CONNECT_REST_PORT
@@ -1079,6 +1084,14 @@ spec:
         vault.hashicorp.com/agent-pre-populate-only: "true"
         vault.hashicorp.com/exit-on-error: "false"
 
+        vault.hashicorp.com/agent-inject-secret-bootstrap.env: "secret/data/kafka/bq/bootstrap"
+        vault.hashicorp.com/agent-inject-template-bootstrap.env: |
+          {{- with secret "secret/data/kafka/bq/bootstrap" -}}
+          {{ with .Data.data.bucket }}BUCKET={{ . }}{{ end }}
+          {{ with .Data.data.project }}PROJECT={{ . }}{{ end }}
+          {{ with .Data.data.location }}LOCATION={{ . }}{{ end }}
+          {{- end -}}
+
         vault.hashicorp.com/agent-inject-secret-yb.env: "secret/data/kafka/pgconfig"
         vault.hashicorp.com/agent-inject-template-yb.env: |
           {{- with secret "secret/data/kafka/pgconfig" -}}
@@ -1114,6 +1127,49 @@ spec:
       - name: state
         emptyDir: {}
       containers:
+      # in bootstrap-watcher .spec.template.spec.containers (add alongside "watcher")
+      - name: cloudsdk
+        image: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+        env:
+        - { name: GOOGLE_APPLICATION_CREDENTIALS, value: /vault/secrets/gcp-key.json }
+        - { name: CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE, value: /vault/secrets/gcp-key.json }
+        - { name: CLOUDSDK_CORE_DISABLE_PROMPTS, value: "1" }
+        volumeMounts:
+        - { name: state, mountPath: /state }
+        command: ["/bin/bash","-lc"]
+        args:
+        - |
+          set -Eeuo pipefail
+          for f in /vault/secrets/bootstrap.env /vault/secrets/gcp-key.json; do
+            i=0; while [ ! -s "$f" ]; do i=$((i+1)); [ $i -gt 180 ] && echo "CloudSDK missing $f" >&2 && exit 1; sleep 2; done
+          done
+          . /vault/secrets/bootstrap.env
+          : "${PROJECT:?missing PROJECT}" ; : "${BUCKET:?missing BUCKET}" ; : "${LOCATION:=US}"
+          gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}" >/dev/null 2>&1 || true
+
+          mkdir -p /state/requests /state/in
+          echo "[CLOUDSDK] ready; watching for requests in /state/requests"
+          while :; do
+            for rq in /state/requests/*.bq 2>/dev/null; do
+              [ -e "$rq" ] || { sleep 2; continue; }
+              # file format: PREFIX|BQMAP|FORMAT|HEADER
+              IFS='|' read -r PREFIX BQMAP FMT HDR < "$rq" || true
+              [ -n "${PREFIX:-}" ] || { rm -f "$rq"; continue; }
+              [ -n "${BQMAP:-}" ]  || { echo "[CLOUDSDK] skip ${PREFIX}: empty BQMAP"; rm -f "$rq"; continue; }
+              OUTDIR="/state/in/${PREFIX}"; mkdir -p "$OUTDIR"
+              DEST_URI="gs://${BUCKET}/bootstrap/${PREFIX}/${PREFIX}-*.csv"
+              echo "[CLOUDSDK] exporting ${BQMAP} -> ${DEST_URI}"
+              bq --location="${LOCATION}" --project_id="${PROJECT}" extract \
+                --destination_format="${FMT:-CSV}" --field_delimiter="," --print_header="${HDR:-true}" \
+                "${BQMAP}" "${DEST_URI}"
+              echo "[CLOUDSDK] copying to ${OUTDIR}"
+              gsutil -m -o "GSUtil:parallel_process_count=1" cp "gs://${BUCKET}/bootstrap/${PREFIX}/${PREFIX}-*.csv" "${OUTDIR}/"
+              touch "${OUTDIR}/READY"
+              rm -f "$rq"
+            done
+            sleep 2
+          done
+
       - name: watcher
         image: yugabytedb/yugabyte:latest
         volumeMounts:
@@ -1197,6 +1253,42 @@ spec:
               FROM b
               ORDER BY schema, \"table\";
             " || true
+          }
+
+          seed_table_if_needed() {
+            local DB="$1" SCH="$2" TBL="$3" PREFIX="$4" BQMAP="$5" HDR="$6"
+            local PGURL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${DB}?sslmode=disable"
+            local SEED_FLAG="/state/${DB}.${SCH}.${TBL}.seeded"
+            local INDIR="/state/in/${PREFIX}"; local READY="${INDIR}/READY"
+
+            [ -f "$SEED_FLAG" ] && { echo "[WATCHER] seed exists for ${DB}.${SCH}.${TBL}"; return 0; }
+            [ -z "$BQMAP" ] && { echo "[WATCHER] ${DB}.${SCH}.${TBL} has no BQ mapping; skipping seed"; return 0; }
+
+            echo "[WATCHER] requesting BQ export for ${BQMAP} (prefix=${PREFIX})"
+            mkdir -p /state/requests
+            printf '%s|%s|%s|%s\n' "${PREFIX}" "${BQMAP}" "CSV" "${HDR:-true}" > "/state/requests/${DB}.${SCH}.${TBL}.bq"
+
+            i=0
+            while [ ! -f "${READY}" ]; do
+              i=$((i+1)); [ $i -gt 360 ] && echo "[WATCHER] timeout waiting for ${READY}" >&2 && return 1
+              sleep 2
+            done
+
+            get_columns() {
+              /home/yugabyte/bin/ysqlsh "${PGURL}" -q -A -t -c "
+                SELECT string_agg(quote_ident(column_name), ',')
+                FROM information_schema.columns
+                WHERE table_schema='${SCH}' AND table_name='${TBL}'
+                ORDER BY ordinal_position;" | tr -d '\n'
+            }
+
+            local COLS; COLS="$(get_columns)"
+            echo "[WATCHER] COPY ${SCH}.${TBL} (${COLS}) from ${INDIR}/*.csv"
+            cat ${INDIR}/*.csv \
+              | /home/yugabyte/bin/ysqlsh "${PGURL}" -v ON_ERROR_STOP=1 -q \
+                  -c "COPY ${SCH}.${TBL} (${COLS}) FROM STDIN WITH (FORMAT csv, HEADER ${HDR:-true});"
+
+            date -Is > "$SEED_FLAG"
           }
 
           ensure_signal_table() {
@@ -1302,6 +1394,7 @@ spec:
                     # No dataset provided; just use the table name
                     T2MAP="${T2MAP}${TOPIC}:${TBL},"
                   fi
+                  seed_table_if_needed "$DB" "$SCH" "$TBL" "$PREFIX" "$BQMAP" "$HDR"
                 done < "/state/${DB}.plan.tsv"
                 TABLES="${TABLES%,}"; TOPICS="${TOPICS%,}"; T2MAP="${T2MAP%,}"
 
@@ -1344,6 +1437,7 @@ spec:
                   echo '  "signal.data.collection":"public.debezium_signal",'
                   echo '  "transforms":"unwrap",'
                   echo '  "transforms.unwrap.type":"io.debezium.connector.yugabytedb.transforms.YBExtractNewRecordState",'
+                  echo '  "transforms.unwrap.delete.handling.mode":"rewrite",'
                   echo '  "topic.creation.default.replication.factor":"1",'
                   echo '  "topic.creation.default.partitions":"1",'
                   echo '  "topic.creation.default.cleanup.policy":"delete"'
@@ -1376,6 +1470,17 @@ spec:
                   echo '  "autoUpdateSchemas":"true",'
                   echo '  "allowNewBigQueryFields":"true",'
                   echo '  "allowBigQueryRequiredFieldRelaxation":"true",'
+                  echo '  "bigQueryPartitionDecorator":"false",'
+                  echo '  "errors.tolerance":"all",'
+                  echo '  "errors.log.enable":"true",'
+                  echo '  "errors.deadletterqueue.topic.name":"bq-dlq",'
+                  echo '  "errors.deadletterqueue.context.headers.enable":"true",'
+                  echo '  "upsertEnabled":"true",'
+                  echo '  "deleteEnabled":"true",'
+                  echo '  "primaryKeyMode":"record_key",'
+                  echo '  "enableRetries":"true",'
+                  echo '  "bigQueryRetry":"6",'
+                  echo '  "bigQueryRetryWait":"2000",'
                   echo '  "keySource":"FILE",'
                   echo '  "keyfile": "/vault/secrets/gcp-key.json",'
                   echo '  "value.converter":"org.apache.kafka.connect.json.JsonConverter",'
