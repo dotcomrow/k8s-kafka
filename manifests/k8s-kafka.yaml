@@ -836,50 +836,82 @@ spec:
         volumeMounts: [{ name: plugins, mountPath: /plugins }]
       - name: fetch-yb-connector
         image: quay.io/yugabyte/debezium-connector:latest
+        env:
+        # Optional: set this to a ZIP/TGZ that contains the YugabyteDB gRPC Debezium connector.
+        # Example (you provide): https://<your-artifact-host>/debezium-connector-yugabytedb-grpc-<ver>.zip
+        - name: YB_CONNECTOR_URL
+          value: ""
         command: ["/bin/bash","-lc"]
         args:
         - |
-          set -eu
+          set -Eeuo pipefail
           PS4='+ [FETCH-YB] $(date -Is) '
           set -x
+
           mkdir -p /plugins/yb
 
-          # Copy Yugabyte connector trees if present (covers gRPC artifacts)
+          have_yb() {
+            find /plugins/yb -type f -iname '*yugabytedb*connector*.jar' -print -quit | grep -q .
+          }
+
+          copy_if_dir() { local d="$1"; [ -d "$d" ] && cp -R "$d"/. /plugins/yb/ || true; }
+
+          # 1) Try to copy anything Yugabyte-specific from the image (if present)
           for CAND in \
             /kafka/connect/yugabytedb \
             /opt/kafka/connect/yugabytedb \
-            /debezium-connector \
-            /opt/debezium-connector
+            /debezium-connector/yugabytedb \
+            /opt/debezium-connector/yugabytedb
           do
-            if [ -d "$CAND" ]; then
-              echo "[FETCH-YB] Copying from $CAND"
-              cp -R "$CAND"/. /plugins/yb/ || true
-            fi
+            copy_if_dir "$CAND"
           done
 
-          # Fallback: explicitly include Debezium Postgres connector jars
+          # 2) Always copy Debezium PG connector contents (many YB builds rely on some of these)
           for CAND in \
-            /kafka/connect/yugabytedb/debezium-connector-postgres \
+            /kafka/connect/debezium-connector-postgres \
             /opt/kafka/connect/yugabytedb/debezium-connector-postgres \
             /debezium-connector/debezium-connector-postgres \
-            /kafka/connect/debezium-connector-postgres
+            /kafka/connect/yugabytedb/debezium-connector-postgres
           do
             if [ -d "$CAND" ]; then
               echo "[FETCH-YB] Copying PG connector from $CAND"
-              cp -R "$CAND"/. /plugins/yb/ || true
+              cp -R "$CAND"/. /plugins/yb/
+              break
             fi
           done
 
-          # Sanity check: require at least one YB connector jar present
-          if ! find /plugins/yb -type f -iname '*yugabytedb*connector*.jar' -print -quit | grep -q . ; then
-            echo "[FETCH-YB] ERROR: YugabyteDB Debezium connector jars not found in the image"
-            echo "[FETCH-YB] Contents of /plugins/yb:"; ls -R /plugins/yb || true
-            exit 1
+          # 3) If YB gRPC jars still missing, try to download an archive if YB_CONNECTOR_URL is set
+          if ! have_yb; then
+            if [ -n "${YB_CONNECTOR_URL}" ]; then
+              echo "[FETCH-YB] Downloading YugabyteDB Debezium connector from ${YB_CONNECTOR_URL}"
+              TMP=/tmp/ybconn.$RANDOM.$$
+              mkdir -p "$TMP"
+              curl -fL --retry 5 --retry-delay 2 -o "$TMP/pkg" "${YB_CONNECTOR_URL}"
+
+              # Try unzip, then tar if zip fails
+              if unzip -q -d "$TMP/unz" "$TMP/pkg" >/dev/null 2>&1; then
+                cp -R "$TMP/unz"/. /plugins/yb/ || true
+              else
+                mkdir -p "$TMP/tar"
+                tar -xzf "$TMP/pkg" -C "$TMP/tar" >/dev/null 2>&1 || tar -xof "$TMP/pkg" -C "$TMP/tar" || true
+                cp -R "$TMP/tar"/. /plugins/yb/ || true
+              fi
+              rm -rf "$TMP"
+            fi
           fi
 
-          # Remove CloudEvents converter jars (avoid spurious classpath scanning)
-          find /plugins/yb -type f \
-            \( -iname '*cloudevents*.jar' -o -iname 'debezium-converter-cloud-events-*.jar' \) -print -delete || true
+          # 4) Clean out CloudEvents converters to avoid plugin scanner errors
+          find /plugins/yb -type f \( -iname '*cloudevents*.jar' -o -iname 'debezium-converter-cloud-events-*.jar' \) -print -delete || true
+
+          # 5) Final check
+          if have_yb; then
+            echo "[FETCH-YB] YugabyteDB Debezium gRPC connector is present."
+            ls -1 /plugins/yb | sed 's/^/  - /'
+          else
+            echo "[FETCH-YB] ERROR: YugabyteDB gRPC connector jars not found."
+            echo "           Provide YB_CONNECTOR_URL to a ZIP/TGZ that contains the gRPC connector."
+            exit 1
+          fi
         volumeMounts:
         - { name: plugins, mountPath: /plugins }
       - name: create-connect-topics
