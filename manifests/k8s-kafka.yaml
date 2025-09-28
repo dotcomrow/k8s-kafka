@@ -96,62 +96,62 @@ spec:
       restartPolicy: Never
       serviceAccountName: kafka-clusterid-gen
       volumes:
-        - name: work
-          emptyDir: {}
+      - name: work
+        emptyDir: {}
       initContainers:
-        - name: gen
-          image: busybox:1.36.1
-          command: ["/bin/sh","-c"]
-          args:
-            - |
-              set -eu
-              mkdir -p /work
-              CID="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || date +%s%N)"
-              echo "Generated cluster.id: ${CID}"
-              printf '%s' "${CID}" > /work/cluster.id
-              ls -l /work/cluster.id
-          volumeMounts: [{ name: work, mountPath: /work }]
+      - name: gen
+        image: busybox:1.36.1
+        command: ["/bin/sh","-c"]
+        args:
+        - |
+          set -eu
+          mkdir -p /work
+          CID="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || date +%s%N)"
+          echo "Generated cluster.id: ${CID}"
+          printf '%s' "${CID}" > /work/cluster.id
+          ls -l /work/cluster.id
+        volumeMounts: [{ name: work, mountPath: /work }]
       containers:
-        - name: apply
-          image: curlimages/curl:8.8.0
-          command: ["/bin/sh","-c"]
-          args:
-            - |
-              set -eu
-              PS4='+ [APPLY] $(date -Is) '
-              set -x
-              NAMESPACE="kafka"; SECRET_NAME="kafka-cluster-id"
-              API="https://kubernetes.default.svc"
-              TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
-              CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+      - name: apply
+        image: curlimages/curl:8.8.0
+        command: ["/bin/sh","-c"]
+        args:
+        - |
+          set -eu
+          PS4='+ [APPLY] $(date -Is) '
+          set -x
+          NAMESPACE="kafka"; SECRET_NAME="kafka-cluster-id"
+          API="https://kubernetes.default.svc"
+          TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+          CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 
-              if [ ! -s /work/cluster.id ]; then
-                CID="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || date +%s%N)"
-                printf '%s' "$CID" > /work/cluster.id
-              fi
-              CID="$(cat /work/cluster.id)"
+          if [ ! -s /work/cluster.id ]; then
+            CID="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || date +%s%N)"
+            printf '%s' "$CID" > /work/cluster.id
+          fi
+          CID="$(cat /work/cluster.id)"
 
-              code="$(curl -s -o /tmp/ex.json -w '%{http_code}' --cacert "$CACERT" \
-                     -H "Authorization: Bearer $TOKEN" \
-                     "$API/api/v1/namespaces/$NAMESPACE/secrets/$SECRET_NAME" || true)"
+          code="$(curl -s -o /tmp/ex.json -w '%{http_code}' --cacert "$CACERT" \
+                 -H "Authorization: Bearer $TOKEN" \
+                 "$API/api/v1/namespaces/$NAMESPACE/secrets/$SECRET_NAME" || true)"
 
-              if [ "$code" = "200" ]; then
-                echo "Secret exists; nothing to do."
-                exit 0
-              fi
+          if [ "$code" = "200" ]; then
+            echo "Secret exists; nothing to do."
+            exit 0
+          fi
 
-              b64="$(printf '%s' "$CID" | base64 | tr -d '\n')"
-              printf '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"%s","namespace":"%s"},"type":"Opaque","data":{"CLUSTER_ID":"%s"}}' \
-                "$SECRET_NAME" "$NAMESPACE" "$b64" > /tmp/newsecret.json
+          b64="$(printf '%s' "$CID" | base64 | tr -d '\n')"
+          printf '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"%s","namespace":"%s"},"type":"Opaque","data":{"CLUSTER_ID":"%s"}}' \
+            "$SECRET_NAME" "$NAMESPACE" "$b64" > /tmp/newsecret.json
 
-              curl -sS -D /tmp/h.txt -o /tmp/r.txt -X POST --cacert "$CACERT" \
-                -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-                --data-binary @/tmp/newsecret.json \
-                "$API/api/v1/namespaces/$NAMESPACE/secrets" && echo "Created secret."
+          curl -sS -D /tmp/h.txt -o /tmp/r.txt -X POST --cacert "$CACERT" \
+            -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+            --data-binary @/tmp/newsecret.json \
+            "$API/api/v1/namespaces/$NAMESPACE/secrets" && echo "Created secret."
 
-              echo "=== response headers ==="; cat /tmp/h.txt
-              echo "=== body ==="; cat /tmp/r.txt
-          volumeMounts: [{ name: work, mountPath: /work }]
+          echo "=== response headers ==="; cat /tmp/h.txt
+          echo "=== body ==="; cat /tmp/r.txt
+        volumeMounts: [{ name: work, mountPath: /work }]
 
 # ============================================================================
 # Vault CONFIG job — namespace: vault
@@ -166,7 +166,8 @@ metadata:
 spec:
   backoffLimit: 0
   template:
-    metadata: { annotations: { linkerd.io/inject: "disabled" } }
+    metadata:
+      annotations: { linkerd.io/inject: "disabled" }
     spec:
       restartPolicy: Never
       serviceAccountName: default
@@ -190,7 +191,7 @@ spec:
         - { name: BQ_BOOTSTRAP_BUCKET, value: "suncoast-systems-yb-bootstrap" }
         - { name: BQ_DEFAULT_DATASET, value: "yugabyte_backup" }
         command: ["/bin/sh","-c"]
-        args: 
+        args:
         - |
           set -eu
           PS4='+ [VAULTCFG] $(date -Is) '
@@ -279,7 +280,7 @@ spec:
       - name: initdb
         image: yugabytedb/yugabyte:latest
         command: ["/bin/bash","-lc"]
-        args: 
+        args:
         - |
           set -Eeuo pipefail
           PS4='+ [DBINIT] $(date -Is) '
@@ -377,7 +378,7 @@ spec:
         image: yugabytedb/yugabyte:latest
         volumeMounts: [{ name: work, mountPath: /work }]
         command: ["/bin/bash","-lc"]
-        args: 
+        args:
         - |
           set -Eeuo pipefail
           PS4='+ [PLANNER] $(date -Is) '
@@ -438,7 +439,7 @@ spec:
         image: yugabytedb/yugabyte:latest
         volumeMounts: [{ name: work, mountPath: /work }]
         command: ["/bin/bash","-lc"]
-        args: 
+        args:
         - |
           set -Eeuo pipefail
           PS4='+ [IMPORTER] $(date -Is) '
@@ -500,7 +501,7 @@ spec:
         - { name: CLOUDSDK_CORE_DISABLE_PROMPTS, value: "1" }
         volumeMounts: [{ name: work, mountPath: /work }]
         command: ["/bin/bash","-lc"]
-        args: 
+        args:
         - |
           set -Eeuo pipefail
           PS4='+ [CLOUDSDK] $(date -Is) '
@@ -550,7 +551,7 @@ spec:
         image: curlimages/curl:8.8.0
         volumeMounts: [{ name: work, mountPath: /work }]
         command: ["/bin/sh","-lc"]
-        args: 
+        args:
         - |
           set -eu
           PS4='+ [FLAGGER] $(date -Is) '
@@ -622,8 +623,6 @@ spec:
           set -euo pipefail
           PS4='+ [ENSURE-BQ] $(date -Is) '
           set -x
-
-          # Wait for Vault-injected files
           for f in /vault/secrets/bq.env /vault/secrets/gcp-key.json; do
             i=0; while [ ! -s "$f" ]; do i=$((i+1)); [ $i -gt 120 ] && echo "[ENSURE-BQ] missing $f" >&2 && exit 1; sleep 2; done
           done
@@ -631,12 +630,8 @@ spec:
           : "${BQ_PROJECT:?missing BQ_PROJECT}"
           : "${BQ_DEFAULT_DATASET:?missing BQ_DEFAULT_DATASET}"
           : "${LOCATION:=US}"
-
-          # Auth via SA JSON (no interactivity)
           gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}" >/dev/null 2>&1 || true
-
           echo "[ENSURE-BQ] Ensuring dataset ${BQ_PROJECT}:${BQ_DEFAULT_DATASET} (${LOCATION})"
-
           if bq --project_id="${BQ_PROJECT}" --location="${LOCATION}" show -d "${BQ_PROJECT}:${BQ_DEFAULT_DATASET}" >/dev/null 2>&1; then
             echo "[ENSURE-BQ] Dataset exists."
           else
@@ -706,7 +701,7 @@ spec:
         - name: CLUSTER_ID
           valueFrom: { secretKeyRef: { name: kafka-cluster-id, key: CLUSTER_ID } }
         command: ["/bin/bash","-lc"]
-        args: 
+        args:
         - |
           set -Eeuo pipefail
           PS4='+ [KAFKA-FMT] $(date -Is) '
@@ -733,9 +728,9 @@ spec:
         - { name: KAFKA_PROCESS_ROLES, value: "broker,controller" }
         - { name: KAFKA_CONTROLLER_LISTENER_NAMES, value: "CONTROLLER" }
         - { name: KAFKA_LISTENERS, value: "PLAINTEXT://:9092,CONTROLLER://:9093" }
-        - { name: KAFKA_ADVERTISED_LISTENERS, value: "PLAINTEXT://kafka.kafka.svc.internal.lan:9092" }
+        - { name: KAFKA_ADVERTISED_LISTENERS, value: "PLAINTEXT://kafka.kafka.svc.cluster.local:9092" }
         - { name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP, value: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT" }
-        - { name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "1@kafka-0.kafka-hs.kafka.svc.internal.lan:9093" }
+        - { name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "1@kafka-0.kafka-hs.kafka.svc.cluster.local:9093" }
         - { name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "1" }
         - { name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "1" }
         - { name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR, value: "1" }
@@ -830,7 +825,7 @@ spec:
       - name: install-bq
         image: confluentinc/cp-kafka-connect:7.6.1
         command: ["/bin/bash","-lc"]
-        args: 
+        args:
         - |
           set -Eeuo pipefail
           PS4='+ [INSTALL-BQ] $(date -Is) '
@@ -842,7 +837,7 @@ spec:
       - name: fetch-yb-connector
         image: quay.io/yugabyte/debezium-connector:latest
         command: ["/bin/sh","-lc"]
-        args: 
+        args:
         - |
           set -eu
           PS4='+ [FETCH-YB] $(date -Is) '
@@ -862,10 +857,10 @@ spec:
       - name: create-connect-topics
         image: apache/kafka:3.9.0
         command: ["/bin/bash","-lc"]
-        args: 
+        args:
         - |
           set -eu
-          BOOT=kafka.kafka.svc.internal.lan:9092
+          BOOT=kafka.kafka.svc.cluster.local:9092
           for t in _connect-configs _connect-offsets _connect-status; do
             if /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --list | grep -qx "$t"; then
               echo "topic $t exists"
@@ -885,10 +880,10 @@ spec:
         env:
         - name: KAFKA_OPTS
           value: >-
-              -Dyb.master_addresses=yb-master-0.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-1.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-2.yb-master-service.yugabyte.svc.cluster.local:7100
-              -Dyb.client_admin_operation_timeout_ms=15000
-              -Dyb.client_default_operation_timeout_ms=15000
-              -Dyb.client_wait_for_leader_election_on_init=false
+            -Dyb.master_addresses=yb-master-0.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-1.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-2.yb-master-service.yugabyte.svc.cluster.local:7100
+            -Dyb.client_admin_operation_timeout_ms=15000
+            -Dyb.client_default_operation_timeout_ms=15000
+            -Dyb.client_wait_for_leader_election_on_init=false
         - name: YB_MASTER_ADDRESSES
           value: yb-master-0.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-1.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-2.yb-master-service.yugabyte.svc.cluster.local:7100
         - name: CLUSTER_ID
@@ -896,15 +891,12 @@ spec:
             secretKeyRef:
               name: kafka-cluster-id
               key: CLUSTER_ID
-
         - { name: REST_HOST_NAME, value: "0.0.0.0" }
         - { name: REST_PORT, value: "8083" }
-        - { name: ADVERTISED_HOST_NAME, value: "kafka-connect.kafka.svc.internal.lan" }
+        - { name: ADVERTISED_HOST_NAME, value: "kafka-connect.kafka.svc.cluster.local" }
         - { name: ADVERTISED_PORT, value: "8083" }
-
         - { name: KAFKA_LOG4J_OPTS, value: "-Dlog4j.configuration=file:/kafka/etc/log4j.properties" }
-
-        - { name: BOOTSTRAP_SERVERS, value: "kafka.kafka.svc.internal.lan:9092" }
+        - { name: BOOTSTRAP_SERVERS, value: "kafka.kafka.svc.cluster.local:9092" }
         - { name: GROUP_ID, value: "connect-cluster" }
         - { name: CONFIG_STORAGE_TOPIC, value: "_connect-configs" }
         - { name: OFFSET_STORAGE_TOPIC,  value: "_connect-offsets" }
@@ -912,20 +904,15 @@ spec:
         - { name: CONFIG_STORAGE_REPLICATION_FACTOR, value: "1" }
         - { name: OFFSET_STORAGE_REPLICATION_FACTOR,  value: "1" }
         - { name: STATUS_STORAGE_REPLICATION_FACTOR,  value: "1" }
-
         - { name: KEY_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
         - { name: VALUE_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
         - { name: KEY_CONVERTER_SCHEMAS_ENABLE, value: "true" }
         - { name: VALUE_CONVERTER_SCHEMAS_ENABLE, value: "true" }
-
         - { name: CONNECT_PLUGIN_PATH, value: "/plugins,/plugins/share/java,/plugins/share/confluent-hub-components,/plugins/yugabytedb" }
-
         - { name: KAFKA_HEAP_OPTS, value: "-Xms256m -Xmx512m" }
         - { name: GOOGLE_APPLICATION_CREDENTIALS, value: "/vault/secrets/gcp-key.json" }
-
         ports:
         - { containerPort: 8083 }
-
         readinessProbe:
           httpGet: { path: /connectors, port: 8083 }
           initialDelaySeconds: 60
@@ -977,7 +964,7 @@ spec:
         ports: [{ containerPort: 8080, name: http }]
         env:
         - { name: KAFKA_CLUSTERS_0_NAME, value: "local" }
-        - { name: KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS, value: "kafka.kafka.svc.internal.lan:9092" }
+        - { name: KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS, value: "kafka.kafka.svc.cluster.local:9092" }
         readinessProbe:
           httpGet: { path: /, port: http }
           initialDelaySeconds: 10
@@ -1120,12 +1107,12 @@ spec:
         volumeMounts:
         - { name: state, mountPath: /state }
         env:
-        - { name: CONNECT_URL, value: "http://kafka-connect.kafka.svc.internal.lan:8083" }
+        - { name: CONNECT_URL, value: "http://kafka-connect.kafka.svc.cluster.local:8083" }
         - { name: SERVER_PREFIX, value: "yb" }
         - { name: SCAN_INTERVAL, value: "30" }
-        - { name: DROP_LEGACY_SLOTS, value: "true" }   # <— NEW: allows auto-cleanup of non-CDC slots
+        - { name: DROP_LEGACY_SLOTS, value: "true" }
         command: ["/bin/bash","-lc"]
-        args: 
+        args:
         - |
           set -Eeuo pipefail
           PS4='+ [WATCHER] $(date -Is) '
@@ -1215,7 +1202,6 @@ spec:
             echo "signaled snapshot for ${DB}.${SCHEMA}.${TBL}"
           }
 
-          # extract a 32-hex id from stdin
           extract32() { sed -n 's/.*\([0-9a-fA-F]\{32\}\).*/\1/p' | tr 'A-F' 'a-f' | head -n1; }
 
           get_or_create_stream_id() {
@@ -1232,7 +1218,7 @@ spec:
             slots="$(/home/yugabyte/bin/ysqlsh "$url" -Atc "select slot_name from pg_replication_slots where database='${DB}'" 2>/dev/null || true)"
             sid="$(printf '%s\n' "$slots" | grep -E '^[0-9a-fA-F]{32}$' | head -n1 | tr 'A-F' 'a-f' || true)"
             legacy_slots="$(printf '%s\n' "$slots" | grep -Ev '^[0-9a-fA-F]{32}$' || true)"
-            if [ -n "$sid" ]; then printf '%s' "$sid"; return 0; fi
+            [ -n "$sid" ] && { printf '%s' "$sid"; return 0; }
 
             # B) Ask masters (per-db first, then global)
             local out
@@ -1251,13 +1237,15 @@ spec:
             sid="$(printf '%s\n' "$out" | extract32)"
             if [ -n "$sid" ]; then printf '%s' "$sid"; return 0; fi
 
-            # D) If creation failed due to existing replication slot but it's legacy, optionally drop and retry once
+            # D) If creation failed due to existing replication slot, try broader cleanup and retry once
             if echo "$out" | grep -qi 'replication slot'; then
-              if [ "${DROP_LEGACY_SLOTS:-false}" = "true" ] && [ -n "$legacy_slots" ]; then
-                echo "INFO: dropping legacy slots for ${DB}: $(echo "$legacy_slots" | tr '\n' ' ' | sed 's/ $//')"
-                printf '%s\n' "$legacy_slots" | while read -r s; do
+              if [ "${DROP_LEGACY_SLOTS:-false}" = "true" ]; then
+                # drop any non-hex slots for this DB (without the WHERE database filter as a fallback)
+                local allslots
+                allslots="$(/home/yugabyte/bin/ysqlsh "$url" -Atc "select slot_name from pg_replication_slots" 2>/dev/null || true)"
+                printf '%s\n' "$allslots" | grep -Ev '^[0-9a-fA-F]{32}$' | while read -r s; do
                   [ -z "$s" ] && continue
-                  /home/yugabyte/bin/ysqlsh "$url" -Atc "select pg_drop_replication_slot('${s}');" >/dev/null 2>&1 || true
+                  /home/yugabyte/bin/ysqlsh "$url" -Atc "select case when database='${DB}' then pg_drop_replication_slot('${s}') end from pg_replication_slots where slot_name='${s}';" >/dev/null 2>&1 || true
                 done
                 out="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" create_change_data_stream ysql.${DB} 2>&1 || true)"
                 sid="$(printf '%s\n' "$out" | extract32)"
@@ -1359,7 +1347,7 @@ spec:
                 done
                 echo "yb-source-${DB} status ($STATUS_CODE):"; tail -c 2000 /tmp/s.json 2>/dev/null || true
 
-                # ----- BigQuery SINK CONNECTOR (schemaless)
+                # ----- BigQuery SINK CONNECTOR
                 SINK_PUT="$(mktmp)"
                 {
                   echo '{'
