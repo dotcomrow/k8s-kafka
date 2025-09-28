@@ -238,6 +238,7 @@ spec:
             bound_service_account_namespaces="${SA_NAMESPACE}" \
             policies="data-bootstrap" ttl="24h" >/dev/null
           echo "✅ Vault config done."
+        volumeMounts: [{ name: root-token, mountPath: /vault-token, readOnly: true }]
 
 # ============================================================================
 # DB init job (wave 2)
