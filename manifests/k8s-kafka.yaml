@@ -238,7 +238,6 @@ spec:
             bound_service_account_namespaces="${SA_NAMESPACE}" \
             policies="data-bootstrap" ttl="24h" >/dev/null
           echo "✅ Vault config done."
-        volumeMounts: [{ name: root-token, mountPath: /vault-token, readOnly: true }]
 
 # ============================================================================
 # DB init job (wave 2)
@@ -836,14 +835,28 @@ spec:
         volumeMounts: [{ name: plugins, mountPath: /plugins }]
       - name: fetch-yb-connector
         image: quay.io/yugabyte/debezium-connector:latest
-        command: ["/bin/sh","-lc"]
+        command: ["/bin/bash","-lc"]
         args:
         - |
-          # inside initContainer: fetch-yb-connector
           set -eu
-          mkdir -p /out/yb
+          PS4='+ [FETCH-YB] $(date -Is) '
+          set -x
+          mkdir -p /plugins/yb
 
-          # Copy only the Debezium Postgres connector directory
+          # Copy Yugabyte connector trees if present (covers gRPC artifacts)
+          for CAND in \
+            /kafka/connect/yugabytedb \
+            /opt/kafka/connect/yugabytedb \
+            /debezium-connector \
+            /opt/debezium-connector
+          do
+            if [ -d "$CAND" ]; then
+              echo "[FETCH-YB] Copying from $CAND"
+              cp -R "$CAND"/. /plugins/yb/ || true
+            fi
+          done
+
+          # Fallback: explicitly include Debezium Postgres connector jars
           for CAND in \
             /kafka/connect/yugabytedb/debezium-connector-postgres \
             /opt/kafka/connect/yugabytedb/debezium-connector-postgres \
@@ -851,23 +864,23 @@ spec:
             /kafka/connect/debezium-connector-postgres
           do
             if [ -d "$CAND" ]; then
-              cp -R "$CAND" /out/yb/
-              break
+              echo "[FETCH-YB] Copying PG connector from $CAND"
+              cp -R "$CAND"/. /plugins/yb/ || true
             fi
           done
 
-          # Hard fail if we didn’t get it
-          [ -d /out/yb/debezium-connector-postgres ] || { echo "YB PG connector not found"; exit 1; }
+          # Sanity check: require at least one YB connector jar present
+          if ! find /plugins/yb -type f -iname '*yugabytedb*connector*.jar' -print -quit | grep -q . ; then
+            echo "[FETCH-YB] ERROR: YugabyteDB Debezium connector jars not found in the image"
+            echo "[FETCH-YB] Contents of /plugins/yb:"; ls -R /plugins/yb || true
+            exit 1
+          fi
 
-          # Remove CloudEvents converter jars within the copied connector (prevents scanner from trying it)
-          find /out/yb/debezium-connector-postgres -type f \
+          # Remove CloudEvents converter jars (avoid spurious classpath scanning)
+          find /plugins/yb -type f \
             \( -iname '*cloudevents*.jar' -o -iname 'debezium-converter-cloud-events-*.jar' \) -print -delete || true
-
-          # Defensive: ensure *no* /plugins/yugabytedb tree exists afterwards
-          rm -rf /plugins/yugabytedb || true
-
         volumeMounts:
-        - { name: plugins, mountPath: /out }
+        - { name: plugins, mountPath: /plugins }
       - name: create-connect-topics
         image: apache/kafka:3.9.0
         command: ["/bin/bash","-lc"]
@@ -889,11 +902,13 @@ spec:
           done
       containers:
       - name: connect
-        image: confluentinc/cp-kafka-connect:7.6.1 
+        image: confluentinc/cp-kafka-connect:7.6.1
         imagePullPolicy: IfNotPresent
         env:
         - name: CONNECT_PLUGIN_DISCOVERY
           value: "only_scan"
+        - name: CONNECT_PLUGIN_PATH
+          value: "/plugins/wepay-kafka-connect-bigquery,/plugins/yb"
         - name: CONNECT_BOOTSTRAP_SERVERS
           value: "kafka.kafka.svc.internal.lan:9092"
         - name: CONNECT_GROUP_ID
@@ -918,8 +933,6 @@ spec:
           value: "true"
         - name: CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE
           value: "true"
-        - name: CONNECT_PLUGIN_PATH
-          value: "/plugins/wepay-kafka-connect-bigquery,/plugins/yb/debezium-connector-postgres"
         - name: CONNECT_REST_ADVERTISED_HOST_NAME
           value: "kafka-connect.kafka.svc.internal.lan"
         - name: CONNECT_REST_PORT
@@ -1138,7 +1151,6 @@ spec:
       - name: state
         emptyDir: {}
       containers:
-      # in bootstrap-watcher .spec.template.spec.containers (add alongside "watcher")
       - name: cloudsdk
         image: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
         env:
@@ -1490,6 +1502,7 @@ spec:
                   echo '  "upsertEnabled":"true",'
                   echo '  "deleteEnabled":"true",'
                   echo '  "primaryKeyMode":"record_key",'
+                  echo '  "kafkaKeyFieldName":"pk",'
                   echo '  "enableRetries":"true",'
                   echo '  "bigQueryRetry":"6",'
                   echo '  "bigQueryRetryWait":"2000",'
