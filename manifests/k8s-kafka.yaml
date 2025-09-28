@@ -1281,6 +1281,17 @@ spec:
           echo "[WATCHER] PGHOST=$PGHOST PGPORT=$PGPORT PGUSER=$PGUSER PGDATABASE=${PGDATABASE:-<ignored>} YB_MASTER_ADDRESSES=${YB_MASTER_ADDRESSES:-<unset>}"
 
           until curl -fsS "${CONNECT_URL}/connectors" >/dev/null 2>&1; do echo "[WATCHER] waiting for connect REST…"; sleep 3; done
+          need_yb='io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector'
+          need_bq='com.wepay.kafka.connect.bigquery.BigQuerySinkConnector'
+
+          echo "[WATCHER] waiting for Connect plugins…"
+          for i in $(seq 1 120); do
+            pjson="$(curl -fsS "${CONNECT_URL}/connector-plugins" || true)"
+            if echo "$pjson" | grep -q "$need_yb" && echo "$pjson" | grep -q "$need_bq"; then
+              echo "[WATCHER] required plugins visible"; break
+            fi
+            sleep 2
+          done
           echo "== Connector plugins =="; curl -fsS "${CONNECT_URL}/connector-plugins" | sed 's/.*/  &/'; echo "======================="
 
           list_dbs() {
@@ -1550,6 +1561,8 @@ spec:
                   echo '  "errors.log.enable":"true",'
                   echo '  "errors.deadletterqueue.topic.name":"bq-dlq",'
                   echo '  "errors.deadletterqueue.context.headers.enable":"true",'
+                  echo '  "errors.deadletterqueue.topic.replication.factor":"1",'
+                  echo '  "errors.deadletterqueue.topic.partitions":"1",'
                   echo '  "upsertEnabled":"true",'
                   echo '  "deleteEnabled":"true",'
                   echo '  "primaryKeyMode":"record_key",'
