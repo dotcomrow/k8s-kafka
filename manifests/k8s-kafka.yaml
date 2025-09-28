@@ -875,7 +875,7 @@ spec:
           done
       containers:
       - name: connect
-        image: quay.io/debezium/connect:1.9.7.Final
+        image: confluentinc/cp-kafka-connect:7.6.1 
         imagePullPolicy: IfNotPresent
         env:
         - name: KAFKA_OPTS
@@ -1359,6 +1359,7 @@ spec:
                   echo "  \"defaultDataset\":\"$(esc "$BQ_DEFAULT_DATASET")\","
                   echo '  "sanitizeTopics":"false",'
                   echo '  "autoCreateTables":"true",'
+                  echo '  "autoUpdateSchemas":"true",'
                   echo '  "allowNewBigQueryFields":"true",'
                   echo '  "allowBigQueryRequiredFieldRelaxation":"true",'
                   echo '  "keySource":"FILE",'
@@ -1367,7 +1368,7 @@ spec:
                   echo '  "value.converter.schemas.enable":"true",'
                   echo '  "key.converter":"org.apache.kafka.connect.json.JsonConverter",'
                   echo '  "key.converter.schemas.enable":"true",'
-                  echo '  "autoUpdateSchemas":"true"'
+                  echo '  "consumer.override.auto.offset.reset":"earliest",'
                   echo '}'
                 } > "$SINK_PUT"
                 SINK_POST="$(mktmp)"; { echo '{ "name":"bq-sink-'"${DB}"'", "config": '; cat "$SINK_PUT"; echo ' }'; } > "$SINK_POST"
