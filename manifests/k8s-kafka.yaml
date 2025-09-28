@@ -1605,7 +1605,7 @@ spec:
                   echo '  "signal.data.collection":"public.debezium_signal",'
                   echo '  "transforms":"unwrap",'
                   echo '  "transforms.unwrap.type":"io.debezium.connector.yugabytedb.transforms.YBExtractNewRecordState",'
-                  echo '  "transforms.unwrap.delete.handling.mode":"rewrite",'
+                  echo '  "transforms.unwrap.delete.handling.mode":"none",'
                   echo '  "topic.creation.default.replication.factor":"1",'
                   echo '  "topic.creation.default.partitions":"1",'
                   echo '  "topic.creation.default.cleanup.policy":"delete"'
@@ -1623,7 +1623,7 @@ spec:
                 done
                 echo "yb-source-${DB} status ($STATUS_CODE):"; tail -c 2000 /tmp/s.json 2>/dev/null || true
 
-                # ----- BigQuery SINK CONNECTOR (fixed trailing comma)
+                # ----- BigQuery SINK CONNECTOR
                 SINK_PUT="$(mktmp)"
                 {
                   echo '{'
@@ -1650,7 +1650,9 @@ spec:
                   echo '  "errors.deadletterqueue.topic.partitions":"1",'
                   echo '  "upsertEnabled":"true",'
                   echo '  "deleteEnabled":"true",'
-                  echo '  "primaryKeyMode":"record_key",'
+                  echo '  "primaryKeyMode":"record_value",'
+                  echo '  "primaryKeyFields":"id",'
+                  # (INTENTIONALLY no kafkaKeyFieldName)
                   echo '  "enableRetries":"true",'
                   echo '  "bigQueryRetry":"6",'
                   echo '  "bigQueryRetryWait":"2000",'
@@ -1674,27 +1676,6 @@ spec:
                   [ "$STATUS_CODE" = "200" ] && break
                 done
                 echo "bq-sink-${DB} status ($STATUS_CODE):"; tail -c 2000 /tmp/s2.json 2>/dev/null || true
-
-                # ---- detect removed topics (annotation removed) and request BQ table deletion
-                mv -f "$TMP_TGT_FILE" "$TMP_TGT_FILE.done"
-                CUR_TGT_FILE="$TMP_TGT_FILE.done"
-                if [ -f "$PREV_TGT_FILE" ]; then
-                  REMOVED_TOPICS="$(comm -23 <(cut -d'|' -f1 "$PREV_TGT_FILE" | sort -u) <(cut -d'|' -f1 "$CUR_TGT_FILE" | sort -u))"
-                  if [ -n "$REMOVED_TOPICS" ]; then
-                    printf '%s\n' "$REMOVED_TOPICS" | while IFS= read -r RT; do
-                      [ -z "$RT" ] && continue
-                      RLINE="$(grep -F "^${RT}|" "$PREV_TGT_FILE" | head -n1 || true)"
-                      DS="$(printf '%s' "$RLINE" | cut -d'|' -f2)"
-                      TN="$(printf '%s' "$RLINE" | cut -d'|' -f3)"
-                      if [ -n "$DS" ] && [ -n "$TN" ]; then
-                        echo "[WATCHER] annotation removed for topic ${RT}; scheduling BigQuery drop ${DS}.${TN}"
-                        printf '%s|%s\n' "$DS" "$TN" > "/state/requests/delete.${DB}.${DS}.${TN}.bqdel"
-                      fi
-                    done
-                  fi
-                fi
-                # persist current targets for next diff
-                mv -f "$CUR_TGT_FILE" "$PREV_TGT_FILE"
 
                 # one-time per-table snapshot signal
                 printf '%s' "$TABLES" | tr ',' '\n' | while read -r FQ; do
