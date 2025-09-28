@@ -1361,7 +1361,7 @@ spec:
               ),
               j AS (
                 SELECT schema, \"table\",
-                       CASE WHEN description ~ '^[[:space:]]*\\{'
+                      CASE WHEN description ~ '^[[:space:]]*\\{'
                             THEN (regexp_replace(description, '^[[:space:]]*', ''))::jsonb
                             ELSE NULL END AS jdesc
                 FROM t
@@ -1514,7 +1514,6 @@ spec:
                 echo "--- /state/${DB}.plan.tsv ---"; cat "/state/${DB}.plan.tsv" || true
 
                 TABLES=""; TOPICS=""; T2MAP=""; DSETS=""; SEEN_DATASETS=""
-                # track topic → dataset/table mappings to detect removals
                 PREV_TGT_FILE="/state/${DB}.targets"
                 TMP_TGT_FILE="$(mktemp /state/${DB}.targets.new.XXXXXX)"
                 while IFS='|' read -r SCH TBL BQMAP PREFIX FMT HDR COLS ENA; do
@@ -1530,15 +1529,12 @@ spec:
                     T2MAP="${T2MAP}${TOPIC}:${TABLE_ONLY},"
                     DSETS="${DSETS}${TOPIC}:${DS},"
                     printf '%s|%s|%s\n' "${TOPIC}" "${DS}" "${TABLE_ONLY}" >> "$TMP_TGT_FILE"
-                    # queue one ensure-dataset request per unique DS
                     if ! printf '%s\n' "$SEEN_DATASETS" | grep -qx "$DS"; then
                       printf '%s\n' "$DS" > "/state/requests/ensure.${DB}.${DS}.dataset"
                       SEEN_DATASETS="$(printf '%s\n%s\n' "$SEEN_DATASETS" "$DS" | awk 'NF' | sort -u)"
                     fi
                   else
-                    # No dataset provided; just use the table name (sink will use defaultDataset)
                     T2MAP="${T2MAP}${TOPIC}:${TBL},"
-                    # record with default dataset for deletion tracking
                     printf '%s|%s|%s\n' "${TOPIC}" "${BQ_DEFAULT_DATASET}" "${TBL}" >> "$TMP_TGT_FILE"
                   fi
                   seed_table_if_needed "$DB" "$SCH" "$TBL" "$PREFIX" "$BQMAP" "$HDR"
@@ -1546,7 +1542,7 @@ spec:
                 TABLES="${TABLES%,}"; TOPICS="${TOPICS%,}"; T2MAP="${T2MAP%,}"
                 DSETS="${DSETS%,}"
 
-                # ---- detect removed topics (annotation removed) and request BQ table deletion
+                # detect removed targets and schedule BQ table drops
                 mv -f "$TMP_TGT_FILE" "$TMP_TGT_FILE.done"
                 CUR_TGT_FILE="$TMP_TGT_FILE.done"
                 if [ -f "$PREV_TGT_FILE" ]; then
@@ -1564,7 +1560,6 @@ spec:
                     done < <(printf '%s\n' "$REMOVED_TOPICS")
                   fi
                 fi
-                # persist current targets for next diff
                 mv -f "$CUR_TGT_FILE" "$PREV_TGT_FILE"
 
                 if [ -z "$TABLES" ]; then
@@ -1603,9 +1598,14 @@ spec:
                   echo '  "snapshot.mode":"initial",'
                   echo '  "incremental.snapshot.enabled":"true",'
                   echo '  "signal.data.collection":"public.debezium_signal",'
-                  echo '  "transforms":"unwrap",'
+
+                  # unwrap + extract primitive key=id for BigQuery upserts without extra columns
+                  echo '  "transforms":"unwrap,extractKey",'
                   echo '  "transforms.unwrap.type":"io.debezium.connector.yugabytedb.transforms.YBExtractNewRecordState",'
                   echo '  "transforms.unwrap.delete.handling.mode":"none",'
+                  echo '  "transforms.extractKey.type":"org.apache.kafka.connect.transforms.ExtractField$Key",'
+                  echo '  "transforms.extractKey.field":"id",'
+
                   echo '  "topic.creation.default.replication.factor":"1",'
                   echo '  "topic.creation.default.partitions":"1",'
                   echo '  "topic.creation.default.cleanup.policy":"delete"'
@@ -1636,32 +1636,40 @@ spec:
                   fi
                   echo "  \"project\":\"$(esc "$BQ_PROJECT")\","
                   echo "  \"defaultDataset\":\"$(esc "$BQ_DEFAULT_DATASET")\","
+
+                  # Use existing 'id' column for upsert/delete key; avoid new columns
+                  echo '  "kafkaKeyFieldName":"id",'
+
                   echo '  "sanitizeTopics":"false",'
-                  echo '  "autoCreateTables":"true",'
-                  echo '  "autoUpdateSchemas":"true",'
-                  echo '  "allowNewBigQueryFields":"true",'
-                  echo '  "allowBigQueryRequiredFieldRelaxation":"true",'
-                  echo '  "bigQueryPartitionDecorator":"false",'
+
+                  # Do NOT generate/alter schemas or tables in BQ
+                  echo '  "autoCreateTables":"false",'
+                  echo '  "autoUpdateSchemas":"false",'
+
+                  # error handling / DLQ
                   echo '  "errors.tolerance":"all",'
                   echo '  "errors.log.enable":"true",'
                   echo '  "errors.deadletterqueue.topic.name":"bq-dlq",'
                   echo '  "errors.deadletterqueue.context.headers.enable":"true",'
                   echo '  "errors.deadletterqueue.topic.replication.factor":"1",'
                   echo '  "errors.deadletterqueue.topic.partitions":"1",'
+
+                  # upsert & delete
                   echo '  "upsertEnabled":"true",'
                   echo '  "deleteEnabled":"true",'
-                  echo '  "primaryKeyMode":"record_value",'
-                  echo '  "primaryKeyFields":"id",'
-                  # (INTENTIONALLY no kafkaKeyFieldName)
+
                   echo '  "enableRetries":"true",'
                   echo '  "bigQueryRetry":"6",'
                   echo '  "bigQueryRetryWait":"2000",'
                   echo '  "keySource":"FILE",'
                   echo '  "keyfile": "/vault/secrets/gcp-key.json",'
+
+                  # converters (schemas enabled is fine with unwrap + primitive key)
                   echo '  "value.converter":"org.apache.kafka.connect.json.JsonConverter",'
                   echo '  "value.converter.schemas.enable":"true",'
                   echo '  "key.converter":"org.apache.kafka.connect.json.JsonConverter",'
                   echo '  "key.converter.schemas.enable":"true",'
+
                   echo '  "consumer.override.auto.offset.reset":"earliest"'
                   echo '}'
                 } > "$SINK_PUT"
