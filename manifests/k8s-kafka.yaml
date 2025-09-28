@@ -909,23 +909,25 @@ spec:
             if [ -n "${YB_CONNECTOR_URL}" ]; then
               echo "[FETCH-YB] Downloading YugabyteDB Debezium connector from ${YB_CONNECTOR_URL}"
               TMP="$(mktemp -d /tmp/ybconn.XXXXXX)"
-              PKG="${TMP}/pkg"
-              curl -fL --retry 5 --retry-delay 2 -o "${PKG}" "${YB_CONNECTOR_URL}"
+              PKG="$TMP/pkg"
+              curl -fL --retry 5 --retry-delay 2 -o "$PKG" "${YB_CONNECTOR_URL}"
 
-              if echo "${YB_CONNECTOR_URL}" | grep -qiE '\.jar($|\?)'; then
-                # Single jar case
-                cp "${PKG}" /plugins/yb/
+              # Determine target filename from URL (strip query), fall back to .jar
+              BASENAME="$(basename "${YB_CONNECTOR_URL%%\?*}")"
+
+              if echo "$BASENAME" | grep -qiE '\.jar$'; then
+                cp "$PKG" "/plugins/yb/$BASENAME"
               else
-                # Archive case: try unzip first, then tar (gz/zip/other)
-                if unzip -q -d "${TMP}/unz" "${PKG}" >/dev/null 2>&1; then
-                  cp -R "${TMP}/unz"/. /plugins/yb/ || true
+                # Not a .jar? Try to unpack as zip/tar
+                mkdir -p "$TMP/unz" "$TMP/tar"
+                if unzip -q -d "$TMP/unz" "$PKG" >/dev/null 2>&1; then
+                  cp -R "$TMP/unz"/. /plugins/yb/ || true
                 else
-                  mkdir -p "${TMP}/tar"
-                  tar -xzf "${PKG}" -C "${TMP}/tar" >/dev/null 2>&1 || tar -xf "${PKG}" -C "${TMP}/tar" >/dev/null 2>&1 || true
-                  cp -R "${TMP}/tar"/. /plugins/yb/ || true
+                  tar -xzf "$PKG" -C "$TMP/tar" >/dev/null 2>&1 || tar -xf "$PKG" -C "$TMP/tar" || true
+                  cp -R "$TMP/tar"/. /plugins/yb/ || true
                 fi
               fi
-              rm -rf "${TMP}"
+              rm -rf "$TMP"
             fi
           fi
 
