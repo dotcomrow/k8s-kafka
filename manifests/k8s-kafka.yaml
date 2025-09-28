@@ -839,28 +839,33 @@ spec:
         command: ["/bin/sh","-lc"]
         args:
         - |
+          # inside initContainer: fetch-yb-connector
           set -eu
-          PS4='+ [FETCH-YB] $(date -Is) '; set -x
-          mkdir -p /out/yb/debezium-connector-postgres
+          mkdir -p /out/yb
 
-          # Find the Debezium PG connector directory inside the image
+          # Copy only the Debezium Postgres connector directory
           for CAND in \
             /kafka/connect/yugabytedb/debezium-connector-postgres \
             /opt/kafka/connect/yugabytedb/debezium-connector-postgres \
             /debezium-connector/debezium-connector-postgres \
-            /kafka/connect/debezium-connector-postgres; do
+            /kafka/connect/debezium-connector-postgres
+          do
             if [ -d "$CAND" ]; then
-              cp -R "$CAND"/* /out/yb/debezium-connector-postgres/
+              cp -R "$CAND" /out/yb/
               break
             fi
           done
 
+          # Hard fail if we didn’t get it
           [ -d /out/yb/debezium-connector-postgres ] || { echo "YB PG connector not found"; exit 1; }
 
-          # IMPORTANT: Put all jars under lib/ so Connect treats the whole directory as one plugin location
-          mkdir -p /out/yb/debezium-connector-postgres/lib
-          shopt -s nullglob
-          mv /out/yb/debezium-connector-postgres/*.jar /out/yb/debezium-connector-postgres/lib/ || true
+          # Remove CloudEvents converter jars within the copied connector (prevents scanner from trying it)
+          find /out/yb/debezium-connector-postgres -type f \
+            \( -iname '*cloudevents*.jar' -o -iname 'debezium-converter-cloud-events-*.jar' \) -print -delete || true
+
+          # Defensive: ensure *no* /plugins/yugabytedb tree exists afterwards
+          rm -rf /plugins/yugabytedb || true
+
         volumeMounts:
         - { name: plugins, mountPath: /out }
       - name: create-connect-topics
@@ -914,7 +919,7 @@ spec:
         - name: CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE
           value: "true"
         - name: CONNECT_PLUGIN_PATH
-          value: "/plugins/wepay-kafka-connect-bigquery,/plugins/yb"
+          value: "/plugins/wepay-kafka-connect-bigquery,/plugins/yb/debezium-connector-postgres"
         - name: CONNECT_REST_ADVERTISED_HOST_NAME
           value: "kafka-connect.kafka.svc.internal.lan"
         - name: CONNECT_REST_PORT
