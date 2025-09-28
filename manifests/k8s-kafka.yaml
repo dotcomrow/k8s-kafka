@@ -855,8 +855,6 @@ spec:
               fi
             done
             [ -d /out/yb/debezium-connector-postgres ] || { echo "YB PG connector not found"; exit 1; }
-            # Hard-delete CloudEvents converter jars if present
-            find /out/yb -type f \( -iname '*cloudevents*.jar' -o -iname 'debezium-converter-cloud-events-*.jar' \) -print -delete || true
         volumeMounts:
         - { name: plugins, mountPath: /out }
       - name: create-connect-topics
@@ -883,6 +881,8 @@ spec:
         image: confluentinc/cp-kafka-connect:7.6.1 
         imagePullPolicy: IfNotPresent
         env:
+        - name: CONNECT_PLUGIN_DISCOVERY
+          value: "only_scan"
         - name: CONNECT_BOOTSTRAP_SERVERS
           value: "kafka.kafka.svc.internal.lan:9092"
         - name: CONNECT_GROUP_ID
