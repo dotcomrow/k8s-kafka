@@ -1149,13 +1149,14 @@ spec:
 
           mkdir -p /state/requests /state/in
           echo "[CLOUDSDK] ready; watching for requests in /state/requests"
+          shopt -s nullglob
           while :; do
-            for rq in /state/requests/*.bq 2>/dev/null; do
-              [ -e "$rq" ] || { sleep 2; continue; }
+            for rq in /state/requests/*.bq; do
               # file format: PREFIX|BQMAP|FORMAT|HEADER
               IFS='|' read -r PREFIX BQMAP FMT HDR < "$rq" || true
               [ -n "${PREFIX:-}" ] || { rm -f "$rq"; continue; }
               [ -n "${BQMAP:-}" ]  || { echo "[CLOUDSDK] skip ${PREFIX}: empty BQMAP"; rm -f "$rq"; continue; }
+
               OUTDIR="/state/in/${PREFIX}"; mkdir -p "$OUTDIR"
               DEST_URI="gs://${BUCKET}/bootstrap/${PREFIX}/${PREFIX}-*.csv"
               echo "[CLOUDSDK] exporting ${BQMAP} -> ${DEST_URI}"
