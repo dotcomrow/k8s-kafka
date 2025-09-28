@@ -1233,7 +1233,7 @@ spec:
 
               OUTDIR="/state/in/${PREFIX}"; mkdir -p "$OUTDIR"
               DEST_URI="gs://${BUCKET}/bootstrap/${PREFIX}/${PREFIX}-*.csv"
-              +              echo "[CLOUDSDK] exporting ${BQMAP} -> ${DEST_URI}"
+              echo "[CLOUDSDK] exporting ${BQMAP} -> ${DEST_URI}"
               # Try extract; capture output to detect 'Not found: Table ...'
               set +e
               EXTRACT_OUT="$( bq --location="${LOCATION}" --project_id="${PROJECT}" extract \
