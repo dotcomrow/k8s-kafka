@@ -883,6 +883,15 @@ spec:
         image: quay.io/debezium/connect:1.9.7.Final
         imagePullPolicy: IfNotPresent
         env:
+        - name: KAFKA_OPTS
+          value: >-
+              -Dyb.master_addresses=yb-master-0.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-1.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-2.yb-master-service.yugabyte.svc.cluster.local:7100
+              -Dyb.client_admin_operation_timeout_ms=15000
+              -Dyb.client_default_operation_timeout_ms=15000
+              -Dyb.client_wait_for_leader_election_on_init=false
+          # (optional, for debugging/ops visibility)
+        - name: YB_MASTER_ADDRESSES
+          value: yb-master-0.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-1.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-2.yb-master-service.yugabyte.svc.cluster.local:7100
         - name: CLUSTER_ID
           valueFrom:
             secretKeyRef:
