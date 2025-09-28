@@ -1225,6 +1225,16 @@ spec:
           echo "[CLOUDSDK] ready; watching for requests in /state/requests"
           shopt -s nullglob
           while :; do
+            # delete-<db>.<dataset>.<table>.bqdel → drop BigQuery table
+            for rq in /state/requests/*.bqdel; do
+              # file content: DATASET|TABLE
+              IFS='|' read -r DS TN < "$rq" || true
+              if [ -n "${DS:-}" ] && [ -n "${TN:-}" ]; then
+                echo "[CLOUDSDK] deleting table ${PROJECT}:${DS}.${TN} (${LOCATION})"
+                bq --project_id="${PROJECT}" --location="${LOCATION}" rm -f -t "${PROJECT}:${DS}.${TN}" >/dev/null 2>&1 || true
+              fi
+              rm -f "$rq"
+            done
             # ensure-<db>.<dataset>.dataset → create dataset if missing
             for rq in /state/requests/*.dataset; do
               DS="$(cat "$rq" 2>/dev/null || true)"
@@ -1504,6 +1514,9 @@ spec:
                 echo "--- /state/${DB}.plan.tsv ---"; cat "/state/${DB}.plan.tsv" || true
 
                 TABLES=""; TOPICS=""; T2MAP=""; DSETS=""; SEEN_DATASETS=""
+                # track topic → dataset/table mappings to detect removals
+                PREV_TGT_FILE="/state/${DB}.targets"
+                TMP_TGT_FILE="$(mktemp /state/${DB}.targets.new.XXXXXX)"
                 while IFS='|' read -r SCH TBL BQMAP PREFIX FMT HDR COLS ENA; do
                   [ -z "$SCH" ] && continue
                   [ "$ENA" != "t" ] && continue
@@ -1516,6 +1529,7 @@ spec:
                     DS="${BQMAP%%.*}"; TABLE_ONLY="${BQMAP##*.}"
                     T2MAP="${T2MAP}${TOPIC}:${TABLE_ONLY},"
                     DSETS="${DSETS}${TOPIC}:${DS},"
+                    printf '%s|%s|%s\n' "${TOPIC}" "${DS}" "${TABLE_ONLY}" >> "$TMP_TGT_FILE"
                     # queue one ensure-dataset request per unique DS
                     if ! printf '%s\n' "$SEEN_DATASETS" | grep -qx "$DS"; then
                       printf '%s\n' "$DS" > "/state/requests/ensure.${DB}.${DS}.dataset"
@@ -1524,11 +1538,34 @@ spec:
                   else
                     # No dataset provided; just use the table name (sink will use defaultDataset)
                     T2MAP="${T2MAP}${TOPIC}:${TBL},"
+                    # record with default dataset for deletion tracking
+                    printf '%s|%s|%s\n' "${TOPIC}" "${BQ_DEFAULT_DATASET}" "${TBL}" >> "$TMP_TGT_FILE"
                   fi
                   seed_table_if_needed "$DB" "$SCH" "$TBL" "$PREFIX" "$BQMAP" "$HDR"
                 done < "/state/${DB}.plan.tsv"
                 TABLES="${TABLES%,}"; TOPICS="${TOPICS%,}"; T2MAP="${T2MAP%,}"
                 DSETS="${DSETS%,}"
+
+                # ---- detect removed topics (annotation removed) and request BQ table deletion
+                mv -f "$TMP_TGT_FILE" "$TMP_TGT_FILE.done"
+                CUR_TGT_FILE="$TMP_TGT_FILE.done"
+                if [ -f "$PREV_TGT_FILE" ]; then
+                  REMOVED_TOPICS="$(comm -23 <(cut -d'|' -f1 "$PREV_TGT_FILE" | sort -u) <(cut -d'|' -f1 "$CUR_TGT_FILE" | sort -u))"
+                  if [ -n "$REMOVED_TOPICS" ]; then
+                    while IFS= read -r RT; do
+                      [ -z "$RT" ] && continue
+                      RLINE="$(grep -F "^${RT}|" "$PREV_TGT_FILE" | head -n1 || true)"
+                      DS="$(printf '%s' "$RLINE" | cut -d'|' -f2)"
+                      TN="$(printf '%s' "$RLINE" | cut -d'|' -f3)"
+                      if [ -n "$DS" ] && [ -n "$TN" ]; then
+                        echo "[WATCHER] annotation removed for topic ${RT}; scheduling BigQuery drop ${DS}.${TN}"
+                        printf '%s|%s\n' "$DS" "$TN" > "/state/requests/delete.${DB}.${DS}.${TN}.bqdel"
+                      fi
+                    done < <(printf '%s\n' "$REMOVED_TOPICS")
+                  fi
+                fi
+                # persist current targets for next diff
+                mv -f "$CUR_TGT_FILE" "$PREV_TGT_FILE"
 
                 if [ -z "$TABLES" ]; then
                   echo "DB ${DB}: no enabled tables; removing connectors if present."
@@ -1539,7 +1576,6 @@ spec:
                 fi
 
                 ensure_signal_table "$DB"
-
                 STREAM_ID="$(get_or_create_stream_id "$DB")" || { echo "ERROR: no CDC stream id; skipping DB ${DB}"; continue; }
                 echo "[WATCHER] DB=${DB} STREAM_ID=${STREAM_ID} (len=${#STREAM_ID})"
 
@@ -1639,6 +1675,27 @@ spec:
                   [ "$STATUS_CODE" = "200" ] && break
                 done
                 echo "bq-sink-${DB} status ($STATUS_CODE):"; tail -c 2000 /tmp/s2.json 2>/dev/null || true
+
+                # ---- detect removed topics (annotation removed) and request BQ table deletion
+                mv -f "$TMP_TGT_FILE" "$TMP_TGT_FILE.done"
+                CUR_TGT_FILE="$TMP_TGT_FILE.done"
+                if [ -f "$PREV_TGT_FILE" ]; then
+                  REMOVED_TOPICS="$(comm -23 <(cut -d'|' -f1 "$PREV_TGT_FILE" | sort -u) <(cut -d'|' -f1 "$CUR_TGT_FILE" | sort -u))"
+                  if [ -n "$REMOVED_TOPICS" ]; then
+                    printf '%s\n' "$REMOVED_TOPICS" | while IFS= read -r RT; do
+                      [ -z "$RT" ] && continue
+                      RLINE="$(grep -F "^${RT}|" "$PREV_TGT_FILE" | head -n1 || true)"
+                      DS="$(printf '%s' "$RLINE" | cut -d'|' -f2)"
+                      TN="$(printf '%s' "$RLINE" | cut -d'|' -f3)"
+                      if [ -n "$DS" ] && [ -n "$TN" ]; then
+                        echo "[WATCHER] annotation removed for topic ${RT}; scheduling BigQuery drop ${DS}.${TN}"
+                        printf '%s|%s\n' "$DS" "$TN" > "/state/requests/delete.${DB}.${DS}.${TN}.bqdel"
+                      fi
+                    done
+                  fi
+                fi
+                # persist current targets for next diff
+                mv -f "$CUR_TGT_FILE" "$PREV_TGT_FILE"
 
                 # one-time per-table snapshot signal
                 printf '%s' "$TABLES" | tr ',' '\n' | while read -r FQ; do
