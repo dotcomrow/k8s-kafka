@@ -219,7 +219,7 @@ spec:
           BOOT_ARGS=""; [ -n "$BQ_BOOTSTRAP_BUCKET" ] && BOOT_ARGS="$BOOT_ARGS bucket=$BQ_BOOTSTRAP_BUCKET"
           [ -n "$BQ_BOOTSTRAP_PROJECT" ] && BOOT_ARGS="$BOOT_ARGS project=$BQ_BOOTSTRAP_PROJECT"
           [ -n "$BQ_BOOTSTRAP_LOCATION" ] && BOOT_ARGS="$BOOT_ARGS location=$BQ_BOOTSTRAP_LOCATION"
-          [ -n "$BOOT_ARGS" ] && vault kv put secret/kafka/bq/bootstrap $BOOT_ARGS >/div/null && echo "→ Wrote secret/kafka/bq/bootstrap"
+          [ -n "$BOOT_ARGS" ] && vault kv put secret/kafka/bq/bootstrap $BOOT_ARGS >/dev/null && echo "→ Wrote secret/kafka/bq/bootstrap"
           CFG_ARGS=""; [ -n "$BQ_PROJECT" ] && CFG_ARGS="$CFG_ARGS project=$BQ_PROJECT"
           [ -n "$BQ_DEFAULT_DATASET" ] && CFG_ARGS="$CFG_ARGS dataset=$BQ_DEFAULT_DATASET"
           [ -s /tmp/sa.json ] && CFG_ARGS="$CFG_ARGS sa_json=@/tmp/sa.json"
@@ -1057,7 +1057,7 @@ spec:
           limits: { cpu: "300m", memory: "256Mi" }
 
 # ============================================================================
-# Continuous Annotation Watcher (wave 50) — robust CDC stream fetch + sink overrides
+# Continuous Annotation Watcher (wave 50) — robust CDC stream fetch + legacy cleanup
 # ============================================================================
 ---
 apiVersion: apps/v1
@@ -1123,6 +1123,7 @@ spec:
         - { name: CONNECT_URL, value: "http://kafka-connect.kafka.svc.internal.lan:8083" }
         - { name: SERVER_PREFIX, value: "yb" }
         - { name: SCAN_INTERVAL, value: "30" }
+        - { name: DROP_LEGACY_SLOTS, value: "true" }   # <— NEW: allows auto-cleanup of non-CDC slots
         command: ["/bin/bash","-lc"]
         args: 
         - |
@@ -1214,7 +1215,7 @@ spec:
             echo "signaled snapshot for ${DB}.${SCHEMA}.${TBL}"
           }
 
-          # ---- helpers ----
+          # extract a 32-hex id from stdin
           extract32() { sed -n 's/.*\([0-9a-fA-F]\{32\}\).*/\1/p' | tr 'A-F' 'a-f' | head -n1; }
 
           get_or_create_stream_id() {
@@ -1222,35 +1223,49 @@ spec:
             local MASTERS="${YB_MASTER_ADDRESSES:-}"
             [ -z "$MASTERS" ] && { echo "ERROR: YB_MASTER_ADDRESSES is required" >&2; return 1; }
 
-            # detect any PG logical slots for this DB and fail fast with guidance
-            local URL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${DB}?sslmode=disable"
-            local SLOTS
-            SLOTS="$(/home/yugabyte/bin/ysqlsh "$URL" -Atc "select slot_name from pg_replication_slots where database='${DB}'" 2>/dev/null || true)"
-            if [ -n "$SLOTS" ]; then
-              echo "ERROR: database '${DB}' has existing replication slot(s): $(echo "$SLOTS" | tr '\n' ' ' | sed 's/ $//'). Drop them before creating CDC stream." >&2
-              return 1
+            local url="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${DB}?sslmode=disable"
+            local sid=""
+            local legacy_slots=""
+
+            # A) Look for existing 32-hex slot (CDC style)
+            local slots
+            slots="$(/home/yugabyte/bin/ysqlsh "$url" -Atc "select slot_name from pg_replication_slots where database='${DB}'" 2>/dev/null || true)"
+            sid="$(printf '%s\n' "$slots" | grep -E '^[0-9a-fA-F]{32}$' | head -n1 | tr 'A-F' 'a-f' || true)"
+            legacy_slots="$(printf '%s\n' "$slots" | grep -Ev '^[0-9a-fA-F]{32}$' || true)"
+            if [ -n "$sid" ]; then printf '%s' "$sid"; return 0; fi
+
+            # B) Ask masters (per-db first, then global)
+            local out
+            out="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" --include_db_streams=true list_change_data_streams ysql.${DB} 2>/dev/null || true)"
+            sid="$(printf '%s\n' "$out" | extract32)"
+            if [ -z "$sid" ]; then
+              out="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" --include_db_streams=true list_change_data_streams ysql 2>/dev/null || true)"
+              sid="$(printf '%s\n' "$out" \
+                    | awk -v db="$DB" 'BEGIN{RS="";FS="\n"} $0 ~ ("namespace_name:[[:space:]]*" db) {for(i=1;i<=NF;i++) if (tolower($i) ~ /(db_stream_id|stream[ _]?id)/) print $i}' \
+                    | extract32)"
+            fi
+            [ -n "$sid" ] && { printf '%s' "$sid"; return 0; }
+
+            # C) Try to create
+            out="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" create_change_data_stream ysql.${DB} 2>&1 || true)"
+            sid="$(printf '%s\n' "$out" | extract32)"
+            if [ -n "$sid" ]; then printf '%s' "$sid"; return 0; fi
+
+            # D) If creation failed due to existing replication slot but it's legacy, optionally drop and retry once
+            if echo "$out" | grep -qi 'replication slot'; then
+              if [ "${DROP_LEGACY_SLOTS:-false}" = "true" ] && [ -n "$legacy_slots" ]; then
+                echo "INFO: dropping legacy slots for ${DB}: $(echo "$legacy_slots" | tr '\n' ' ' | sed 's/ $//')"
+                printf '%s\n' "$legacy_slots" | while read -r s; do
+                  [ -z "$s" ] && continue
+                  /home/yugabyte/bin/ysqlsh "$url" -Atc "select pg_drop_replication_slot('${s}');" >/dev/null 2>&1 || true
+                done
+                out="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" create_change_data_stream ysql.${DB} 2>&1 || true)"
+                sid="$(printf '%s\n' "$out" | extract32)"
+                [ -n "$sid" ] && { printf '%s' "$sid"; return 0; }
+              fi
             fi
 
-            # try per-db list
-            local OUT SID
-            OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" --include_db_streams=true list_change_data_streams ysql.${DB} 2>/dev/null || true)"
-            SID="$(printf '%s\n' "$OUT" | grep -Ei '(db_stream_id|stream[ _]?id)' | extract32)"
-            [ -n "$SID" ] && { printf '%s' "$SID"; return 0; }
-
-            # try global list and filter
-            OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" --include_db_streams=true list_change_data_streams ysql 2>/dev/null || true)"
-            SID="$(printf '%s\n' "$OUT" | awk -v db="$DB" 'BEGIN{RS="";FS="\n"} $0 ~ ("namespace_name:[[:space:]]*" db) {for(i=1;i<=NF;i++) if (tolower($i) ~ /(db_stream_id|stream[ _]?id)/) print $i}' | extract32)"
-            [ -n "$SID" ] && { printf '%s' "$SID"; return 0; }
-
-            # create if none found
-            OUT="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" create_change_data_stream ysql.${DB} 2>&1 || true)"
-            SID="$(printf '%s\n' "$OUT" | grep -Ei '(db_stream_id|stream[ _]?id)' | extract32)"
-            if [ -z "$SID" ]; then
-              echo "ERROR: could not obtain CDC stream id for DB=${DB}. Output:" >&2
-              echo "$OUT" >&2
-              return 1
-            fi
-            printf '%s' "$SID"
+            echo "ERROR: could not obtain CDC stream id for DB=${DB}"; return 1
           }
 
           SERVER_PREFIX="${SERVER_PREFIX:-yb}"
@@ -1314,8 +1329,12 @@ spec:
                   echo "  \"database.dbname\":\"$(esc "$DB")\","
                   echo "  \"database.server.name\":\"$(esc "${SERVER_PREFIX}_${DB}")\","
                   echo "  \"database.stream.id\":\"$(esc "$STREAM_ID")\","
+                  echo "  \"database.streamid\":\"$(esc "$STREAM_ID")\","
+                  echo "  \"yugabyte.stream.id\":\"$(esc "$STREAM_ID")\","
                   if [ -n "${YB_MASTER_ADDRESSES:-}" ]; then
                     echo "  \"database.master.addresses\":\"$(esc "$YB_MASTER_ADDRESSES")\","
+                    echo "  \"yb.master.addresses\":\"$(esc "$YB_MASTER_ADDRESSES")\","
+                    echo "  \"yugabyte.master.addresses\":\"$(esc "$YB_MASTER_ADDRESSES")\","
                   fi
                   echo "  \"table.include.list\":\"$(esc "$TABLES")\","
                   echo '  "snapshot.mode":"initial",'
@@ -1340,7 +1359,7 @@ spec:
                 done
                 echo "yb-source-${DB} status ($STATUS_CODE):"; tail -c 2000 /tmp/s.json 2>/dev/null || true
 
-                # ----- BigQuery SINK CONNECTOR (forced schemaless for compatibility)
+                # ----- BigQuery SINK CONNECTOR (schemaless)
                 SINK_PUT="$(mktmp)"
                 {
                   echo '{'
@@ -1356,7 +1375,6 @@ spec:
                   echo '  "allowBigQueryRequiredFieldRelaxation":"true",'
                   echo '  "keySource":"FILE",'
                   echo '  "keyfile": "/vault/secrets/gcp-key.json",'
-                  # Per-connector converter overrides → schemaless
                   echo '  "value.converter":"org.apache.kafka.connect.json.JsonConverter",'
                   echo '  "value.converter.schemas.enable":"false",'
                   echo '  "key.converter":"org.apache.kafka.connect.json.JsonConverter",'
@@ -1375,7 +1393,7 @@ spec:
                 done
                 echo "bq-sink-${DB} status ($STATUS_CODE):"; tail -c 2000 /tmp/s2.json 2>/dev/null || true
 
-                # signal snapshots once
+                # ensure snapshot once per table
                 printf '%s' "$TABLES" | tr ',' '\n' | while read -r FQ; do
                   [ -z "$FQ" ] && continue
                   ST="/state/${DB}.${FQ}.snap"
