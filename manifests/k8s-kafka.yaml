@@ -1295,9 +1295,12 @@ spec:
                   TABLES="${TABLES}${FQ},"
                   TOPICS="${TOPICS}${TOPIC},"
                   if [ -n "$BQMAP" ] && echo "$BQMAP" | grep -q '\.'; then
-                    T2MAP="${T2MAP}${TOPIC}:${BQMAP},"
+                    # If the annotation provided dataset.table, strip the dataset part
+                    TABLE_ONLY="${BQMAP##*.}"
+                    T2MAP="${T2MAP}${TOPIC}:${TABLE_ONLY},"
                   else
-                    T2MAP="${T2MAP}${TOPIC}:${BQ_DEFAULT_DATASET}.${TBL},"
+                    # No dataset provided; just use the table name
+                    T2MAP="${T2MAP}${TOPIC}:${TBL},"
                   fi
                 done < "/state/${DB}.plan.tsv"
                 TABLES="${TABLES%,}"; TOPICS="${TOPICS%,}"; T2MAP="${T2MAP%,}"
