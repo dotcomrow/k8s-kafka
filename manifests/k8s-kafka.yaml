@@ -878,6 +878,38 @@ spec:
         image: confluentinc/cp-kafka-connect:7.6.1 
         imagePullPolicy: IfNotPresent
         env:
+        # in: spec.template.spec.containers[name: connect].env
+        - name: CONNECT_BOOTSTRAP_SERVERS
+          value: "kafka.kafka.svc.internal.lan:9092"         # was BOOTSTRAP_SERVERS
+        - name: CONNECT_GROUP_ID
+          value: "connect-cluster"                            # was GROUP_ID
+        - name: CONNECT_CONFIG_STORAGE_TOPIC
+          value: "_connect-configs"                           # was CONFIG_STORAGE_TOPIC
+        - name: CONNECT_OFFSET_STORAGE_TOPIC
+          value: "_connect-offsets"                           # was OFFSET_STORAGE_TOPIC
+        - name: CONNECT_STATUS_STORAGE_TOPIC
+          value: "_connect-status"                            # was STATUS_STORAGE_TOPIC
+        - name: CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR
+          value: "1"                                          # was CONFIG_STORAGE_REPLICATION_FACTOR
+        - name: CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR
+          value: "1"                                          # was OFFSET_STORAGE_REPLICATION_FACTOR
+        - name: CONNECT_STATUS_STORAGE_REPLICATION_FACTOR
+          value: "1"                                          # was STATUS_STORAGE_REPLICATION_FACTOR
+        - name: CONNECT_KEY_CONVERTER
+          value: "org.apache.kafka.connect.json.JsonConverter"    # was KEY_CONVERTER
+        - name: CONNECT_VALUE_CONVERTER
+          value: "org.apache.kafka.connect.json.JsonConverter"    # was VALUE_CONVERTER
+        - name: CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE
+          value: "true"                                       # was KEY_CONVERTER_SCHEMAS_ENABLE
+        - name: CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE
+          value: "true"                                       # was VALUE_CONVERTER_SCHEMAS_ENABLE
+        - name: CONNECT_PLUGIN_PATH
+          value: "/plugins,/plugins/share/java,/plugins/share/confluent-hub-components,/plugins/yugabytedb"  # already correct
+        - name: CONNECT_REST_ADVERTISED_HOST_NAME
+          value: "kafka-connect.kafka.svc.internal.lan"       # replaces ADVERTISED_HOST_NAME
+        - name: CONNECT_REST_PORT
+          value: "8083"                                       # replaces REST_PORT
+        # keep these as-is (they still work with Confluent image)
         - name: KAFKA_OPTS
           value: >-
             -Dyb.master_addresses=yb-master-0.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-1.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-2.yb-master-service.yugabyte.svc.cluster.local:7100
@@ -888,29 +920,11 @@ spec:
           value: yb-master-0.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-1.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-2.yb-master-service.yugabyte.svc.cluster.local:7100
         - name: CLUSTER_ID
           valueFrom:
-            secretKeyRef:
-              name: kafka-cluster-id
-              key: CLUSTER_ID
-        - { name: REST_HOST_NAME, value: "0.0.0.0" }
-        - { name: REST_PORT, value: "8083" }
-        - { name: ADVERTISED_HOST_NAME, value: "kafka-connect.kafka.svc.internal.lan" }
-        - { name: ADVERTISED_PORT, value: "8083" }
-        - { name: KAFKA_LOG4J_OPTS, value: "-Dlog4j.configuration=file:/kafka/etc/log4j.properties" }
-        - { name: BOOTSTRAP_SERVERS, value: "kafka.kafka.svc.internal.lan:9092" }
-        - { name: GROUP_ID, value: "connect-cluster" }
-        - { name: CONFIG_STORAGE_TOPIC, value: "_connect-configs" }
-        - { name: OFFSET_STORAGE_TOPIC,  value: "_connect-offsets" }
-        - { name: STATUS_STORAGE_TOPIC,  value: "_connect-status" }
-        - { name: CONFIG_STORAGE_REPLICATION_FACTOR, value: "1" }
-        - { name: OFFSET_STORAGE_REPLICATION_FACTOR,  value: "1" }
-        - { name: STATUS_STORAGE_REPLICATION_FACTOR,  value: "1" }
-        - { name: KEY_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
-        - { name: VALUE_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
-        - { name: KEY_CONVERTER_SCHEMAS_ENABLE, value: "true" }
-        - { name: VALUE_CONVERTER_SCHEMAS_ENABLE, value: "true" }
-        - { name: CONNECT_PLUGIN_PATH, value: "/plugins,/plugins/share/java,/plugins/share/confluent-hub-components,/plugins/yugabytedb" }
-        - { name: KAFKA_HEAP_OPTS, value: "-Xms256m -Xmx512m" }
-        - { name: GOOGLE_APPLICATION_CREDENTIALS, value: "/vault/secrets/gcp-key.json" }
+            secretKeyRef: { name: kafka-cluster-id, key: CLUSTER_ID }
+        - name: KAFKA_LOG4J_OPTS
+          value: "-Dlog4j.configuration=file:/kafka/etc/log4j.properties"
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: "/vault/secrets/gcp-key.json"
         ports:
         - { containerPort: 8083 }
         readinessProbe:
