@@ -851,7 +851,26 @@ spec:
           mkdir -p /plugins/yb
 
           have_yb() {
-            find /plugins/yb -type f -iname '*yugabytedb*connector*.jar' -print -quit | grep -q .
+            # Fast path: filename patterns (either order)
+            if find /plugins/yb -type f -iname '*yugabytedb*connector*.jar' -print -quit | grep -q .; then
+              return 0
+            fi
+            if find /plugins/yb -type f -iname '*connector*yugabytedb*.jar' -print -quit | grep -q .; then
+              return 0
+            fi
+            # Reliable path: look inside jars for the connector class
+            # (uses unzip -p which we already rely on elsewhere)
+            while IFS= read -r j; do
+              if unzip -p "$j" META-INF/services/org.apache.kafka.connect.connector.Connector 2>/dev/null \
+                  | grep -q 'io\.debezium\.connector\.yugabytedb\.YugabyteDBgRPCConnector'; then
+                return 0
+              fi
+              # or check classes directly if services file isn’t present:
+              if unzip -l "$j" 2>/dev/null | grep -q 'io/debezium/connector/yugabytedb/YugabyteDBgRPCConnector.class'; then
+                return 0
+              fi
+            done < <(find /plugins/yb -type f -name '*.jar')
+            return 1
           }
 
           copy_if_dir() {
