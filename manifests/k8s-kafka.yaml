@@ -405,11 +405,15 @@ spec:
           done
           SQL="
           WITH t AS (
-            SELECT n.nspname AS schema, c.relname AS table, d.description
+            SELECT n.nspname AS schema,
+                   c.relname AS \"table\",
+                   (SELECT d.description
+                      FROM pg_description d
+                     WHERE d.objoid = c.oid AND COALESCE(d.objsubid,0) = 0
+                     LIMIT 1) AS description
               FROM pg_class c
               JOIN pg_namespace n ON n.oid = c.relnamespace
-              LEFT JOIN pg_description d ON d.objoid = c.oid AND d.objsubid = 0
-             WHERE c.relkind IN ('r','p') AND d.description IS NOT NULL
+             WHERE c.relkind IN ('r','p')
           ),
           j AS (
             SELECT schema, \"table\",
@@ -429,7 +433,7 @@ spec:
                  COALESCE(b->>'header','true') AS header,
                  COALESCE(b->>'columns','') AS columns
             FROM b
-           WHERE COALESCE( (b->>'enabled')::boolean, false ) = true;
+           WHERE COALESCE((b->>'enabled')::boolean, false) = true;
           "
           /home/yugabyte/bin/ysqlsh "${PGURL}" -q -A -t -F '|' -c "$SQL" > /work/plan.tsv
           echo "[PLANNER] Plan rows: $(grep -c '|' /work/plan.tsv || true)"
@@ -878,38 +882,36 @@ spec:
         image: confluentinc/cp-kafka-connect:7.6.1 
         imagePullPolicy: IfNotPresent
         env:
-        # in: spec.template.spec.containers[name: connect].env
         - name: CONNECT_BOOTSTRAP_SERVERS
-          value: "kafka.kafka.svc.internal.lan:9092"         # was BOOTSTRAP_SERVERS
+          value: "kafka.kafka.svc.internal.lan:9092"
         - name: CONNECT_GROUP_ID
-          value: "connect-cluster"                            # was GROUP_ID
+          value: "connect-cluster"
         - name: CONNECT_CONFIG_STORAGE_TOPIC
-          value: "_connect-configs"                           # was CONFIG_STORAGE_TOPIC
+          value: "_connect-configs"
         - name: CONNECT_OFFSET_STORAGE_TOPIC
-          value: "_connect-offsets"                           # was OFFSET_STORAGE_TOPIC
+          value: "_connect-offsets"
         - name: CONNECT_STATUS_STORAGE_TOPIC
-          value: "_connect-status"                            # was STATUS_STORAGE_TOPIC
+          value: "_connect-status"
         - name: CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR
-          value: "1"                                          # was CONFIG_STORAGE_REPLICATION_FACTOR
+          value: "1"
         - name: CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR
-          value: "1"                                          # was OFFSET_STORAGE_REPLICATION_FACTOR
+          value: "1"
         - name: CONNECT_STATUS_STORAGE_REPLICATION_FACTOR
-          value: "1"                                          # was STATUS_STORAGE_REPLICATION_FACTOR
+          value: "1"
         - name: CONNECT_KEY_CONVERTER
-          value: "org.apache.kafka.connect.json.JsonConverter"    # was KEY_CONVERTER
+          value: "org.apache.kafka.connect.json.JsonConverter"
         - name: CONNECT_VALUE_CONVERTER
-          value: "org.apache.kafka.connect.json.JsonConverter"    # was VALUE_CONVERTER
+          value: "org.apache.kafka.connect.json.JsonConverter"
         - name: CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE
-          value: "true"                                       # was KEY_CONVERTER_SCHEMAS_ENABLE
+          value: "true"
         - name: CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE
-          value: "true"                                       # was VALUE_CONVERTER_SCHEMAS_ENABLE
+          value: "true"
         - name: CONNECT_PLUGIN_PATH
-          value: "/plugins,/plugins/share/java,/plugins/share/confluent-hub-components,/plugins/yugabytedb"  # already correct
+          value: "/plugins,/plugins/share/java,/plugins/share/confluent-hub-components,/plugins/yugabytedb"
         - name: CONNECT_REST_ADVERTISED_HOST_NAME
-          value: "kafka-connect.kafka.svc.internal.lan"       # replaces ADVERTISED_HOST_NAME
+          value: "kafka-connect.kafka.svc.internal.lan"
         - name: CONNECT_REST_PORT
-          value: "8083"                                       # replaces REST_PORT
-        # keep these as-is (they still work with Confluent image)
+          value: "8083"
         - name: KAFKA_OPTS
           value: >-
             -Dyb.master_addresses=yb-master-0.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-1.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-2.yb-master-service.yugabyte.svc.cluster.local:7100
@@ -1058,7 +1060,7 @@ spec:
           limits: { cpu: "300m", memory: "256Mi" }
 
 # ============================================================================
-# Continuous Annotation Watcher (wave 50) — robust CDC stream fetch + legacy cleanup
+# Continuous Annotation Watcher (wave 50)
 # ============================================================================
 ---
 apiVersion: apps/v1
@@ -1124,7 +1126,7 @@ spec:
         - { name: CONNECT_URL, value: "http://kafka-connect.kafka.svc.internal.lan:8083" }
         - { name: SERVER_PREFIX, value: "yb" }
         - { name: SCAN_INTERVAL, value: "30" }
-        - { name: DROP_LEGACY_SLOTS, value: "true" }   # <— NEW: allows auto-cleanup of non-CDC slots
+        - { name: DROP_LEGACY_SLOTS, value: "true" }
         command: ["/bin/bash","-lc"]
         args:
         - |
@@ -1172,11 +1174,15 @@ spec:
             local URL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${DB}?sslmode=disable"
             /home/yugabyte/bin/ysqlsh "$URL" -q -A -t -F '|' -c "
               WITH t AS (
-                SELECT n.nspname AS schema, c.relname AS table, d.description
+                SELECT n.nspname AS schema,
+                       c.relname AS \"table\",
+                       (SELECT d.description
+                          FROM pg_description d
+                         WHERE d.objoid = c.oid AND COALESCE(d.objsubid,0) = 0
+                         LIMIT 1) AS description
                   FROM pg_class c
                   JOIN pg_namespace n ON n.oid = c.relnamespace
-                  LEFT JOIN pg_description d ON d.objoid = c.oid AND d.objsubid = 0
-                WHERE c.relkind IN ('r','p') AND d.description IS NOT NULL
+                 WHERE c.relkind IN ('r','p')
               ),
               j AS (
                 SELECT schema, \"table\",
@@ -1227,14 +1233,12 @@ spec:
             local sid=""
             local legacy_slots=""
 
-            # A) Look for existing 32-hex slot (CDC style)
             local slots
             slots="$(/home/yugabyte/bin/ysqlsh "$url" -Atc "select slot_name from pg_replication_slots where database='${DB}'" 2>/dev/null || true)"
             sid="$(printf '%s\n' "$slots" | grep -E '^[0-9a-fA-F]{32}$' | head -n1 | tr 'A-F' 'a-f' || true)"
             legacy_slots="$(printf '%s\n' "$slots" | grep -Ev '^[0-9a-fA-F]{32}$' || true)"
             [ -n "$sid" ] && { printf '%s' "$sid"; return 0; }
 
-            # B) Ask masters (per-db first, then global)
             local out
             out="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" --include_db_streams=true list_change_data_streams ysql.${DB} 2>/dev/null || true)"
             sid="$(printf '%s\n' "$out" | extract32)"
@@ -1246,15 +1250,12 @@ spec:
             fi
             [ -n "$sid" ] && { printf '%s' "$sid"; return 0; }
 
-            # C) Try to create
             out="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" create_change_data_stream ysql.${DB} 2>&1 || true)"
             sid="$(printf '%s\n' "$out" | extract32)"
             if [ -n "$sid" ]; then printf '%s' "$sid"; return 0; fi
 
-            # D) If creation failed due to existing replication slot, try broader cleanup and retry once
             if echo "$out" | grep -qi 'replication slot'; then
               if [ "${DROP_LEGACY_SLOTS:-false}" = "true" ]; then
-                # drop any non-hex slots for this DB (without the WHERE database filter as a fallback)
                 local allslots
                 allslots="$(/home/yugabyte/bin/ysqlsh "$url" -Atc "select slot_name from pg_replication_slots" 2>/dev/null || true)"
                 printf '%s\n' "$allslots" | grep -Ev '^[0-9a-fA-F]{32}$' | while read -r s; do
@@ -1318,7 +1319,6 @@ spec:
                 STREAM_ID="$(get_or_create_stream_id "$DB")" || { echo "ERROR: no CDC stream id; skipping DB ${DB}"; continue; }
                 echo "[WATCHER] DB=${DB} STREAM_ID=${STREAM_ID} (len=${#STREAM_ID})"
 
-                # ----- SOURCE CONNECTOR (YB gRPC)
                 SRC_PUT="$(mktmp)"
                 {
                   echo '{'
@@ -1361,7 +1361,6 @@ spec:
                 done
                 echo "yb-source-${DB} status ($STATUS_CODE):"; tail -c 2000 /tmp/s.json 2>/dev/null || true
 
-                # ----- BigQuery SINK CONNECTOR
                 SINK_PUT="$(mktmp)"
                 {
                   echo '{'
@@ -1397,7 +1396,6 @@ spec:
                 done
                 echo "bq-sink-${DB} status ($STATUS_CODE):"; tail -c 2000 /tmp/s2.json 2>/dev/null || true
 
-                # ensure snapshot once per table
                 printf '%s' "$TABLES" | tr ',' '\n' | while read -r FQ; do
                   [ -z "$FQ" ] && continue
                   ST="/state/${DB}.${FQ}.snap"
