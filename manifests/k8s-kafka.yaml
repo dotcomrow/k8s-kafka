@@ -405,15 +405,11 @@ spec:
           done
           SQL="
           WITH t AS (
-            SELECT n.nspname AS schema,
-                   c.relname AS \"table\",
-                   (SELECT d.description
-                      FROM pg_description d
-                     WHERE d.objoid = c.oid AND COALESCE(d.objsubid,0) = 0
-                     LIMIT 1) AS description
+            SELECT n.nspname AS schema, c.relname AS table, d.description
               FROM pg_class c
               JOIN pg_namespace n ON n.oid = c.relnamespace
-             WHERE c.relkind IN ('r','p')
+              LEFT JOIN pg_description d ON d.objoid = c.oid AND d.objsubid = 0
+             WHERE c.relkind IN ('r','p') AND d.description IS NOT NULL
           ),
           j AS (
             SELECT schema, \"table\",
@@ -433,7 +429,7 @@ spec:
                  COALESCE(b->>'header','true') AS header,
                  COALESCE(b->>'columns','') AS columns
             FROM b
-           WHERE COALESCE((b->>'enabled')::boolean, false) = true;
+           WHERE COALESCE( (b->>'enabled')::boolean, false ) = true;
           "
           /home/yugabyte/bin/ysqlsh "${PGURL}" -q -A -t -F '|' -c "$SQL" > /work/plan.tsv
           echo "[PLANNER] Plan rows: $(grep -c '|' /work/plan.tsv || true)"
@@ -1174,15 +1170,11 @@ spec:
             local URL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${DB}?sslmode=disable"
             /home/yugabyte/bin/ysqlsh "$URL" -q -A -t -F '|' -c "
               WITH t AS (
-                SELECT n.nspname AS schema,
-                       c.relname AS \"table\",
-                       (SELECT d.description
-                          FROM pg_description d
-                         WHERE d.objoid = c.oid AND COALESCE(d.objsubid,0) = 0
-                         LIMIT 1) AS description
+                SELECT n.nspname AS schema, c.relname AS table, d.description
                   FROM pg_class c
                   JOIN pg_namespace n ON n.oid = c.relnamespace
-                 WHERE c.relkind IN ('r','p')
+                  LEFT JOIN pg_description d ON d.objoid = c.oid AND d.objsubid = 0
+                WHERE c.relkind IN ('r','p') AND d.description IS NOT NULL
               ),
               j AS (
                 SELECT schema, \"table\",
@@ -1233,12 +1225,14 @@ spec:
             local sid=""
             local legacy_slots=""
 
+            # A) Look for existing 32-hex slot (CDC style)
             local slots
             slots="$(/home/yugabyte/bin/ysqlsh "$url" -Atc "select slot_name from pg_replication_slots where database='${DB}'" 2>/dev/null || true)"
             sid="$(printf '%s\n' "$slots" | grep -E '^[0-9a-fA-F]{32}$' | head -n1 | tr 'A-F' 'a-f' || true)"
             legacy_slots="$(printf '%s\n' "$slots" | grep -Ev '^[0-9a-fA-F]{32}$' || true)"
             [ -n "$sid" ] && { printf '%s' "$sid"; return 0; }
 
+            # B) Ask masters (per-db first, then global)
             local out
             out="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" --include_db_streams=true list_change_data_streams ysql.${DB} 2>/dev/null || true)"
             sid="$(printf '%s\n' "$out" | extract32)"
@@ -1250,10 +1244,12 @@ spec:
             fi
             [ -n "$sid" ] && { printf '%s' "$sid"; return 0; }
 
+            # C) Try to create
             out="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" create_change_data_stream ysql.${DB} 2>&1 || true)"
             sid="$(printf '%s\n' "$out" | extract32)"
             if [ -n "$sid" ]; then printf '%s' "$sid"; return 0; fi
 
+            # D) If creation failed due to existing replication slot, try broader cleanup and retry once
             if echo "$out" | grep -qi 'replication slot'; then
               if [ "${DROP_LEGACY_SLOTS:-false}" = "true" ]; then
                 local allslots
@@ -1319,6 +1315,7 @@ spec:
                 STREAM_ID="$(get_or_create_stream_id "$DB")" || { echo "ERROR: no CDC stream id; skipping DB ${DB}"; continue; }
                 echo "[WATCHER] DB=${DB} STREAM_ID=${STREAM_ID} (len=${#STREAM_ID})"
 
+                # ----- SOURCE CONNECTOR
                 SRC_PUT="$(mktmp)"
                 {
                   echo '{'
@@ -1361,6 +1358,7 @@ spec:
                 done
                 echo "yb-source-${DB} status ($STATUS_CODE):"; tail -c 2000 /tmp/s.json 2>/dev/null || true
 
+                # ----- BigQuery SINK CONNECTOR (fixed trailing comma)
                 SINK_PUT="$(mktmp)"
                 {
                   echo '{'
@@ -1381,7 +1379,7 @@ spec:
                   echo '  "value.converter.schemas.enable":"true",'
                   echo '  "key.converter":"org.apache.kafka.connect.json.JsonConverter",'
                   echo '  "key.converter.schemas.enable":"true",'
-                  echo '  "consumer.override.auto.offset.reset":"earliest",'
+                  echo '  "consumer.override.auto.offset.reset":"earliest"'
                   echo '}'
                 } > "$SINK_PUT"
                 SINK_POST="$(mktmp)"; { echo '{ "name":"bq-sink-'"${DB}"'", "config": '; cat "$SINK_PUT"; echo ' }'; } > "$SINK_POST"
@@ -1396,6 +1394,7 @@ spec:
                 done
                 echo "bq-sink-${DB} status ($STATUS_CODE):"; tail -c 2000 /tmp/s2.json 2>/dev/null || true
 
+                # one-time per-table snapshot signal
                 printf '%s' "$TABLES" | tr ',' '\n' | while read -r FQ; do
                   [ -z "$FQ" ] && continue
                   ST="/state/${DB}.${FQ}.snap"
