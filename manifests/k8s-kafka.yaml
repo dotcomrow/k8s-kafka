@@ -387,37 +387,72 @@ spec:
           confluent-hub install --no-prompt --component-dir /plugins wepay/kafka-connect-bigquery:2.5.7
         volumeMounts: [{ name: plugins, mountPath: /plugins }]
       - name: fetch-yb-connector
-        image: quay.io/yugabyte/debezium-connector:latest
+        image: curlimages/curl:8.8.0
         env:
         - name: YB_CONNECTOR_URL
           value: "https://github.com/yugabyte/debezium-connector-yugabytedb/releases/download/vdz.1.9.5.yb.grpc.2024.2.3/debezium-connector-yugabytedb-dz.1.9.5.yb.grpc.2024.2.3.jar"
-        command: ["/bin/bash","-lc"]
+        command: ["/bin/sh","-lc"]
         args:
-        - |
-          set -eu
-          mkdir -p /plugins/yb
-          copy_if_dir() { local d="$1"; [ -d "$d" ] && cp -R "$d"/. /plugins/yb/ || true; }
-          for C in /kafka/connect/yugabytedb /opt/kafka/connect/yugabytedb /debezium-connector/yugabytedb /opt/debezium-connector/yugabytedb; do copy_if_dir "$C"; done
-          have_yb() {
-            find /plugins/yb -type f -name '*.jar' -print0 \
-              | xargs -0 -I{} sh -c 'unzip -p "{}" META-INF/services/org.apache.kafka.connect.connector.Connector 2>/dev/null | grep -q "YugabyteDBgRPCConnector" && exit 0; exit 1' >/dev/null 2>&1 && return 0
-            return 1
-          }
-          if ! have_yb && [ -n "${YB_CONNECTOR_URL:-}" ]; then
-            TMP="$(mktemp -d)"; curl -fL --retry 5 -o "$TMP/pkg" "$YB_CONNECTOR_URL"
-            cp "$TMP/pkg" "/plugins/yb/$(basename "${YB_CONNECTOR_URL%%\?*}")" || true
-            rm -rf "$TMP"
-          fi
-          mkdir -p /plugins/yb/debezium-postgres /plugins/yb/yugabytedb-grpc
-          find /plugins/yb -maxdepth 1 -type f -name '*.jar' -print0 | while IFS= read -r -d '' J; do
-            if unzip -p "$J" META-INF/services/org.apache.kafka.connect.connector.Connector 2>/dev/null | grep -q 'YugabyteDBgRPCConnector'; then
-              mv -f "$J" /plugins/yb/yugabytedb-grpc/
-            else
-              mv -f "$J" /plugins/yb/debezium-postgres/
+          - |
+            set -eu
+            echo "[FETCH-YB] preparing plugin dirs..."
+            mkdir -p /plugins/yb /plugins/yb/debezium-postgres /plugins/yb/yugabytedb-grpc
+
+            copy_if_dir() { d="$1"; [ -d "$d" ] && cp -R "$d"/. /plugins/yb/ || true; }
+
+            # 1) Copy anything embedded in the image (if present)
+            for C in \
+              /kafka/connect/yugabytedb \
+              /opt/kafka/connect/yugabytedb \
+              /debezium-connector/yugabytedb \
+              /opt/debezium-connector/yugabytedb \
+              /kafka/connect/debezium-connector-postgres \
+              /debezium-connector/debezium-connector-postgres \
+              /opt/kafka/connect/yugabytedb/debezium-connector-postgres
+            do
+              copy_if_dir "$C"
+            done
+
+            # 2) Always fetch the official Yugabyte gRPC connector JAR if URL provided
+            if [ -n "${YB_CONNECTOR_URL:-}" ]; then
+              echo "[FETCH-YB] downloading Yugabyte gRPC connector from: $YB_CONNECTOR_URL"
+              fname="$(basename "${YB_CONNECTOR_URL%%\?*}")"
+              tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+              curl -fL --retry 5 --retry-delay 2 -o "$tmp/$fname" "$YB_CONNECTOR_URL"
+              # If it’s a JAR (it is), place straight into yugabytedb-grpc
+              case "$fname" in
+                *.jar) cp "$tmp/$fname" "/plugins/yb/yugabytedb-grpc/$fname" ;;
+                *)     cp "$tmp/$fname" "/plugins/yb/$fname" ;;  # fallback, but not expected
+              esac
             fi
-          done
-          [ -n "$(find /plugins/yb/yugabytedb-grpc -type f -name '*.jar' -print -quit)" ] || { echo "Missing YugabyteDB gRPC connector"; exit 1; }
-        volumeMounts: [{ name: plugins, mountPath: /plugins }]
+
+            # 3) As a safety, move any yugabytedb*-connector jars into the grpc folder
+            # (filename heuristic; avoids unzip dependency)
+            find /plugins/yb -maxdepth 1 -type f -name '*.jar' -print0 \
+              | while IFS= read -r -d '' J; do
+                  b="$(basename "$J" | tr '[:upper:]' '[:lower:]')"
+                  case "$b" in
+                    *yugabytedb*connector*|*connector*yugabytedb*|*yugabyte*grpc*)
+                      mv -f "$J" /plugins/yb/yugabytedb-grpc/
+                      ;;
+                    *)
+                      mv -f "$J" /plugins/yb/debezium-postgres/
+                      ;;
+                  esac
+                done
+
+            # 4) Validate presence: at least one jar under yugabytedb-grpc
+            if ! find /plugins/yb/yugabytedb-grpc -type f -name '*.jar' -print -quit | grep -q . ; then
+              echo "[FETCH-YB] ERROR: YugabyteDB gRPC connector not found after download."
+              echo "           Check network/URL or supply a reachable YB_CONNECTOR_URL."
+              exit 1
+            fi
+
+            echo "[FETCH-YB] Installed files:"
+            find /plugins/yb -maxdepth 2 -type f -name '*.jar' -printf "  %p\n"
+        volumeMounts:
+          - { name: plugins, mountPath: /plugins }
+
       - name: create-connect-topics
         image: apache/kafka:3.9.0
         command: ["/bin/bash","-lc"]
