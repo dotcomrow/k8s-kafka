@@ -413,43 +413,43 @@ spec:
               copy_if_dir "$C"
             done
 
-            # 2) Always fetch the official Yugabyte gRPC connector JAR if URL provided
+            # 2) Always fetch the Yugabyte gRPC connector JAR if URL provided
             if [ -n "${YB_CONNECTOR_URL:-}" ]; then
-              echo "[FETCH-YB] downloading Yugabyte gRPC connector from: $YB_CONNECTOR_URL"
+              echo "[FETCH-YB] downloading Yugabyte gRPC connector from: ${YB_CONNECTOR_URL}"
               fname="$(basename "${YB_CONNECTOR_URL%%\?*}")"
               tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
               curl -fL --retry 5 --retry-delay 2 -o "$tmp/$fname" "$YB_CONNECTOR_URL"
-              # If it’s a JAR (it is), place straight into yugabytedb-grpc
               case "$fname" in
                 *.jar) cp "$tmp/$fname" "/plugins/yb/yugabytedb-grpc/$fname" ;;
-                *)     cp "$tmp/$fname" "/plugins/yb/$fname" ;;  # fallback, but not expected
+                *)     cp "$tmp/$fname" "/plugins/yb/$fname" ;;
               esac
             fi
 
-            # 3) As a safety, move any yugabytedb*-connector jars into the grpc folder
-            # (filename heuristic; avoids unzip dependency)
-            find /plugins/yb -maxdepth 1 -type f -name '*.jar' -print0 \
-              | while IFS= read -r -d '' J; do
-                  b="$(basename "$J" | tr '[:upper:]' '[:lower:]')"
-                  case "$b" in
-                    *yugabytedb*connector*|*connector*yugabytedb*|*yugabyte*grpc*)
-                      mv -f "$J" /plugins/yb/yugabytedb-grpc/
-                      ;;
-                    *)
-                      mv -f "$J" /plugins/yb/debezium-postgres/
-                      ;;
-                  esac
-                done
+            # 3) Filename heuristic sorting (no unzip dependency)
+            #    Anything that looks like yugabytedb connector -> grpc folder; rest -> postgres deps
+            # shellcheck disable=SC2035
+            for J in /plugins/yb/*.jar 2>/dev/null; do
+              [ -f "$J" ] || continue
+              b="$(basename "$J" | tr '[:upper:]' '[:lower:]')"
+              case "$b" in
+                *yugabytedb*connector*|*connector*yugabytedb*|*yugabyte*grpc*)
+                  mv -f "$J" /plugins/yb/yugabytedb-grpc/
+                  ;;
+                *)
+                  mv -f "$J" /plugins/yb/debezium-postgres/
+                  ;;
+              esac
+            done
 
-            # 4) Validate presence: at least one jar under yugabytedb-grpc
-            if ! find /plugins/yb/yugabytedb-grpc -type f -name '*.jar' -print -quit | grep -q . ; then
+            # 4) Validate presence
+            if ! find /plugins/yb/yugabytedb-grpc -type f -name '*.jar' -print | head -n1 | grep -q . ; then
               echo "[FETCH-YB] ERROR: YugabyteDB gRPC connector not found after download."
               echo "           Check network/URL or supply a reachable YB_CONNECTOR_URL."
               exit 1
             fi
 
             echo "[FETCH-YB] Installed files:"
-            find /plugins/yb -maxdepth 2 -type f -name '*.jar' -printf "  %p\n"
+            find /plugins/yb -maxdepth 2 -type f -name '*.jar' -print | sed 's/^/  /'
         volumeMounts:
           - { name: plugins, mountPath: /plugins }
 
