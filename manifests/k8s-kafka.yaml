@@ -395,6 +395,7 @@ spec:
         args:
           - |
             set -eu
+
             echo "[FETCH-YB] preparing plugin dirs..."
             mkdir -p /plugins/yb /plugins/yb/debezium-postgres /plugins/yb/yugabytedb-grpc
 
@@ -413,7 +414,7 @@ spec:
               copy_if_dir "$C"
             done
 
-            # 2) Always fetch the Yugabyte gRPC connector JAR if URL provided
+            # 2) Fetch the Yugabyte gRPC connector JAR
             if [ -n "${YB_CONNECTOR_URL:-}" ]; then
               echo "[FETCH-YB] downloading Yugabyte gRPC connector from: ${YB_CONNECTOR_URL}"
               fname="$(basename "${YB_CONNECTOR_URL%%\?*}")"
@@ -426,9 +427,8 @@ spec:
             fi
 
             # 3) Filename heuristic sorting (no unzip dependency)
-            #    Anything that looks like yugabytedb connector -> grpc folder; rest -> postgres deps
-            # shellcheck disable=SC2035
-            for J in /plugins/yb/*.jar 2>/dev/null; do
+            set +e
+            for J in /plugins/yb/*.jar; do
               [ -f "$J" ] || continue
               b="$(basename "$J" | tr '[:upper:]' '[:lower:]')"
               case "$b" in
@@ -440,6 +440,7 @@ spec:
                   ;;
               esac
             done
+            set -e
 
             # 4) Validate presence
             if ! find /plugins/yb/yugabytedb-grpc -type f -name '*.jar' -print | head -n1 | grep -q . ; then
