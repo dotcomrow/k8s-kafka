@@ -5,7 +5,8 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: kafka
-  labels: { app: bq-yb-bootstrap }
+  labels:
+    app: bq-yb-bootstrap
   annotations:
     linkerd.io/inject: "disabled"
     scheduler.alpha.kubernetes.io/node-selector: "dedicated=ctrl-node"
@@ -16,14 +17,16 @@ kind: ServiceAccount
 metadata:
   name: bq-yb-bootstrap
   namespace: kafka
-  annotations: { argocd.argoproj.io/sync-wave: "0" }
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: bootstrap-ok-writer
   namespace: kafka
-  annotations: { argocd.argoproj.io/sync-wave: "0" }
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
 rules:
 - apiGroups: [""]
   resources: ["configmaps"]
@@ -34,7 +37,8 @@ kind: RoleBinding
 metadata:
   name: bootstrap-ok-writer
   namespace: kafka
-  annotations: { argocd.argoproj.io/sync-wave: "0" }
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
 subjects:
 - kind: ServiceAccount
   name: bq-yb-bootstrap
@@ -53,14 +57,16 @@ kind: ServiceAccount
 metadata:
   name: kafka-clusterid-gen
   namespace: kafka
-  annotations: { argocd.argoproj.io/sync-wave: "0" }
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: kafka-clusterid-secret-writer
   namespace: kafka
-  annotations: { argocd.argoproj.io/sync-wave: "0" }
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
 rules:
 - apiGroups: [""]
   resources: ["secrets"]
@@ -71,7 +77,8 @@ kind: RoleBinding
 metadata:
   name: kafka-clusterid-secret-writer
   namespace: kafka
-  annotations: { argocd.argoproj.io/sync-wave: "0" }
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
 subjects:
 - kind: ServiceAccount
   name: kafka-clusterid-gen
@@ -86,12 +93,14 @@ kind: Job
 metadata:
   name: gen-kafka-clusterid
   namespace: kafka
-  annotations: { argocd.argoproj.io/sync-wave: "1" }
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
 spec:
   backoffLimit: 0
   template:
     metadata:
-      annotations: { linkerd.io/inject: "disabled" }
+      annotations:
+        linkerd.io/inject: "disabled"
     spec:
       restartPolicy: Never
       serviceAccountName: kafka-clusterid-gen
@@ -107,7 +116,6 @@ spec:
           set -eu
           mkdir -p /work
           CID="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || date +%s%N)"
-          echo "Generated cluster.id: ${CID}"
           printf '%s' "${CID}" > /work/cluster.id
           ls -l /work/cluster.id
         volumeMounts: [{ name: work, mountPath: /work }]
@@ -118,39 +126,23 @@ spec:
         args:
         - |
           set -eu
-          PS4='+ [APPLY] $(date -Is) '
-          set -x
           NAMESPACE="kafka"; SECRET_NAME="kafka-cluster-id"
           API="https://kubernetes.default.svc"
           TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
           CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-
-          if [ ! -s /work/cluster.id ]; then
-            CID="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || date +%s%N)"
-            printf '%s' "$CID" > /work/cluster.id
-          fi
           CID="$(cat /work/cluster.id)"
-
-          code="$(curl -s -o /tmp/ex.json -w '%{http_code}' --cacert "$CACERT" \
+          code="$(curl -s -o /dev/null -w '%{http_code}' --cacert "$CACERT" \
                  -H "Authorization: Bearer $TOKEN" \
                  "$API/api/v1/namespaces/$NAMESPACE/secrets/$SECRET_NAME" || true)"
-
-          if [ "$code" = "200" ]; then
-            echo "Secret exists; nothing to do."
-            exit 0
+          if [ "$code" != "200" ]; then
+            b64="$(printf '%s' "$CID" | base64 | tr -d '\n')"
+            printf '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"%s","namespace":"%s"},"type":"Opaque","data":{"CLUSTER_ID":"%s"}}' \
+              "$SECRET_NAME" "$NAMESPACE" "$b64" > /tmp/newsecret.json
+            curl -sS -D /tmp/h.txt -o /tmp/r.txt -X POST --cacert "$CACERT" \
+              -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+              --data-binary @/tmp/newsecret.json \
+              "$API/api/v1/namespaces/$NAMESPACE/secrets"
           fi
-
-          b64="$(printf '%s' "$CID" | base64 | tr -d '\n')"
-          printf '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"%s","namespace":"%s"},"type":"Opaque","data":{"CLUSTER_ID":"%s"}}' \
-            "$SECRET_NAME" "$NAMESPACE" "$b64" > /tmp/newsecret.json
-
-          curl -sS -D /tmp/h.txt -o /tmp/r.txt -X POST --cacert "$CACERT" \
-            -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-            --data-binary @/tmp/newsecret.json \
-            "$API/api/v1/namespaces/$NAMESPACE/secrets" && echo "Created secret."
-
-          echo "=== response headers ==="; cat /tmp/h.txt
-          echo "=== body ==="; cat /tmp/r.txt
         volumeMounts: [{ name: work, mountPath: /work }]
 
 # ============================================================================
@@ -162,16 +154,20 @@ kind: Job
 metadata:
   name: yb-vault-config
   namespace: vault
-  annotations: { argocd.argoproj.io/sync-wave: "1" }
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
 spec:
   backoffLimit: 0
   template:
     metadata:
-      annotations: { linkerd.io/inject: "disabled" }
+      annotations:
+        linkerd.io/inject: "disabled"
     spec:
       restartPolicy: Never
       serviceAccountName: default
-      volumes: [{ name: root-token, secret: { secretName: vault-root-token } }]
+      volumes:
+      - name: root-token
+        secret: { secretName: vault-root-token }
       containers:
       - name: setup-yb-vault
         image: hashicorp/vault:1.15.4
@@ -194,38 +190,19 @@ spec:
         args:
         - |
           set -eu
-          PS4='+ [VAULTCFG] $(date -Is) '
-          set -x
-          trap 'echo "[VAULTCFG] failed; dumping debug"; env | sort; exit 1' ERR
-          until [ -s /vault-token/VAULT_TOKEN ]; do echo "waiting for VAULT_TOKEN..."; sleep 2; done
+          until [ -s /vault-token/VAULT_TOKEN ]; do sleep 2; done
           export VAULT_TOKEN="$(cat /vault-token/VAULT_TOKEN)"
-          : "${PGHOST:=yb-tserver-service.yugabyte.svc.cluster.local}"
-          : "${PGPORT:=5433}"
-          : "${PGDATABASE:=kafka}"
-          : "${PGUSER:=vaultadmin}"
-          : "${YB_MASTER_ADDRESSES:=}"
-          : "${BQ_BOOTSTRAP_PROJECT:=}"; : "${BQ_BOOTSTRAP_BUCKET:=}"; : "${BQ_BOOTSTRAP_LOCATION:=}"
-          : "${BQ_PROJECT:=}"; : "${BQ_DEFAULT_DATASET:=}"
-          echo "→ Pulling GCP SA JSON from Vault (masked)…"
           BQ_SA_JSON="$(vault kv get -field=value secret/k8s-kafka-gcp-service-account-json 2>/dev/null || true)"
           [ -n "$BQ_SA_JSON" ] && printf '%s' "$BQ_SA_JSON" > /tmp/sa.json || true
-          echo "→ Waiting for secret/${PGUSER} password in Vault…"
-          while :; do PASS="$(vault kv get -field=value "secret/${PGUSER}" 2>/dev/null || true)"; [ -n "$PASS" ] && break; echo "retry..."; sleep 5; done
-          PG_ARGS=""; [ -n "$PGHOST" ] && PG_ARGS="$PG_ARGS host=$PGHOST"
-          [ -n "$PGPORT" ] && PG_ARGS="$PG_ARGS port=$PGPORT"
-          [ -n "$PGDATABASE" ] && PG_ARGS="$PG_ARGS database=$PGDATABASE"
-          [ -n "$PGUSER" ] && PG_ARGS="$PG_ARGS user=$PGUSER"
-          [ -n "$YB_MASTER_ADDRESSES" ] && PG_ARGS="$PG_ARGS master_addresses=$YB_MASTER_ADDRESSES"
-          [ -n "$PG_ARGS" ] && vault kv put secret/kafka/pgconfig $PG_ARGS >/dev/null && echo "→ Wrote secret/kafka/pgconfig"
-          BOOT_ARGS=""; [ -n "$BQ_BOOTSTRAP_BUCKET" ] && BOOT_ARGS="$BOOT_ARGS bucket=$BQ_BOOTSTRAP_BUCKET"
-          [ -n "$BQ_BOOTSTRAP_PROJECT" ] && BOOT_ARGS="$BOOT_ARGS project=$BQ_BOOTSTRAP_PROJECT"
-          [ -n "$BQ_BOOTSTRAP_LOCATION" ] && BOOT_ARGS="$BOOT_ARGS location=$BQ_BOOTSTRAP_LOCATION"
-          [ -n "$BOOT_ARGS" ] && vault kv put secret/kafka/bq/bootstrap $BOOT_ARGS >/dev/null && echo "→ Wrote secret/kafka/bq/bootstrap"
-          CFG_ARGS=""; [ -n "$BQ_PROJECT" ] && CFG_ARGS="$CFG_ARGS project=$BQ_PROJECT"
-          [ -n "$BQ_DEFAULT_DATASET" ] && CFG_ARGS="$CFG_ARGS dataset=$BQ_DEFAULT_DATASET"
-          [ -s /tmp/sa.json ] && CFG_ARGS="$CFG_ARGS sa_json=@/tmp/sa.json"
-          [ -n "$CFG_ARGS" ] && vault kv put secret/kafka/bq/config $CFG_ARGS >/dev/null || true
-          [ -s /tmp/sa.json ] && vault kv put secret/kafka/bq/exporter sa_json=@/tmp/sa.json >/dev/null && echo "→ Wrote secret/kafka/bq/exporter"
+          while :; do PASS="$(vault kv get -field=value "secret/${PG_USER}" 2>/dev/null || true)"; [ -n "$PASS" ] && break; sleep 5; done
+          PG_ARGS="host=$PG_HOST port=$PG_PORT database=$PG_DATABASE user=$PG_USER"
+          [ -n "${YB_MASTER_ADDRESSES:-}" ] && PG_ARGS="$PG_ARGS master_addresses=$YB_MASTER_ADDRESSES"
+          vault kv put secret/kafka/pgconfig $PG_ARGS >/dev/null
+          vault kv put secret/kafka/bq/bootstrap bucket="$BQ_BOOTSTRAP_BUCKET" project="$BQ_BOOTSTRAP_PROJECT" location="$BQ_BOOTSTRAP_LOCATION" >/dev/null
+          CFG="project=$BQ_PROJECT dataset=$BQ_DEFAULT_DATASET"
+          [ -s /tmp/sa.json ] && CFG="$CFG sa_json=@/tmp/sa.json"
+          vault kv put secret/kafka/bq/config $CFG >/dev/null
+          [ -s /tmp/sa.json ] && vault kv put secret/kafka/bq/exporter sa_json=@/tmp/sa.json >/dev/null
           vault policy write data-bootstrap - <<'EOP'
           path "secret/data/kafka/pgconfig"     { capabilities = ["read"] }
           path "secret/data/kafka/bq/bootstrap" { capabilities = ["read"] }
@@ -237,415 +214,7 @@ spec:
             bound_service_account_names="${SA_NAME}" \
             bound_service_account_namespaces="${SA_NAMESPACE}" \
             policies="data-bootstrap" ttl="24h" >/dev/null
-          echo "✅ Vault config done."
         volumeMounts: [{ name: root-token, mountPath: /vault-token, readOnly: true }]
-
-# ============================================================================
-# DB init job (wave 2)
-# ============================================================================
----
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: yb-db-init
-  namespace: kafka
-  annotations: { argocd.argoproj.io/sync-wave: "2" }
-spec:
-  backoffLimit: 0
-  template:
-    metadata:
-      annotations:
-        linkerd.io/inject: "disabled"
-        vault.hashicorp.com/agent-inject: "true"
-        vault.hashicorp.com/role: "data-bootstrap"
-        vault.hashicorp.com/agent-pre-populate-only: "true"
-        vault.hashicorp.com/exit-on-error: "false"
-        vault.hashicorp.com/agent-inject-secret-pg.env: "secret/data/kafka/pgconfig"
-        vault.hashicorp.com/agent-inject-template-pg.env: |
-          {{- with secret "secret/data/kafka/pgconfig" -}}
-          {{ with .Data.data.host }}PGHOST={{ . }}{{ end }}
-          {{ with .Data.data.port }}PGPORT={{ . }}{{ end }}
-          {{ with .Data.data.database }}PGDATABASE={{ . }}{{ end }}
-          {{ with .Data.data.user }}PGUSER={{ . }}{{ end }}
-          {{- end -}}
-        vault.hashicorp.com/agent-inject-secret-pg-admin.env: "secret/data/vaultadmin"
-        vault.hashicorp.com/agent-inject-template-pg-admin.env: |
-          {{- with secret "secret/data/vaultadmin" -}}
-          PGPASSWORD={{ .Data.data.value }}
-          {{- end -}}
-    spec:
-      restartPolicy: Never
-      serviceAccountName: bq-yb-bootstrap
-      containers:
-      - name: initdb
-        image: yugabytedb/yugabyte:latest
-        command: ["/bin/bash","-lc"]
-        args:
-        - |
-          set -Eeuo pipefail
-          PS4='+ [DBINIT] $(date -Is) '
-          set -x
-          for f in /vault/secrets/pg.env /vault/secrets/pg-admin.env; do
-            i=0; while [ ! -s "$f" ]; do
-              i=$((i+1)); [ $i -gt 120 ] && echo "[DBINIT] missing $f" >&2 && exit 1; sleep 2
-            done
-            . "$f"
-          done
-          : "${PGHOST:=yb-tserver-service.yugabyte.svc.cluster.local}"
-          : "${PGPORT:=5433}"
-          : "${PGDATABASE:=kafka}"
-          : "${PGUSER:=vaultadmin}"
-          export PGPASSWORD
-          CONTROL_DB=""
-          for DB in yugabyte postgres; do
-            /home/yugabyte/bin/ysqlsh -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$DB" -Atc "select 1" >/dev/null 2>&1 \
-              && { CONTROL_DB="$DB"; break; }
-          done
-          [ -z "$CONTROL_DB" ] && { echo "[DBINIT] cannot reach control DB as $PGUSER"; exit 1; }
-          DBNAME="$PGDATABASE"
-          /home/yugabyte/bin/ysqlsh -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$CONTROL_DB" -v ON_ERROR_STOP=1 -v dbname="$DBNAME" <<'SQL'
-          SELECT format('CREATE DATABASE %I OWNER vaultadmin', :'dbname')
-          WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = :'dbname');
-          \gexec
-          SQL
-          /home/yugabyte/bin/ysqlsh -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$DBNAME" -v ON_ERROR_STOP=1 <<'SQL'
-          CREATE TABLE IF NOT EXISTS public.debezium_signal (
-            id   varchar(64) PRIMARY KEY,
-            type varchar(32) NOT NULL,
-            data varchar(2048)
-          );
-          SELECT 'CREATE PUBLICATION dbz_publication FOR ALL TABLES'
-          WHERE NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'dbz_publication');
-          \gexec
-          SQL
-
-# ============================================================================
-# One-shot Backfill Job (wave 3)
-# ============================================================================
----
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: bq-to-yb-bootstrap
-  namespace: kafka
-  labels: { app: bq-yb-bootstrap }
-  annotations: { argocd.argoproj.io/sync-wave: "3" }
-spec:
-  backoffLimit: 0
-  activeDeadlineSeconds: 7200
-  template:
-    metadata:
-      labels: { app: bq-yb-bootstrap }
-      annotations:
-        linkerd.io/inject: "disabled"
-        vault.hashicorp.com/agent-inject: "true"
-        vault.hashicorp.com/role: "data-bootstrap"
-        vault.hashicorp.com/agent-pre-populate-only: "true"
-        vault.hashicorp.com/exit-on-error: "false"
-        vault.hashicorp.com/agent-inject-secret-gcp-key.json: "secret/data/kafka/bq/exporter"
-        vault.hashicorp.com/agent-inject-template-gcp-key.json: |
-          {{- with secret "secret/data/kafka/bq/exporter" -}}
-          {{ .Data.data.sa_json }}
-          {{- end -}}
-        vault.hashicorp.com/agent-inject-secret-bootstrap.env: "secret/data/kafka/bq/bootstrap"
-        vault.hashicorp.com/agent-inject-template-bootstrap.env: |
-          {{- with secret "secret/data/kafka/bq/bootstrap" -}}
-          {{ with .Data.data.bucket }}BUCKET={{ . }}{{ end }}
-          {{ with .Data.data.project }}PROJECT={{ . }}{{ end }}
-          {{ with .Data.data.location }}LOCATION={{ . }}{{ end }}
-          {{- end -}}
-        vault.hashicorp.com/agent-inject-secret-pg.env: "secret/data/kafka/pgconfig"
-        vault.hashicorp.com/agent-inject-template-pg.env: |
-          {{- with secret "secret/data/kafka/pgconfig" -}}
-          {{ with .Data.data.host }}PGHOST={{ . }}{{ end }}
-          {{ with .Data.data.port }}PGPORT={{ . }}{{ end }}
-          {{ with .Data.data.database }}PGDATABASE={{ . }}{{ end }}
-          {{ with .Data.data.user }}PGUSER={{ . }}{{ end }}
-          {{ with .Data.data.master_addresses }}YB_MASTER_ADDRESSES={{ . }}{{ end }}
-          {{- end -}}
-        vault.hashicorp.com/agent-inject-secret-pg-admin.env: "secret/data/vaultadmin"
-        vault.hashicorp.com/agent-inject-template-pg-admin.env: |
-          {{- with secret "secret/data/vaultadmin" -}}
-          PGPASSWORD={{ .Data.data.value }}
-          {{- end -}}
-    spec:
-      serviceAccountName: bq-yb-bootstrap
-      restartPolicy: Never
-      terminationGracePeriodSeconds: 30
-      volumes: [{ name: work, emptyDir: {} }]
-      containers:
-      - name: planner
-        image: yugabytedb/yugabyte:latest
-        volumeMounts: [{ name: work, mountPath: /work }]
-        command: ["/bin/bash","-lc"]
-        args:
-        - |
-          set -Eeuo pipefail
-          PS4='+ [PLANNER] $(date -Is) '
-          set -x
-          trap 'echo "[PLANNER] FAIL: env:"; env | sort; echo "--- plan.tsv ---"; cat /work/plan.tsv 2>/dev/null || true; exit 1' ERR
-          for f in /vault/secrets/pg.env /vault/secrets/pg-admin.env; do
-            i=0; while [ ! -s "$f" ]; do
-              i=$((i+1)); [ $i -gt 60 ] && echo "NO_TABLES" > /work/NO_TABLES && exit 0
-              sleep 2
-            done
-            . "$f"
-          done
-          export PGPASSWORD
-          : "${PGHOST:=yb-tserver-service.yugabyte.svc.cluster.local}"
-          : "${PGPORT:=5433}"
-          : "${PGDATABASE:=kafka}"
-          : "${PGUSER:=vaultadmin}"
-          PGURL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}?sslmode=disable"
-          echo "[PLANNER] Using ${PGURL%:*}***"
-          for i in $(seq 1 60); do
-            /home/yugabyte/bin/ysqlsh "${PGURL}" -Atc "select 1" >/dev/null 2>&1 && break
-            [ "$i" -eq 60 ] && echo "NO_TABLES" > /work/NO_TABLES && exit 0
-            sleep 2
-          done
-          SQL="
-          WITH t AS (
-            SELECT n.nspname AS schema, c.relname AS table, d.description
-              FROM pg_class c
-              JOIN pg_namespace n ON n.oid = c.relnamespace
-              LEFT JOIN pg_description d ON d.objoid = c.oid AND d.objsubid = 0
-             WHERE c.relkind IN ('r','p') AND d.description IS NOT NULL
-          ),
-          j AS (
-            SELECT schema, \"table\",
-                   CASE WHEN description ~ '^[[:space:]]*\\{'
-                        THEN (regexp_replace(description, '^[[:space:]]*', ''))::jsonb
-                        ELSE NULL END AS jdesc
-              FROM t
-          ),
-          b AS (
-            SELECT schema, \"table\", jdesc->'bootstrap' AS b
-              FROM j WHERE jdesc ? 'bootstrap'
-          )
-          SELECT schema, \"table\",
-                 COALESCE(b->>'bq','') AS bq,
-                 COALESCE(b->>'gcs_prefix', \"table\") AS gcs_prefix,
-                 COALESCE(b->>'format','CSV') AS format,
-                 COALESCE(b->>'header','true') AS header,
-                 COALESCE(b->>'columns','') AS columns
-            FROM b
-           WHERE COALESCE( (b->>'enabled')::boolean, false ) = true;
-          "
-          /home/yugabyte/bin/ysqlsh "${PGURL}" -q -A -t -F '|' -c "$SQL" > /work/plan.tsv
-          echo "[PLANNER] Plan rows: $(grep -c '|' /work/plan.tsv || true)"
-          echo "--- plan.tsv ---"; cat /work/plan.tsv || true
-          [ -s /work/plan.tsv ] || echo "NO_TABLES" > /work/NO_TABLES
-      - name: importer
-        image: yugabytedb/yugabyte:latest
-        volumeMounts: [{ name: work, mountPath: /work }]
-        command: ["/bin/bash","-lc"]
-        args:
-        - |
-          set -Eeuo pipefail
-          PS4='+ [IMPORTER] $(date -Is) '
-          set -x
-          trap 'echo "[IMPORTER] FAIL; listing /work"; ls -R /work || true; exit 1' ERR
-          if [ -f /work/NO_TABLES ]; then
-            echo "[IMPORTER] NO_TABLES flag set; exiting."
-            touch /work/DONE
-            exit 0
-          fi
-          . /vault/secrets/pg.env
-          . /vault/secrets/pg-admin.env
-          export PGPASSWORD
-          : "${PGHOST:=yb-tserver-service.yugabyte.svc.cluster.local}"
-          : "${PGPORT:=5433}"
-          : "${PGDATABASE:=kafka}"
-          : "${PGUSER:=vaultadmin}"
-          PGURL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}?sslmode=disable"
-          i=0
-          while [ ! -s /work/plan.tsv ]; do
-            if [ -f /work/NO_TABLES ]; then
-              echo "[IMPORTER] NO_TABLES flag appeared while waiting; exiting."
-              touch /work/DONE
-              exit 0
-            fi
-            i=$((i+1))
-            [ $i -gt 300 ] && echo "Timeout waiting for plan.tsv" && exit 1
-            sleep 2
-          done
-          get_columns() {
-            /home/yugabyte/bin/ysqlsh "${PGURL}" -q -A -t -c "
-              SELECT string_agg(quote_ident(column_name), ',' ORDER BY ordinal_position)
-              FROM information_schema.columns
-              WHERE table_schema='${SCH}' AND table_name='${TBL}';
-            " | tr -d '\n'
-          }
-          while IFS='|' read -r SCH TBL BQMAP PREFIX FMT HDR COLS; do
-            [ -z "${SCH}" ] && continue
-            : "${PREFIX:=${TBL}}"; : "${FMT:=CSV}"; : "${HDR:=true}"
-            INDIR="/work/in/${PREFIX}"; READY="${INDIR}/READY"
-            j=0; while [ ! -f "${READY}" ]; do
-              j=$((j+1)); [ $j -gt 360 ] && echo "Timeout waiting for ${READY}" && exit 1
-              sleep 2
-            done
-            if [ -z "${COLS}" ] || [ "${COLS}" = "null" ]; then COLS="$(get_columns "${SCH}" "${TBL}")"; fi
-            echo "[IMPORTER] Loading ${SCH}.${TBL}"
-            cat ${INDIR}/*.csv \
-              | /home/yugabyte/bin/ysqlsh "${PGURL}" -v ON_ERROR_STOP=1 -q \
-                  -c "COPY ${SCH}.${TBL} (${COLS}) FROM STDIN WITH (FORMAT csv, HEADER ${HDR});"
-          done < /work/plan.tsv
-          touch /work/DONE
-      - name: cloudsdk
-        image: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
-        env:
-        - { name: GOOGLE_APPLICATION_CREDENTIALS, value: /vault/secrets/gcp-key.json }
-        - { name: CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE, value: /vault/secrets/gcp-key.json }
-        - { name: CLOUDSDK_CORE_DISABLE_PROMPTS, value: "1" }
-        volumeMounts: [{ name: work, mountPath: /work }]
-        command: ["/bin/bash","-lc"]
-        args:
-        - |
-          set -Eeuo pipefail
-          PS4='+ [CLOUDSDK] $(date -Is) '
-          set -x
-          trap 'echo "[CLOUDSDK] FAIL; list /work"; ls -R /work || true; exit 1' ERR
-          if [ -f /work/NO_TABLES ]; then
-            echo "[CLOUDSDK] NO_TABLES flag; skipping."
-            exit 0
-          fi
-          for f in /vault/secrets/bootstrap.env /vault/secrets/gcp-key.json; do
-            j=0; while [ ! -s "$f" ]; do
-              j=$((j+1)); [ $j -gt 180 ] && echo "Timeout waiting for $f" && exit 1; sleep 2
-            done
-          done
-          . /vault/secrets/bootstrap.env
-          : "${PROJECT:?missing PROJECT}"
-          : "${BUCKET:?missing BUCKET}"
-          : "${LOCATION:=US}"
-          gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}" >/dev/null 2>&1 || true
-          if [ -n "${LOCATION}" ]; then BQ_LOC_FLAG=(--location="${LOCATION}"); else BQ_LOC_FLAG=(); fi
-          i=0
-          while [ ! -s /work/plan.tsv ]; do
-            if [ -f /work/NO_TABLES ]; then
-              echo "[CLOUDSDK] NO_TABLES flag appeared while waiting; skipping."
-              exit 0
-            fi
-            i=$((i+1)); [ $i -gt 300 ] && echo "Timeout waiting for plan.tsv" && exit 1
-            sleep 2
-          done
-          while IFS='|' read -r SCH TBL BQMAP PREFIX FMT HDR COLS; do
-            [ -z "${SCH}" ] && continue
-            : "${PREFIX:=${TBL}}"; : "${FMT:=CSV}"; : "${HDR:=true}"
-            if [ -z "${BQMAP}" ] && [ -n "${PROJECT}" ]; then
-              echo "[CLOUDSDK] Skipping ${SCH}.${TBL}: empty BQ mapping"
-              continue
-            fi
-            echo "[CLOUDSDK] Exporting ${BQMAP} → gs://${BUCKET}/bootstrap/${PREFIX}/${PREFIX}-*.csv"
-            DEST_URI="gs://${BUCKET}/bootstrap/${PREFIX}/${PREFIX}-*.csv"
-            bq "${BQ_LOC_FLAG[@]}" --project_id="${PROJECT}" extract \
-              --destination_format="${FMT}" --field_delimiter="," --print_header="${HDR}" \
-              "${BQMAP}" "${DEST_URI}"
-            OUTDIR="/work/in/${PREFIX}"; mkdir -p "${OUTDIR}"
-            gsutil -m -o "GSUtil:parallel_process_count=1" cp "gs://${BUCKET}/bootstrap/${PREFIX}/${PREFIX}-*.csv" "${OUTDIR}/"
-            touch "${OUTDIR}/READY"
-          done < /work/plan.tsv
-      - name: flagger
-        image: curlimages/curl:8.8.0
-        volumeMounts: [{ name: work, mountPath: /work }]
-        command: ["/bin/sh","-lc"]
-        args:
-        - |
-          set -eu
-          PS4='+ [FLAGGER] $(date -Is) '
-          set -x
-          API="https://kubernetes.default.svc"
-          TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
-          CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-          NOW="$(date -Is)"
-          DATA='{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"bootstrap.ok","namespace":"kafka","labels":{"app":"bq-yb-bootstrap"}},"data":{"status":"complete","completedAt":"'"$NOW"'"}}'
-          if [ ! -f /work/NO_TABLES ]; then
-            for i in $(seq 1 360); do [ -f /work/DONE ] && break; sleep 2; done
-          fi
-          code="$(curl -s -o /tmp/cm.json -w '%{http_code}' --cacert "$CACERT" -H "Authorization: Bearer $TOKEN" "$API/api/v1/namespaces/kafka/configmaps/bootstrap.ok" || true)"
-          if [ "$code" = "200" ]; then
-            curl -sS -X PATCH --cacert "$CACERT" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/merge-patch+json" \
-              --data-binary "$DATA" "$API/api/v1/namespaces/kafka/configmaps/bootstrap.ok" >/dev/null
-          else
-            curl -sS -X POST --cacert "$CACERT" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-              --data-binary "$DATA" "$API/api/v1/namespaces/kafka/configmaps" >/dev/null
-          fi
-          echo "bootstrap.ok created/updated."
-
-# ============================================================================
-# Ensure BQ dataset exists (wave 3)
-# ============================================================================
----
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: ensure-bq-dataset
-  namespace: kafka
-  annotations: { argocd.argoproj.io/sync-wave: "3" }
-spec:
-  backoffLimit: 0
-  template:
-    metadata:
-      annotations:
-        linkerd.io/inject: "disabled"
-        vault.hashicorp.com/agent-inject: "true"
-        vault.hashicorp.com/role: "data-bootstrap"
-        vault.hashicorp.com/agent-pre-populate-only: "true"
-        vault.hashicorp.com/exit-on-error: "false"
-        vault.hashicorp.com/agent-inject-secret-bq.env: "secret/data/kafka/bq/config"
-        vault.hashicorp.com/agent-inject-template-bq.env: |
-          {{- with secret "secret/data/kafka/bq/config" -}}
-          {{ with .Data.data.project }}BQ_PROJECT={{ . }}{{ end }}
-          {{ with .Data.data.dataset }}BQ_DEFAULT_DATASET={{ . }}{{ end }}
-          {{ with .Data.data.location }}LOCATION={{ . }}{{ end }}
-          {{- end -}}
-        vault.hashicorp.com/agent-inject-secret-gcp-key.json: "secret/data/kafka/bq/config"
-        vault.hashicorp.com/agent-inject-template-gcp-key.json: |
-          {{- with secret "secret/data/kafka/bq/config" -}}
-          {{ .Data.data.sa_json }}
-          {{- end -}}
-        vault.hashicorp.com/agent-inject-permissions-gcp-key.json: "0644"
-    spec:
-      restartPolicy: Never
-      serviceAccountName: bq-yb-bootstrap
-      containers:
-      - name: bq
-        image: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
-        env:
-        - { name: GOOGLE_APPLICATION_CREDENTIALS, value: /vault/secrets/gcp-key.json }
-        - { name: CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE, value: /vault/secrets/gcp-key.json }
-        - { name: CLOUDSDK_CORE_DISABLE_PROMPTS, value: "1" }
-        command: ["/bin/bash","-lc"]
-        args:
-        - |
-          set -euo pipefail
-          PS4='+ [ENSURE-BQ] $(date -Is) '
-          set -x
-          for f in /vault/secrets/bq.env /vault/secrets/gcp-key.json; do
-            i=0; while [ ! -s "$f" ]; do i=$((i+1)); [ $i -gt 120 ] && echo "[ENSURE-BQ] missing $f" >&2 && exit 1; sleep 2; done
-          done
-          . /vault/secrets/bq.env
-          : "${BQ_PROJECT:?missing BQ_PROJECT}"
-          : "${BQ_DEFAULT_DATASET:?missing BQ_DEFAULT_DATASET}"
-          : "${LOCATION:=US}"
-          gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}" >/dev/null 2>&1 || true
-          echo "[ENSURE-BQ] Ensuring dataset ${BQ_PROJECT}:${BQ_DEFAULT_DATASET} (${LOCATION})"
-          if bq --project_id="${BQ_PROJECT}" --location="${LOCATION}" show -d "${BQ_PROJECT}:${BQ_DEFAULT_DATASET}" >/dev/null 2>&1; then
-            echo "[ENSURE-BQ] Dataset exists."
-          else
-            OUT="$( bq --project_id="${BQ_PROJECT}" --location="${LOCATION}" mk -d \
-                    --description="Kafka Connect Sink default dataset" \
-                    "${BQ_PROJECT}:${BQ_DEFAULT_DATASET}" 2>&1 || true )"
-            if echo "$OUT" | grep -qi 'already exists'; then
-              echo "[ENSURE-BQ] Dataset already existed; continuing."
-            elif echo "$OUT" | grep -qi 'Access Denied'; then
-              echo "$OUT"; echo "[ENSURE-BQ] Missing bigquery.datasets.get/create on project ${BQ_PROJECT}"; exit 1
-            elif [ -n "$OUT" ]; then
-              echo "$OUT"; exit 1
-            else
-              echo "[ENSURE-BQ] Dataset created."
-            fi
-          fi
 
 # ============================================================================
 # Kafka (wave 3): single-broker KRaft
@@ -656,7 +225,8 @@ kind: Service
 metadata:
   name: kafka
   namespace: kafka
-  annotations: { argocd.argoproj.io/sync-wave: "3" }
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
 spec:
   type: ClusterIP
   ports: [{ name: kafka, port: 9092, targetPort: 9092 }]
@@ -667,7 +237,8 @@ kind: Service
 metadata:
   name: kafka-hs
   namespace: kafka
-  annotations: { argocd.argoproj.io/sync-wave: "3" }
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
 spec:
   clusterIP: None
   ports: [{ name: controller, port: 9093, targetPort: 9093 }]
@@ -678,7 +249,8 @@ kind: StatefulSet
 metadata:
   name: kafka
   namespace: kafka
-  annotations: { argocd.argoproj.io/sync-wave: "3" }
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
 spec:
   serviceName: kafka-hs
   replicas: 1
@@ -686,7 +258,8 @@ spec:
   template:
     metadata:
       labels: { app: kafka }
-      annotations: { linkerd.io/inject: "disabled" }
+      annotations:
+        linkerd.io/inject: "disabled"
     spec:
       securityContext:
         fsGroup: 1000
@@ -694,34 +267,23 @@ spec:
       initContainers:
       - name: format-storage
         image: apache/kafka:3.9.0
-        imagePullPolicy: IfNotPresent
         env:
         - name: CLUSTER_ID
           valueFrom: { secretKeyRef: { name: kafka-cluster-id, key: CLUSTER_ID } }
         command: ["/bin/bash","-lc"]
         args:
         - |
-          set -Eeuo pipefail
-          PS4='+ [KAFKA-FMT] $(date -Is) '
-          set -x
+          set -eu
           META="/tmp/kraft-combined-logs/meta.properties"
-          if [ -f "$META" ]; then
-            echo "meta.properties present; not reformatting."; grep -E '^cluster\.id=' "$META" || true
-          else
-            /opt/kafka/bin/kafka-storage.sh format \
-              -t "${CLUSTER_ID}" -c /opt/kafka/config/kraft/server.properties --ignore-formatted
+          if [ ! -f "$META" ]; then
+            /opt/kafka/bin/kafka-storage.sh format -t "${CLUSTER_ID}" -c /opt/kafka/config/kraft/server.properties --ignore-formatted
           fi
         volumeMounts: [{ name: kafka-logs, mountPath: /tmp/kraft-combined-logs }]
       containers:
       - name: broker
         image: apache/kafka:3.9.0
-        imagePullPolicy: IfNotPresent
         env:
-        - name: CLUSTER_ID
-          valueFrom:
-            secretKeyRef:
-              name: kafka-cluster-id
-              key: CLUSTER_ID
+        - { name: CLUSTER_ID, valueFrom: { secretKeyRef: { name: kafka-cluster-id, key: CLUSTER_ID } } }
         - { name: KAFKA_NODE_ID, value: "1" }
         - { name: KAFKA_PROCESS_ROLES, value: "broker,controller" }
         - { name: KAFKA_CONTROLLER_LISTENER_NAMES, value: "CONTROLLER" }
@@ -743,13 +305,11 @@ spec:
           periodSeconds: 5
         resources:
           requests: { cpu: "250m", memory: "512Mi" }
-          limits:
-            cpu: "1500m"
-            memory: "2Gi"
+          limits: { cpu: "1500m", memory: "2Gi" }
         volumeMounts: [{ name: kafka-logs, mountPath: /tmp/kraft-combined-logs }]
 
 # ============================================================================
-# Kafka Connect (wave 4) — Vault-injected GCP keyfile
+# Kafka Connect (wave 4) — with BigQuery + YB gRPC connectors
 # ============================================================================
 ---
 apiVersion: v1
@@ -757,7 +317,8 @@ kind: Service
 metadata:
   name: kafka-connect
   namespace: kafka
-  annotations: { argocd.argoproj.io/sync-wave: "4" }
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
 spec:
   type: ClusterIP
   ports: [{ name: rest, port: 8083, targetPort: 8083 }]
@@ -768,16 +329,14 @@ kind: ConfigMap
 metadata:
   name: kafka-connect-log4j
   namespace: kafka
-  annotations: { argocd.argoproj.io/sync-wave: "4" }
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
 data:
   log4j.properties: |
     log4j.rootLogger=INFO, stdout
     log4j.appender.stdout=org.apache.log4j.ConsoleAppender
     log4j.appender.stdout.layout=org.apache.log4j.PatternLayout
     log4j.appender.stdout.layout.ConversionPattern=[%d{ISO8601}] %-5p %c - %m%n
-
-    log4j.logger.org.apache.kafka.connect.runtime.rest=WARN
-    log4j.logger.org.apache.kafka.connect.runtime=INFO
     log4j.logger.io.debezium=DEBUG
     log4j.logger.io.debezium.connector.yugabytedb=DEBUG
     log4j.logger.com.wepay.kafka.connect.bigquery=DEBUG
@@ -787,7 +346,8 @@ kind: Deployment
 metadata:
   name: kafka-connect
   namespace: kafka
-  annotations: { argocd.argoproj.io/sync-wave: "4" }
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
 spec:
   replicas: 1
   selector: { matchLabels: { app: kafka-connect } }
@@ -808,29 +368,23 @@ spec:
         vault.hashicorp.com/agent-inject-permissions-gcp-key.json: "0644"
     spec:
       serviceAccountName: bq-yb-bootstrap
+      securityContext: { fsGroup: 1000 }
       terminationGracePeriodSeconds: 30
-      securityContext:
-        fsGroup: 1000
       volumes:
       - { name: plugins, emptyDir: {} }
       - name: log4j
         configMap:
           name: kafka-connect-log4j
-          items:
-          - key: log4j.properties
-            path: log4j.properties
+          items: [{ key: log4j.properties, path: log4j.properties }]
       initContainers:
       - name: install-bq
         image: confluentinc/cp-kafka-connect:7.6.1
         command: ["/bin/bash","-lc"]
         args:
         - |
-          set -Eeuo pipefail
-          PS4='+ [INSTALL-BQ] $(date -Is) '
-          set -x
+          set -eu
           mkdir -p /plugins
-          confluent-hub install --no-prompt --component-dir /plugins \
-            wepay/kafka-connect-bigquery:2.5.7
+          confluent-hub install --no-prompt --component-dir /plugins wepay/kafka-connect-bigquery:2.5.7
         volumeMounts: [{ name: plugins, mountPath: /plugins }]
       - name: fetch-yb-connector
         image: quay.io/yugabyte/debezium-connector:latest
@@ -840,96 +394,30 @@ spec:
         command: ["/bin/bash","-lc"]
         args:
         - |
-          set -Eeuo pipefail
-          PS4='+ [FETCH-YB] $(date -Is) '
-          set -x
-
+          set -eu
           mkdir -p /plugins/yb
-
+          copy_if_dir() { local d="$1"; [ -d "$d" ] && cp -R "$d"/. /plugins/yb/ || true; }
+          for C in /kafka/connect/yugabytedb /opt/kafka/connect/yugabytedb /debezium-connector/yugabytedb /opt/debezium-connector/yugabytedb; do copy_if_dir "$C"; done
           have_yb() {
-            if find /plugins/yb -type f -iname '*yugabytedb*connector*.jar' -print -quit | grep -q .; then return 0; fi
-            if find /plugins/yb -type f -iname '*connector*yugabytedb*.jar' -print -quit | grep -q .; then return 0; fi
-            while IFS= read -r j; do
-              if unzip -p "$j" META-INF/services/org.apache.kafka.connect.connector.Connector 2>/dev/null \
-                   | grep -q 'io\.debezium\.connector\.yugabytedb\.YugabyteDBgRPCConnector'; then
-                return 0
-              fi
-              if unzip -l "$j" 2>/dev/null | grep -q 'io/debezium/connector/yugabytedb/YugabyteDBgRPCConnector.class'; then
-                return 0
-              fi
-            done < <(find /plugins/yb -type f -name '*.jar')
+            find /plugins/yb -type f -name '*.jar' -print0 \
+              | xargs -0 -I{} sh -c 'unzip -p "{}" META-INF/services/org.apache.kafka.connect.connector.Connector 2>/dev/null | grep -q "YugabyteDBgRPCConnector" && exit 0; exit 1' >/dev/null 2>&1 && return 0
             return 1
           }
-
-          copy_if_dir() { local d="$1"; [ -d "$d" ] && cp -R "$d"/. /plugins/yb/ || true; }
-
-          # 1) Try image-provided dirs
-          for C in /kafka/connect/yugabytedb /opt/kafka/connect/yugabytedb /debezium-connector/yugabytedb /opt/debezium-connector/yugabytedb; do
-            copy_if_dir "$C"
-          done
-
-          # 2) Pull in Debezium Postgres dependency bundle (if available)
-          for C in /kafka/connect/debezium-connector-postgres /opt/kafka/connect/yugabytedb/debezium-connector-postgres /debezium-connector/debezium-connector-postgres /kafka/connect/yugabytedb/debezium-connector-postgres; do
-            if [ -d "$C" ]; then
-              echo "[FETCH-YB] Copying PG connector from $C"
-              cp -R "$C"/. /plugins/yb/
-              break
-            fi
-          done
-
-          # 3) Download gRPC jar if still missing
           if ! have_yb && [ -n "${YB_CONNECTOR_URL:-}" ]; then
-            echo "[FETCH-YB] Downloading YugabyteDB Debezium connector from ${YB_CONNECTOR_URL}"
-            TMP="$(mktemp -d /tmp/ybconn.XXXXXX)"; PKG="$TMP/pkg"
-            curl -fL --retry 5 --retry-delay 2 -o "$PKG" "${YB_CONNECTOR_URL}"
-            BASENAME="$(basename "${YB_CONNECTOR_URL%%\?*}")"
-            if echo "$BASENAME" | grep -qiE '\.jar$'; then
-              cp "$PKG" "/plugins/yb/$BASENAME"
-            else
-              mkdir -p "$TMP/unz" "$TMP/tar"
-              unzip -q -d "$TMP/unz" "$PKG" >/dev/null 2>&1 || tar -xzf "$PKG" -C "$TMP/tar" >/dev/null 2>&1 || tar -xf "$PKG" -C "$TMP/tar" || true
-              cp -R "$TMP"/unz/. /plugins/yb/ 2>/dev/null || true
-              cp -R "$TMP"/tar/. /plugins/yb/ 2>/dev/null || true
-            fi
+            TMP="$(mktemp -d)"; curl -fL --retry 5 -o "$TMP/pkg" "$YB_CONNECTOR_URL"
+            cp "$TMP/pkg" "/plugins/yb/$(basename "${YB_CONNECTOR_URL%%\?*}")" || true
             rm -rf "$TMP"
           fi
-
-          # 4) Trim CloudEvents noise
-          find /plugins/yb -type f \( -iname '*cloudevents*.jar' -o -iname 'debezium-converter-cloud-events-*.jar' \) -print -delete || true
-
-          # 5) **REPACK**: put jars into two subfolders so Connect loads dependencies together
           mkdir -p /plugins/yb/debezium-postgres /plugins/yb/yugabytedb-grpc
-
-          classify_and_move() {
-            local j="$1"
-            # if jar declares or contains the Yugabyte gRPC connector, it goes to yugabytedb-grpc
-            if unzip -p "$j" META-INF/services/org.apache.kafka.connect.connector.Connector 2>/dev/null \
-                 | grep -q 'io\.debezium\.connector\.yugabytedb\.YugabyteDBgRPCConnector'; then
-              mv -f "$j" /plugins/yb/yugabytedb-grpc/
-              return
+          find /plugins/yb -maxdepth 1 -type f -name '*.jar' -print0 | while IFS= read -r -d '' J; do
+            if unzip -p "$J" META-INF/services/org.apache.kafka.connect.connector.Connector 2>/dev/null | grep -q 'YugabyteDBgRPCConnector'; then
+              mv -f "$J" /plugins/yb/yugabytedb-grpc/
+            else
+              mv -f "$J" /plugins/yb/debezium-postgres/
             fi
-            if unzip -l "$j" 2>/dev/null | grep -q 'io/debezium/connector/yugabytedb/YugabyteDBgRPCConnector.class'; then
-              mv -f "$j" /plugins/yb/yugabytedb-grpc/
-              return
-            fi
-            # everything else (Debezium core, PG driver, guava, protobuf, etc.) -> debezium-postgres
-            mv -f "$j" /plugins/yb/debezium-postgres/
-          }
-
-          # Only repack jars in the top-level /plugins/yb (avoid re-moving already-sorted ones)
-          find /plugins/yb -maxdepth 1 -type f -name '*.jar' -print0 | while IFS= read -r -d '' J; do classify_and_move "$J"; done
-
-          # 6) Final presence check + listing
-          if have_yb; then
-            echo "[FETCH-YB] YugabyteDB gRPC connector present. Layout:"
-            find /plugins/yb -maxdepth 2 -type f -name '*.jar' | sed 's/^/  - /'
-          else
-            echo "[FETCH-YB] ERROR: YugabyteDB gRPC connector jars not found."
-            echo "           Provide YB_CONNECTOR_URL to a ZIP/TGZ or JAR that contains the gRPC connector."
-            exit 1
-          fi
-        volumeMounts:
-        - { name: plugins, mountPath: /plugins }
+          done
+          [ -n "$(find /plugins/yb/yugabytedb-grpc -type f -name '*.jar' -print -quit)" ] || { echo "Missing YugabyteDB gRPC connector"; exit 1; }
+        volumeMounts: [{ name: plugins, mountPath: /plugins }]
       - name: create-connect-topics
         image: apache/kafka:3.9.0
         command: ["/bin/bash","-lc"]
@@ -938,21 +426,12 @@ spec:
           set -eu
           BOOT=kafka.kafka.svc.cluster.local:9092
           for t in _connect-configs _connect-offsets _connect-status; do
-            if /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --list | grep -qx "$t"; then
-              echo "topic $t exists"
-            else
-              case "$t" in
-                _connect-configs) cfg="--config cleanup.policy=compact --partitions 1";;
-                _connect-offsets) cfg="--config cleanup.policy=compact --partitions 1";;
-                _connect-status)  cfg="--config cleanup.policy=compact --partitions 1";;
-              esac
-              /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --create --topic "$t" $cfg --replication-factor 1
-            fi
+            /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --list | grep -qx "$t" || \
+            /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --create --topic "$t" --partitions 1 --replication-factor 1 --config cleanup.policy=compact
           done
       containers:
       - name: connect
         image: confluentinc/cp-kafka-connect:7.6.1
-        imagePullPolicy: IfNotPresent
         env:
         - name: CONNECT_PLUGIN_DISCOVERY
           value: "only_scan"
@@ -968,41 +447,17 @@ spec:
           value: "_connect-offsets"
         - name: CONNECT_STATUS_STORAGE_TOPIC
           value: "_connect-status"
-        - name: CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR
-          value: "1"
-        - name: CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR
-          value: "1"
-        - name: CONNECT_STATUS_STORAGE_REPLICATION_FACTOR
-          value: "1"
-        - name: CONNECT_KEY_CONVERTER
-          value: "org.apache.kafka.connect.json.JsonConverter"
-        - name: CONNECT_VALUE_CONVERTER
-          value: "org.apache.kafka.connect.json.JsonConverter"
-        - name: CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE
-          value: "true"
-        - name: CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE
-          value: "true"
-        - name: CONNECT_REST_ADVERTISED_HOST_NAME
-          value: "kafka-connect.kafka.svc.internal.lan"
-        - name: CONNECT_REST_PORT
-          value: "8083"
-        - name: KAFKA_OPTS
-          value: >-
-            -Dyb.master_addresses=yb-master-0.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-1.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-2.yb-master-service.yugabyte.svc.cluster.local:7100
-            -Dyb.client_admin_operation_timeout_ms=15000
-            -Dyb.client_default_operation_timeout_ms=15000
-            -Dyb.client_wait_for_leader_election_on_init=false
-        - name: YB_MASTER_ADDRESSES
-          value: yb-master-0.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-1.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-2.yb-master-service.yugabyte.svc.cluster.local:7100
-        - name: CLUSTER_ID
-          valueFrom:
-            secretKeyRef: { name: kafka-cluster-id, key: CLUSTER_ID }
-        - name: KAFKA_LOG4J_OPTS
-          value: "-Dlog4j.configuration=file:/kafka/etc/log4j.properties"
-        - name: GOOGLE_APPLICATION_CREDENTIALS
-          value: "/vault/secrets/gcp-key.json"
-        ports:
-        - { containerPort: 8083 }
+        - { name: CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR, value: "1" }
+        - { name: CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR, value: "1" }
+        - { name: CONNECT_STATUS_STORAGE_REPLICATION_FACTOR, value: "1" }
+        - { name: CONNECT_KEY_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
+        - { name: CONNECT_VALUE_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
+        - { name: CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE, value: "true" }
+        - { name: CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE, value: "true" }
+        - { name: CONNECT_REST_ADVERTISED_HOST_NAME, value: "kafka-connect.kafka.svc.internal.lan" }
+        - { name: CONNECT_REST_PORT, value: "8083" }
+        - { name: GOOGLE_APPLICATION_CREDENTIALS, value: "/vault/secrets/gcp-key.json" }
+        ports: [{ containerPort: 8083 }]
         readinessProbe:
           httpGet: { path: /connectors, port: 8083 }
           initialDelaySeconds: 60
@@ -1021,7 +476,7 @@ spec:
         - { name: log4j,  mountPath: /kafka/etc }
 
 # ============================================================================
-# Kafka UI + oauth2-proxy (waves 45-47)
+# Kafka UI + oauth2-proxy (waves 45-46)
 # ============================================================================
 ---
 apiVersion: v1
@@ -1029,7 +484,8 @@ kind: Service
 metadata:
   name: kafka-ui
   namespace: kafka
-  annotations: { argocd.argoproj.io/sync-wave: "45" }
+  annotations:
+    argocd.argoproj.io/sync-wave: "45"
 spec:
   ports: [{ name: http, port: 8080, targetPort: 8080 }]
   selector: { app: kafka-ui }
@@ -1039,14 +495,16 @@ kind: Deployment
 metadata:
   name: kafka-ui
   namespace: kafka
-  annotations: { argocd.argoproj.io/sync-wave: "45" }
+  annotations:
+    argocd.argoproj.io/sync-wave: "45"
 spec:
   replicas: 1
   selector: { matchLabels: { app: kafka-ui } }
   template:
     metadata:
       labels: { app: kafka-ui }
-      annotations: { linkerd.io/inject: "disabled" }
+      annotations:
+        linkerd.io/inject: "disabled"
     spec:
       containers:
       - name: ui
@@ -1062,7 +520,6 @@ spec:
         resources:
           requests: { cpu: "100m", memory: "128Mi" }
           limits: { cpu: "500m", memory: "512Mi" }
-
 ---
 apiVersion: v1
 kind: Secret
@@ -1080,7 +537,8 @@ kind: Service
 metadata:
   name: oauth2-proxy
   namespace: kafka
-  annotations: { argocd.argoproj.io/sync-wave: "46" }
+  annotations:
+    argocd.argoproj.io/sync-wave: "46"
 spec:
   ports: [{ name: http, port: 4180, targetPort: 4180 }]
   selector: { app: oauth2-proxy }
@@ -1090,14 +548,16 @@ kind: Deployment
 metadata:
   name: oauth2-proxy
   namespace: kafka
-  annotations: { argocd.argoproj.io/sync-wave: "46" }
+  annotations:
+    argocd.argoproj.io/sync-wave: "46"
 spec:
   replicas: 1
   selector: { matchLabels: { app: oauth2-proxy } }
   template:
     metadata:
       labels: { app: oauth2-proxy }
-      annotations: { linkerd.io/inject: "disabled" }
+      annotations:
+        linkerd.io/inject: "disabled"
     spec:
       containers:
       - name: proxy
@@ -1134,7 +594,7 @@ spec:
           limits: { cpu: "300m", memory: "256Mi" }
 
 # ============================================================================
-# Continuous Annotation Watcher (wave 50)
+# REFACTORED Table Sync Controller (wave 50) — uses your packaged image
 # ============================================================================
 ---
 apiVersion: apps/v1
@@ -1146,46 +606,43 @@ metadata:
     argocd.argoproj.io/sync-wave: "50"
 spec:
   replicas: 1
-  selector: { matchLabels: { app: bootstrap-watcher } }
+  selector:
+    matchLabels: { app: bootstrap-watcher }
   template:
     metadata:
       labels: { app: bootstrap-watcher }
       annotations:
         linkerd.io/inject: "disabled"
+
+        # ---- VAULT agent: render env files this app expects per README ----
+
         vault.hashicorp.com/agent-inject: "true"
         vault.hashicorp.com/role: "data-bootstrap"
         vault.hashicorp.com/agent-pre-populate-only: "true"
         vault.hashicorp.com/exit-on-error: "false"
 
-        vault.hashicorp.com/agent-inject-secret-bootstrap.env: "secret/data/kafka/bq/bootstrap"
-        vault.hashicorp.com/agent-inject-template-bootstrap.env: |
-          {{- with secret "secret/data/kafka/bq/bootstrap" -}}
-          {{ with .Data.data.bucket }}BUCKET={{ . }}{{ end }}
-          {{ with .Data.data.project }}PROJECT={{ . }}{{ end }}
-          {{ with .Data.data.location }}LOCATION={{ . }}{{ end }}
-          {{- end -}}
+        # DATABASE_URL (built from pgconfig + vaultadmin password)
+        vault.hashicorp.com/agent-inject-secret-db.env: "secret/data/kafka/pgconfig,secret/data/vaultadmin"
+        vault.hashicorp.com/agent-inject-template-db.env: |
+          {{- $pg := secret "secret/data/kafka/pgconfig" -}}
+          {{- $pw := secret "secret/data/vaultadmin" -}}
+          DATABASE_URL=postgresql://{{ $pg.Data.data.user }}:{{ $pw.Data.data.value }}@{{ $pg.Data.data.host }}:{{ $pg.Data.data.port }}/{{ $pg.Data.data.database }}
 
-        vault.hashicorp.com/agent-inject-secret-yb.env: "secret/data/kafka/pgconfig"
-        vault.hashicorp.com/agent-inject-template-yb.env: |
-          {{- with secret "secret/data/kafka/pgconfig" -}}
-          {{ with .Data.data.host }}PGHOST={{ . }}{{ end }}
-          {{ with .Data.data.port }}PGPORT={{ . }}{{ end }}
-          {{ with .Data.data.database }}PGDATABASE={{ . }}{{ end }}
-          {{ with .Data.data.user }}PGUSER={{ . }}{{ end }}
-          {{ with .Data.data.master_addresses }}YB_MASTER_ADDRESSES={{ . }}{{ end }}
-          {{- end -}}
-        vault.hashicorp.com/agent-inject-secret-pgpass.env: "secret/data/vaultadmin"
-        vault.hashicorp.com/agent-inject-template-pgpass.env: |
-          {{- with secret "secret/data/vaultadmin" -}}
-          PGPASSWORD={{ .Data.data.value }}
-          {{- end -}}
-
+        # BIGQUERY_PROJECT_ID from bq/config
         vault.hashicorp.com/agent-inject-secret-bq.env: "secret/data/kafka/bq/config"
         vault.hashicorp.com/agent-inject-template-bq.env: |
           {{- with secret "secret/data/kafka/bq/config" -}}
-          {{ with .Data.data.project }}BQ_PROJECT={{ . }}{{ end }}
-          {{ with .Data.data.dataset }}BQ_DEFAULT_DATASET={{ . }}{{ end }}
+          {{ with .Data.data.project }}BIGQUERY_PROJECT_ID={{ . }}{{ end }}
           {{- end -}}
+
+        # TEMP_STORAGE_BUCKET from bootstrap
+        vault.hashicorp.com/agent-inject-secret-bootstrap.env: "secret/data/kafka/bq/bootstrap"
+        vault.hashicorp.com/agent-inject-template-bootstrap.env: |
+          {{- with secret "secret/data/kafka/bq/bootstrap" -}}
+          {{ with .Data.data.bucket }}TEMP_STORAGE_BUCKET={{ . }}{{ end }}
+          {{- end -}}
+
+        # GCP SA JSON used by the app (and by BigQuery libs)
         vault.hashicorp.com/agent-inject-secret-gcp-key.json: "secret/data/kafka/bq/config"
         vault.hashicorp.com/agent-inject-template-gcp-key.json: |
           {{- with secret "secret/data/kafka/bq/config" -}}
@@ -1194,548 +651,62 @@ spec:
         vault.hashicorp.com/agent-inject-permissions-gcp-key.json: "0644"
     spec:
       serviceAccountName: bq-yb-bootstrap
-      securityContext:
-        fsGroup: 1000
+      securityContext: { fsGroup: 1000 }
       volumes:
       - name: state
         emptyDir: {}
       containers:
-      - name: cloudsdk
-        image: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+      - name: table-sync
+        image: ghcr.io/dotcomrow/table-sync-image:ts-20250929-213753
+        imagePullPolicy: IfNotPresent
         env:
-        - { name: GOOGLE_APPLICATION_CREDENTIALS, value: /vault/secrets/gcp-key.json }
-        - { name: CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE, value: /vault/secrets/gcp-key.json }
-        - { name: CLOUDSDK_CORE_DISABLE_PROMPTS, value: "1" }
+        # README vars:
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: "/vault/secrets/gcp-key.json"
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          value: "kafka.kafka.svc.internal.lan:9092"
+        - name: DEBEZIUM_CONNECTOR_URL
+          value: "http://kafka-connect.kafka.svc.internal.lan:8083"
+        - name: SCAN_INTERVAL_SECONDS
+          value: "30"
+        - name: LOG_LEVEL
+          value: "INFO"
+        - name: BATCH_SIZE
+          value: "10000"
+
+        # Provide all rendered env files
+        envFrom:
+        - secretRef:
+            name: ""  # (noop: envFrom requires a source; we rely on files below)
+
+        # Mount the Vault-rendered env files and key
         volumeMounts:
         - { name: state, mountPath: /state }
-        command: ["/bin/bash","-lc"]
+        # The app reads env vars; we'll source the files via a tiny wrapper to export them then exec app
+        command: ["/bin/sh","-lc"]
         args:
         - |
-          set -Eeuo pipefail
-          for f in /vault/secrets/bootstrap.env /vault/secrets/gcp-key.json; do
-            i=0; while [ ! -s "$f" ]; do i=$((i+1)); [ $i -gt 180 ] && echo "CloudSDK missing $f" >&2 && exit 1; sleep 2; done
-          done
-          . /vault/secrets/bootstrap.env
-          : "${PROJECT:?missing PROJECT}" ; : "${BUCKET:?missing BUCKET}" ; : "${LOCATION:=US}"
-          gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}" >/dev/null 2>&1 || true
-
-          mkdir -p /state/requests /state/in
-          echo "[CLOUDSDK] ready; watching for requests in /state/requests"
-          shopt -s nullglob
-          while :; do
-            # delete-<db>.<dataset>.<table>.bqdel → drop BigQuery table
-            for rq in /state/requests/*.bqdel; do
-              # file content: DATASET|TABLE
-              IFS='|' read -r DS TN < "$rq" || true
-              if [ -n "${DS:-}" ] && [ -n "${TN:-}" ]; then
-                echo "[CLOUDSDK] deleting table ${PROJECT}:${DS}.${TN} (${LOCATION})"
-                bq --project_id="${PROJECT}" --location="${LOCATION}" rm -f -t "${PROJECT}:${DS}.${TN}" >/dev/null 2>&1 || true
-              fi
-              rm -f "$rq"
-            done
-            # ensure-<db>.<dataset>.dataset → create dataset if missing
-            for rq in /state/requests/*.dataset; do
-              DS="$(cat "$rq" 2>/dev/null || true)"
-              [ -n "${DS:-}" ] || { rm -f "$rq"; continue; }
-              echo "[CLOUDSDK] ensuring dataset ${PROJECT}:${DS} (${LOCATION})"
-              if bq --project_id="${PROJECT}" --location="${LOCATION}" show -d "${PROJECT}:${DS}" >/dev/null 2>&1; then
-                echo "[CLOUDSDK] dataset ${DS} exists"
-              else
-                OUT="$( bq --project_id="${PROJECT}" --location="${LOCATION}" mk -d "${PROJECT}:${DS}" 2>&1 || true )"
-                if echo "$OUT" | grep -qi 'already exists'; then
-                  echo "[CLOUDSDK] dataset ${DS} already existed"
-                elif [ -n "$OUT" ]; then
-                  echo "$OUT";  # let it log; watcher will continue anyway
-                else
-                  echo "[CLOUDSDK] dataset ${DS} created"
-                fi
-              fi
-              rm -f "$rq"
-            done
-            for rq in /state/requests/*.bq; do
-              # file format: PREFIX|BQMAP|FORMAT|HEADER
-              IFS='|' read -r PREFIX BQMAP FMT HDR < "$rq" || true
-              [ -n "${PREFIX:-}" ] || { rm -f "$rq"; continue; }
-              [ -n "${BQMAP:-}" ]  || { echo "[CLOUDSDK] skip ${PREFIX}: empty BQMAP"; rm -f "$rq"; continue; }
-
-              OUTDIR="/state/in/${PREFIX}"; mkdir -p "$OUTDIR"
-              DEST_URI="gs://${BUCKET}/bootstrap/${PREFIX}/${PREFIX}-*.csv"
-              echo "[CLOUDSDK] exporting ${BQMAP} -> ${DEST_URI}"
-              # Try extract; capture output to detect 'Not found: Table ...'
-              set +e
-              EXTRACT_OUT="$( bq --location="${LOCATION}" --project_id="${PROJECT}" extract \
-                --destination_format="${FMT:-CSV}" --field_delimiter="," --print_header="${HDR:-true}" \
-                "${BQMAP}" "${DEST_URI}" 2>&1 )"
-              RC=$?
-              set -e
-              if [ $RC -ne 0 ] && echo "$EXTRACT_OUT" | grep -q "Not found: Table"; then
-                echo "[CLOUDSDK] ${BQMAP} is missing; flagging NOT_FOUND and skipping export"
-                mkdir -p "${OUTDIR}"
-                : > "${OUTDIR}/NOT_FOUND"
-                : > "${OUTDIR}/READY"
-              else
-                [ $RC -eq 0 ] || { echo "$EXTRACT_OUT"; exit $RC; }
-                echo "[CLOUDSDK] copying to ${OUTDIR}"
-                gsutil -m -o "GSUtil:parallel_process_count=1" cp "gs://${BUCKET}/bootstrap/${PREFIX}/${PREFIX}-*.csv" "${OUTDIR}/"
-                touch "${OUTDIR}/READY"
-              fi
-              rm -f "$rq"
-            done
-            sleep 2
-          done
-
-      - name: watcher
-        image: yugabytedb/yugabyte:latest
-        volumeMounts:
-        - { name: state, mountPath: /state }
-        env:
-        - { name: CONNECT_URL, value: "http://kafka-connect.kafka.svc.internal.lan:8083" }
-        - { name: SERVER_PREFIX, value: "yb" }
-        - { name: SCAN_INTERVAL, value: "30" }
-        - { name: DROP_LEGACY_SLOTS, value: "true" }
-        command: ["/bin/bash","-lc"]
-        args:
-        - |
-          set -Eeuo pipefail
-          PS4='+ [WATCHER] $(date -Is) '
-          set -x
-
-          esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\n'; }
-          mkresp() { mktemp /tmp/resp.XXXXXX.txt; }
-          mktmp() { mktemp /tmp/tmp.XXXXXX.json; }
-
-          api_get()   { local u="$1" rf; rf="$(mkresp)"; code=$(curl --connect-timeout 5 --max-time 120 -sS -D /tmp/h.txt -o "$rf" -w '%{http_code}' "$u" || true); echo "GET $u -> $code"; tail -c 2000 "$rf" 2>/dev/null || true; }
-          api_put()   { local u="$1" f="$2" rf; rf="$(mkresp)"; code=$(curl --connect-timeout 5 --max-time 120 -sS -D /tmp/h.txt -o "$rf" -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @"$f" -X PUT "$u" || true); echo "PUT $u -> $code"; tail -c 2000 "$rf" 2>/dev/null || true; }
-          api_post()  { local u="$1" f="$2" rf; rf="$(mkresp)"; code=$(curl --connect-timeout 5 --max-time 120 -sS -D /tmp/h.txt -o "$rf" -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @"$f" -X POST "$u" || true); echo "POST $u -> $code"; tail -c 2000 "$rf" 2>/dev/null || true; }
-          api_delete(){ local u="$1" rf; rf="$(mkresp)"; code=$(curl --connect-timeout 5 --max-time 120 -sS -D /tmp/h.txt -o "$rf" -w '%{http_code}' -X DELETE "$u" || true); echo "DELETE $u -> $code"; tail -c 2000 "$rf" 2>/dev/null || true; }
-
-          # Load secrets
-          for f in /vault/secrets/yb.env /vault/secrets/pgpass.env /vault/secrets/bq.env /vault/secrets/gcp-key.json; do
-            i=0; while [ ! -s "$f" ]; do i=$((i+1)); [ $i -gt 120 ] && echo "vault secrets missing: $f" >&2 && exit 1; sleep 2; done
-            . "$f" 2>/dev/null || true
-          done
-
-          export PGPASSWORD
-          PGHOST="${PGHOST:-yb-tserver-service.yugabyte.svc.cluster.local}"
-          PGPORT="${PGPORT:-5433}"
-          PGUSER="${PGUSER:-vaultadmin}"
-          echo "[WATCHER] PGHOST=$PGHOST PGPORT=$PGPORT PGUSER=$PGUSER PGDATABASE=${PGDATABASE:-<ignored>} YB_MASTER_ADDRESSES=${YB_MASTER_ADDRESSES:-<unset>}"
-
-          # Wait for Kafka Connect REST
-          until curl -fsS "${CONNECT_URL}/connectors" >/dev/null 2>&1; do echo "[WATCHER] waiting for connect REST…"; sleep 3; done
-          need_yb='io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector'
-          need_bq='com.wepay.kafka.connect.bigquery.BigQuerySinkConnector'
-
-          echo "[WATCHER] waiting for Connect plugins…"
-          for i in $(seq 1 120); do
-            pjson="$(curl -fsS "${CONNECT_URL}/connector-plugins" || true)"
-            if echo "$pjson" | grep -q "$need_yb" && echo "$pjson" | grep -q "$need_bq"; then
-              echo "[WATCHER] required plugins visible"; break
-            fi
-            sleep 2
-          done
-          echo "== Connector plugins =="; curl -fsS "${CONNECT_URL}/connector-plugins" | sed 's/.*/  &/'; echo "======================="
-
-          list_dbs() {
-            for DB in yugabyte postgres "${PGDATABASE:-}"; do
-              [ -z "$DB" ] && continue
-              URL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${DB}?sslmode=disable"
-              if /home/yugabyte/bin/ysqlsh "$URL" -Atc "select 1" >/dev/null 2>&1; then
-                /home/yugabyte/bin/ysqlsh "$URL" -Atc "select datname from pg_database where datallowconn and datname not in ('template0','template1') order by 1" | sort -u
-                return 0
-              fi
-            done
-            echo "ERROR: cannot connect to a control DB to enumerate databases" >&2
-            return 1
-          }
-
-          get_plan_for_db() {
-            local DB="$1"
-            local URL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${DB}?sslmode=disable"
-            /home/yugabyte/bin/ysqlsh "$URL" -q -A -t -F '|' -c "
-              WITH t AS (
-                SELECT n.nspname AS schema, c.relname AS table, d.description
-                  FROM pg_class c
-                  JOIN pg_namespace n ON n.oid = c.relnamespace
-                  LEFT JOIN pg_description d ON d.objoid = c.oid AND d.objsubid = 0
-                WHERE c.relkind IN ('r','p') AND d.description IS NOT NULL
-              ),
-              j AS (
-                SELECT schema, \"table\",
-                      CASE WHEN description ~ '^[[:space:]]*\\{'
-                            THEN (regexp_replace(description, '^[[:space:]]*', ''))::jsonb
-                            ELSE NULL END AS jdesc
-                FROM t
-              ),
-              b AS (
-                SELECT schema, \"table\", jdesc->'bootstrap' AS b
-                FROM j WHERE jdesc ? 'bootstrap'
-              )
-              SELECT schema, \"table\",
-                    COALESCE(b->>'bq','') AS bq,
-                    COALESCE(b->>'gcs_prefix', \"table\") AS gcs_prefix,
-                    COALESCE(b->>'format','CSV') AS format,
-                    COALESCE(b->>'header','true') AS header,
-                    COALESCE(b->>'columns','') AS columns,
-                    COALESCE((b->>'enabled')::boolean,false) AS enabled
-              FROM b
-              ORDER BY schema, \"table\";
-            " || true
-          }
-
-          seed_table_if_needed() {
-            local DB="$1" SCH="$2" TBL="$3" PREFIX="$4" BQMAP="$5" HDR="$6"
-            local PGURL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${DB}?sslmode=disable"
-            local SEED_FLAG="/state/${DB}.${SCH}.${TBL}.seeded"
-            local INDIR="/state/in/${PREFIX}"; local READY="${INDIR}/READY"
-
-            [ -f "$SEED_FLAG" ] && { echo "[WATCHER] seed exists for ${DB}.${SCH}.${TBL}"; return 0; }
-            [ -z "$BQMAP" ] && { echo "[WATCHER] ${DB}.${SCH}.${TBL} has no BQ mapping; skipping seed"; return 0; }
-
-            echo "[WATCHER] requesting BQ export for ${BQMAP} (prefix=${PREFIX})"
-            mkdir -p /state/requests
-            printf '%s|%s|%s|%s\n' "${PREFIX}" "${BQMAP}" "CSV" "${HDR:-true}" > "/state/requests/${DB}.${SCH}.${TBL}.bq"
-
-            i=0
-            while [ ! -f "${READY}" ]; do
-              i=$((i+1)); [ $i -gt 360 ] && echo "[WATCHER] timeout waiting for ${READY}" >&2 && return 1
-              # If exporter indicated table is missing in BQ, trigger Debezium snapshot now
-              if [ -f "${INDIR}/NOT_FOUND" ]; then
-                echo "[WATCHER] ${BQMAP} not found in BigQuery; triggering Debezium snapshot to (re)create and load"
-                ensure_signal_table "$DB"
-                signal_snapshot_table "$DB" "$SCH" "$TBL"
-                date -Is > "$SEED_FLAG"
-                return 0
-              fi
-              sleep 2
-            done
-
-            # If CSVs arrived (READY) and NOT_FOUND isn't present, load them into YSQL
-            get_columns() {
-              /home/yugabyte/bin/ysqlsh "${PGURL}" -q -A -t -c "
-                SELECT string_agg(quote_ident(column_name), ',' ORDER BY ordinal_position)
-                FROM information_schema.columns
-                WHERE table_schema='${SCH}' AND table_name='${TBL}';
-              " | tr -d '\n'
-            }
-            local COLS; COLS="$(get_columns)"
-            echo "[WATCHER] COPY ${SCH}.${TBL} (${COLS}) from ${INDIR}/*.csv"
-            cat ${INDIR}/*.csv \
-              | /home/yugabyte/bin/ysqlsh "${PGURL}" -v ON_ERROR_STOP=1 -q \
-                  -c "COPY ${SCH}.${TBL} (${COLS}) FROM STDIN WITH (FORMAT csv, HEADER ${HDR:-true});"
-
-            date -Is > "$SEED_FLAG"
-          }
-
-          ensure_signal_table() {
-            local DB="$1"
-            local URL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${DB}?sslmode=disable"
-            /home/yugabyte/bin/ysqlsh "$URL" -Atc "CREATE TABLE IF NOT EXISTS public.debezium_signal (id varchar(64) PRIMARY KEY, type varchar(32) NOT NULL, data varchar(2048));" >/dev/null 2>&1 || true
-          }
-
-          signal_snapshot_table() {
-            local DB="$1" SCHEMA="$2" TBL="$3"
-            local URL="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${DB}?sslmode=disable"
-            local ID="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || date +%s%N)"
-            local DATA="{\"data-collections\": [\"${SCHEMA}.${TBL}\"]}"
-            /home/yugabyte/bin/ysqlsh "$URL" -Atc "INSERT INTO public.debezium_signal(id,type,data) VALUES ('${ID}','execute-snapshot','${DATA}');" >/dev/null 2>&1 || true
-            echo "signaled snapshot for ${DB}.${SCHEMA}.${TBL}"
-          }
-
-          extract32() { sed -n 's/.*\([0-9a-fA-F]\{32\}\).*/\1/p' | tr 'A-F' 'a-f' | head -n1; }
-
-          get_or_create_stream_id() {
-            local DB="$1"
-            local MASTERS="${YB_MASTER_ADDRESSES:-}"
-            [ -z "$MASTERS" ] && { echo "ERROR: YB_MASTER_ADDRESSES is required" >&2; return 1; }
-
-            local url="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${DB}?sslmode=disable"
-            local sid=""
-
-            # A) existing CDC-style slot
-            local slots
-            slots="$(/home/yugabyte/bin/ysqlsh "$url" -Atc "select slot_name from pg_replication_slots where database='${DB}'" 2>/dev/null || true)"
-            sid="$(printf '%s\n' "$slots" | grep -E '^[0-9a-fA-F]{32}$' | head -n1 | tr 'A-F' 'a-f' || true)"
-            [ -n "$sid" ] && { printf '%s' "$sid"; return 0; }
-
-            # B) ask masters (per-db then global)
-            local out
-            out="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" --include_db_streams=true list_change_data_streams ysql.${DB} 2>/dev/null || true)"
-            sid="$(printf '%s\n' "$out" | extract32)"
-            if [ -z "$sid" ]; then
-              out="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" --include_db_streams=true list_change_data_streams ysql 2>/dev/null || true)"
-              sid="$(printf '%s\n' "$out" \
-                    | awk -v db="$DB" 'BEGIN{RS="";FS="\n"} $0 ~ ("namespace_name:[[:space:]]*" db) {for(i=1;i<=NF;i++) if (tolower($i) ~ /(db_stream_id|stream[ _]?id)/) print $i}' \
-                    | extract32)"
-            fi
-            [ -n "$sid" ] && { printf '%s' "$sid"; return 0; }
-
-            # C) create
-            out="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" create_change_data_stream ysql.${DB} 2>&1 || true)"
-            sid="$(printf '%s\n' "$out" | extract32)"
-            [ -n "$sid" ] && { printf '%s' "$sid"; return 0; }
-
-            # D) fallback (optional legacy slot cleanup)
-            if echo "$out" | grep -qi 'replication slot'; then
-              if [ "${DROP_LEGACY_SLOTS:-false}" = "true" ]; then
-                local allslots
-                allslots="$(/home/yugabyte/bin/ysqlsh "$url" -Atc "select slot_name from pg_replication_slots" 2>/dev/null || true)"
-                printf '%s\n' "$allslots" | grep -Ev '^[0-9a-fA-F]{32}$' | while read -r s; do
-                  [ -z "$s" ] && continue
-                  /home/yugabyte/bin/ysqlsh "$url" -Atc "select case when database='${DB}' then pg_drop_replication_slot('${s}') end from pg_replication_slots where slot_name='${s}';" >/dev/null 2>&1 || true
-                done
-                out="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" create_change_data_stream ysql.${DB} 2>&1 || true)"
-                sid="$(printf '%s\n' "$out" | extract32)"
-                [ -n "$sid" ] && { printf '%s' "$sid"; return 0; }
-              fi
-            fi
-
-            echo "ERROR: could not obtain CDC stream id for DB=${DB}"; return 1
-          }
-
-          SERVER_PREFIX="${SERVER_PREFIX:-yb}"
-          SCAN_INTERVAL="${SCAN_INTERVAL:-30}"
-
-          while :; do
-            mapfile -t DBS < <(list_dbs)
-            echo "[WATCHER] DBs: ${DBS[*]}"
-            printf '%s\n' "${DBS[@]}" > /state/_dbs.current || true
-
-            for DB in "${DBS[@]}"; do
-              PLAN="$(get_plan_for_db "$DB")"
-              PLAN_LINES="$(printf '%s\n' "$PLAN" | grep -c '|' || true)"
-              echo "[WATCHER] ${DB} plan lines: ${PLAN_LINES}"
-              SIG="$(printf '%s' "$PLAN" | sha256sum | awk '{print $1}')"
-              LAST="/state/${DB}.plan.sig"
-
-              # Determine if connectors exist
-              SRC_STATUS_CODE=$(curl -sS -o /tmp/src_${DB}.json -w '%{http_code}' "${CONNECT_URL}/connectors/yb-source-${DB}/status" || true)
-              SINK_STATUS_CODE=$(curl -sS -o /tmp/sink_${DB}.json -w '%{http_code}' "${CONNECT_URL}/connectors/bq-sink-${DB}/status" || true)
-              CONNECTORS_MISSING=false
-              [ "$SRC_STATUS_CODE" != "200" ] && CONNECTORS_MISSING=true
-              [ "$SINK_STATUS_CODE" != "200" ] && CONNECTORS_MISSING=true
-
-              PLAN_CHANGED=false
-              if [ ! -f "$LAST" ] || [ "$SIG" != "$(cat "$LAST" 2>/dev/null || echo)" ]; then
-                PLAN_CHANGED=true
-              fi
-
-              PLAN_NONEMPTY=false
-              [ "${PLAN_LINES}" -gt 0 ] && PLAN_NONEMPTY=true
-
-              SHOULD_PROCESS=false
-              # Process if plan changed OR (plan non-empty AND connectors are missing)
-              if $PLAN_CHANGED || ( $PLAN_NONEMPTY && $CONNECTORS_MISSING ); then
-                SHOULD_PROCESS=true
-              fi
-
-              if ! $SHOULD_PROCESS; then
-                # If plan is empty: ensure any stray connectors get cleaned up
-                if ! $PLAN_NONEMPTY; then
-                  echo "DB ${DB}: no enabled tables; removing connectors if present."
-                  api_delete "${CONNECT_URL}/connectors/bq-sink-${DB}" || true
-                  api_delete "${CONNECT_URL}/connectors/yb-source-${DB}" || true
-                  rm -f "/state/${DB}.tables" "/state/${DB}.plan.tsv" "/state/${DB}.plan.sig" || true
-                fi
-                continue
-              fi
-
-              # --- PROCESS (plan change or missing connectors) ---
-              printf '%s\n' "$PLAN" > "/state/${DB}.plan.tsv"
-              echo "--- /state/${DB}.plan.tsv ---"; cat "/state/${DB}.plan.tsv" || true
-
-              TABLES=""; TOPICS=""; T2MAP=""; DSETS=""; SEEN_DATASETS=""
-              PREV_TGT_FILE="/state/${DB}.targets"
-              TMP_TGT_FILE="$(mktemp /state/${DB}.targets.new.XXXXXX)"
-
-              while IFS='|' read -r SCH TBL BQMAP PREFIX FMT HDR COLS ENA; do
-                [ -z "$SCH" ] && continue
-                [ "$ENA" != "t" ] && continue
-                FQ="${SCH}.${TBL}"
-                SERVER="${SERVER_PREFIX}_${DB}"
-                TOPIC="${SERVER}.${FQ}"
-                TABLES="${TABLES}${FQ},"
-                TOPICS="${TOPICS}${TOPIC},"
-
-                if [ -n "$BQMAP" ] && echo "$BQMAP" | grep -q '\.'; then
-                  DS="${BQMAP%%.*}"; TABLE_ONLY="${BQMAP##*.}"
-                  T2MAP="${T2MAP}${TOPIC}:${TABLE_ONLY},"
-                  DSETS="${DSETS}${TOPIC}:${DS},"
-                  printf '%s|%s|%s\n' "${TOPIC}" "${DS}" "${TABLE_ONLY}" >> "$TMP_TGT_FILE"
-                  if ! printf '%s\n' "$SEEN_DATASETS" | grep -qx "$DS"; then
-                    printf '%s\n' "$DS" > "/state/requests/ensure.${DB}.${DS}.dataset"
-                    SEEN_DATASETS="$(printf '%s\n%s\n' "$SEEN_DATASETS" "$DS" | awk 'NF' | sort -u)"
-                  fi
-                else
-                  T2MAP="${T2MAP}${TOPIC}:${TBL},"
-                  printf '%s|%s|%s\n' "${TOPIC}" "${BQ_DEFAULT_DATASET}" "${TBL}" >> "$TMP_TGT_FILE"
-                fi
-
-                seed_table_if_needed "$DB" "$SCH" "$TBL" "$PREFIX" "$BQMAP" "$HDR"
-              done < "/state/${DB}.plan.tsv"
-
-              TABLES="${TABLES%,}"; TOPICS="${TOPICS%,}"; T2MAP="${T2MAP%,}"; DSETS="${DSETS%,}"
-
-              # detect removed targets and schedule BQ table drops
-              mv -f "$TMP_TGT_FILE" "$TMP_TGT_FILE.done"
-              CUR_TGT_FILE="$TMP_TGT_FILE.done"
-              if [ -f "$PREV_TGT_FILE" ]; then
-                REMOVED_TOPICS="$(comm -23 <(cut -d'|' -f1 "$PREV_TGT_FILE" | sort -u) <(cut -d'|' -f1 "$CUR_TGT_FILE" | sort -u))"
-                if [ -n "$REMOVED_TOPICS" ]; then
-                  while IFS= read -r RT; do
-                    [ -z "$RT" ] && continue
-                    RLINE="$(grep -F "^${RT}|" "$PREV_TGT_FILE" | head -n1 || true)"
-                    DS="$(printf '%s' "$RLINE" | cut -d'|' -f2)"
-                    TN="$(printf '%s' "$RLINE" | cut -d'|' -f3)"
-                    if [ -n "$DS" ] && [ -n "$TN" ]; then
-                      echo "[WATCHER] annotation removed for topic ${RT}; scheduling BigQuery drop ${DS}.${TN}"
-                      printf '%s|%s\n' "$DS" "$TN" > "/state/requests/delete.${DB}.${DS}.${TN}.bqdel"
-                    fi
-                  done < <(printf '%s\n' "$REMOVED_TOPICS")
-                fi
-              fi
-              mv -f "$CUR_TGT_FILE" "$PREV_TGT_FILE"
-
-              if [ -z "$TABLES" ]; then
-                echo "DB ${DB}: no enabled tables; removing connectors if present."
-                api_delete "${CONNECT_URL}/connectors/bq-sink-${DB}" || true
-                api_delete "${CONNECT_URL}/connectors/yb-source-${DB}" || true
-                rm -f "/state/${DB}.tables" "/state/${DB}.plan.tsv" "/state/${DB}.plan.sig" || true
-                # Do not write SIG on empty plan; we want future reprocessing if plan later becomes non-empty.
-                continue
-              fi
-
-              ensure_signal_table "$DB"
-              STREAM_ID="$(get_or_create_stream_id "$DB")" || { echo "ERROR: no CDC stream id; skipping DB ${DB}"; continue; }
-              echo "[WATCHER] DB=${DB} STREAM_ID=${STREAM_ID} (len=${#STREAM_ID})"
-
-              # ----- SOURCE CONNECTOR
-              SRC_PUT="$(mktmp)"
-              {
-                echo '{'
-                echo '  "connector.class":"io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector",'
-                echo '  "tasks.max":"1",'
-                echo "  \"database.hostname\":\"$(esc "$PGHOST")\","
-                echo "  \"database.port\":\"$(esc "$PGPORT")\","
-                echo "  \"database.user\":\"$(esc "$PGUSER")\","
-                echo "  \"database.password\":\"$(esc "$PGPASSWORD")\","
-                echo "  \"database.dbname\":\"$(esc "$DB")\","
-                echo "  \"database.server.name\":\"$(esc "${SERVER_PREFIX}_${DB}")\","
-                echo "  \"database.stream.id\":\"$(esc "$STREAM_ID")\","
-                echo "  \"database.streamid\":\"$(esc "$STREAM_ID")\","
-                echo "  \"yugabyte.stream.id\":\"$(esc "$STREAM_ID")\","
-                if [ -n "${YB_MASTER_ADDRESSES:-}" ]; then
-                  echo "  \"database.master.addresses\":\"$(esc "$YB_MASTER_ADDRESSES")\","
-                  echo "  \"yb.master.addresses\":\"$(esc "$YB_MASTER_ADDRESSES")\","
-                  echo "  \"yugabyte.master.addresses\":\"$(esc "$YB_MASTER_ADDRESSES")\","
-                fi
-                echo "  \"table.include.list\":\"$(esc "$TABLES")\","
-                echo '  "snapshot.mode":"initial",'
-                echo '  "incremental.snapshot.enabled":"true",'
-                echo '  "signal.data.collection":"public.debezium_signal",'
-                echo '  "transforms":"unwrap",'
-                echo '  "transforms.unwrap.type":"io.debezium.connector.yugabytedb.transforms.YBExtractNewRecordState",'
-                echo '  "transforms.unwrap.delete.handling.mode":"none",'
-                echo '  "topic.creation.default.replication.factor":"1",'
-                echo '  "topic.creation.default.partitions":"1",'
-                echo '  "topic.creation.default.cleanup.policy":"delete"'
-                echo '}'
-              } > "$SRC_PUT"
-              SRC_POST="$(mktmp)"; { echo '{ "name":"yb-source-'"${DB}"'", "config": '; cat "$SRC_PUT"; echo ' }'; } > "$SRC_POST"
-
-              api_put  "${CONNECT_URL}/connectors/yb-source-${DB}/config" "$SRC_PUT" || \
-              api_post "${CONNECT_URL}/connectors"                      "$SRC_POST"
-
-              for i in $(seq 1 10); do
-                sleep 2
-                STATUS_CODE=$(curl -sS -o /tmp/s.json -w '%{http_code}' "${CONNECT_URL}/connectors/yb-source-${DB}/status" || true)
-                [ "$STATUS_CODE" = "200" ] && break
-              done
-              echo "yb-source-${DB} status ($STATUS_CODE):"; tail -c 2000 /tmp/s.json 2>/dev/null || true
-
-              # ----- BigQuery SINK CONNECTOR
-              SINK_PUT="$(mktmp)"
-              {
-                echo '{'
-                echo '  "connector.class":"com.wepay.kafka.connect.bigquery.BigQuerySinkConnector",'
-                echo '  "tasks.max":"1",'
-                echo "  \"topics\":\"$(esc "$TOPICS")\","
-                echo "  \"topic2TableMap\":\"$(esc "$T2MAP")\","
-                if [ -n "$DSETS" ]; then
-                  echo "  \"datasets\":\"$(esc "$DSETS")\","
-                fi
-                echo "  \"project\":\"$(esc "$BQ_PROJECT")\","
-                echo "  \"defaultDataset\":\"$(esc "$BQ_DEFAULT_DATASET")\","
-                echo '  "sanitizeTopics":"false",'
-                echo '  "autoCreateTables":"true",'
-                echo '  "autoUpdateSchemas":"false",'
-                echo '  "allowNewBigQueryFields":"false",'
-                echo '  "upsertEnabled":"true",'
-                echo '  "deleteEnabled":"true",'
-                echo '  "primaryKeyMode":"record_value",'
-                echo '  "primaryKeyFields":"id",'
-                echo '  "errors.tolerance":"all",'
-                echo '  "errors.log.enable":"true",'
-                echo '  "errors.deadletterqueue.topic.name":"bq-dlq",'
-                echo '  "errors.deadletterqueue.context.headers.enable":"true",'
-                echo '  "errors.deadletterqueue.topic.replication.factor":"1",'
-                echo '  "errors.deadletterqueue.topic.partitions":"1",'
-                echo '  "enableRetries":"true",'
-                echo '  "bigQueryRetry":"6",'
-                echo '  "bigQueryRetryWait":"2000",'
-                echo '  "keySource":"FILE",'
-                echo '  "keyfile": "/vault/secrets/gcp-key.json",'
-                echo '  "value.converter":"org.apache.kafka.connect.json.JsonConverter",'
-                echo '  "value.converter.schemas.enable":"true",'
-                echo '  "key.converter":"org.apache.kafka.connect.json.JsonConverter",'
-                echo '  "key.converter.schemas.enable":"true",'
-                echo '  "consumer.override.auto.offset.reset":"earliest"'
-                echo '}'
-              } > "$SINK_PUT"
-              SINK_POST="$(mktmp)"; { echo '{ "name":"bq-sink-'"${DB}"'", "config": '; cat "$SINK_PUT"; echo ' }'; } > "$SINK_POST"
-
-              api_put  "${CONNECT_URL}/connectors/bq-sink-${DB}/config" "$SINK_PUT" || \
-              api_post "${CONNECT_URL}/connectors"                      "$SINK_POST"
-
-              for i in $(seq 1 10); do
-                sleep 2
-                STATUS_CODE=$(curl -sS -o /tmp/s2.json -w '%{http_code}' "${CONNECT_URL}/connectors/bq-sink-${DB}/status" || true)
-                [ "$STATUS_CODE" = "200" ] && break
-              done
-              echo "bq-sink-${DB} status ($STATUS_CODE):"; tail -c 2000 /tmp/s2.json 2>/dev/null || true
-
-              # one-time per-table snapshot signal (idempotent)
-              printf '%s' "$TABLES" | tr ',' '\n' | while read -r FQ; do
-                [ -z "$FQ" ] && continue
-                ST="/state/${DB}.${FQ}.snap"
-                if [ ! -f "$ST" ]; then
-                  signal_snapshot_table "$DB" "${FQ%%.*}" "${FQ#*.}"
-                  date -Is > "$ST"
-                fi
-              done
-
-              printf '%s' "$TABLES" > "/state/${DB}.tables"
-              # ✅ Write SIG only after processing so we don't skip future needed work
-              printf '%s' "$SIG" > "$LAST"
-            done
-
-            if [ -f /state/_dbs.seen ]; then
-              comm -13 <(sort /state/_dbs.current) <(sort /state/_dbs.seen) | while read -r GONE; do
-                [ -z "$GONE" ] && continue
-                echo "DB ${GONE} disappeared; removing its connectors."
-                api_delete "${CONNECT_URL}/connectors/bq-sink-${GONE}" || true
-                api_delete "${CONNECT_URL}/connectors/yb-source-${GONE}" || true
-                rm -f "/state/${GONE}.tables" "/state/${GONE}.plan.tsv" "/state/${GONE}.plan.sig" || true
-              done
-            fi
-            mv /state/_dbs.current /state/_dbs.seen 2>/dev/null || true
-
-            sleep "${SCAN_INTERVAL}"
-          done
+          set -eu
+          for f in /vault/secrets/*.env; do [ -s "$f" ] && set -a && . "$f" && set +a; done
+          echo "Starting table-sync with:"
+          echo "  DATABASE_URL=$(printf '%s' "${DATABASE_URL}" | sed 's/:\/\/[^:]*:[^@]*@/:\/\/****:****@/')"
+          echo "  BIGQUERY_PROJECT_ID=${BIGQUERY_PROJECT_ID:-<unset>}"
+          echo "  TEMP_STORAGE_BUCKET=${TEMP_STORAGE_BUCKET:-<unset>}"
+          echo "  KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS}"
+          echo "  DEBEZIUM_CONNECTOR_URL=${DEBEZIUM_CONNECTOR_URL}"
+          exec python /app/app.py 2>&1
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 20
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 60
+          periodSeconds: 20
         resources:
           requests: { cpu: "200m", memory: "256Mi" }
           limits: { cpu: "1000m", memory: "1Gi" }
-        readinessProbe:
-          exec: { command: ["/bin/sh","-lc","test -s /vault/secrets/yb.env -a -s /vault/secrets/pgpass.env || true"] }
-          initialDelaySeconds: 10
-          periodSeconds: 10
