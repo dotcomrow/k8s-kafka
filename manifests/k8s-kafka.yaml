@@ -470,12 +470,10 @@ spec:
             sleep 2
           done
           get_columns() {
-            local sch="$1" tbl="$2"
             /home/yugabyte/bin/ysqlsh "${PGURL}" -q -A -t -c "
-              SELECT string_agg(quote_ident(column_name), ',')
+              SELECT string_agg(quote_ident(column_name), ',' ORDER BY ordinal_position)
               FROM information_schema.columns
-              WHERE table_schema='${sch}' AND table_name='${tbl}'
-              ORDER BY ordinal_position;
+              WHERE table_schema='${SCH}' AND table_name='${TBL}';
             " | tr -d '\n'
           }
           while IFS='|' read -r SCH TBL BQMAP PREFIX FMT HDR COLS; do
@@ -1415,10 +1413,10 @@ spec:
             # If CSVs arrived (READY) and NOT_FOUND isn't present, load them into YSQL
             get_columns() {
               /home/yugabyte/bin/ysqlsh "${PGURL}" -q -A -t -c "
-                SELECT string_agg(quote_ident(column_name), ',')
+                SELECT string_agg(quote_ident(column_name), ',' ORDER BY ordinal_position)
                 FROM information_schema.columns
-                WHERE table_schema='${SCH}' AND table_name='${TBL}'
-                ORDER BY ordinal_position;" | tr -d '\n'
+                WHERE table_schema='${SCH}' AND table_name='${TBL}';
+              " | tr -d '\n'
             }
             local COLS; COLS="$(get_columns)"
             echo "[WATCHER] COPY ${SCH}.${TBL} (${COLS}) from ${INDIR}/*.csv"
