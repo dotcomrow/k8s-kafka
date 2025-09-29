@@ -1311,38 +1311,33 @@ spec:
           api_post()  { local u="$1" f="$2" rf; rf="$(mkresp)"; code=$(curl --connect-timeout 5 --max-time 120 -sS -D /tmp/h.txt -o "$rf" -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @"$f" -X POST "$u" || true); echo "POST $u -> $code"; tail -c 2000 "$rf" 2>/dev/null || true; }
           api_delete(){ local u="$1" rf; rf="$(mkresp)"; code=$(curl --connect-timeout 5 --max-time 120 -sS -D /tmp/h.txt -o "$rf" -w '%{http_code}' -X DELETE "$u" || true); echo "DELETE $u -> $code"; tail -c 2000 "$rf" 2>/dev/null || true; }
 
-          # --- Secrets & base env ------------------------------------------------------
+          # Load secrets
           for f in /vault/secrets/yb.env /vault/secrets/pgpass.env /vault/secrets/bq.env /vault/secrets/gcp-key.json; do
             i=0; while [ ! -s "$f" ]; do i=$((i+1)); [ $i -gt 120 ] && echo "vault secrets missing: $f" >&2 && exit 1; sleep 2; done
             . "$f" 2>/dev/null || true
           done
+
           export PGPASSWORD
           PGHOST="${PGHOST:-yb-tserver-service.yugabyte.svc.cluster.local}"
           PGPORT="${PGPORT:-5433}"
           PGUSER="${PGUSER:-vaultadmin}"
           echo "[WATCHER] PGHOST=$PGHOST PGPORT=$PGPORT PGUSER=$PGUSER PGDATABASE=${PGDATABASE:-<ignored>} YB_MASTER_ADDRESSES=${YB_MASTER_ADDRESSES:-<unset>}"
 
-          # --- Wait for Connect REST & required plugins --------------------------------
-          until curl -fsS "${CONNECT_URL}/connectors" >/dev/null 2>&1; do
-            echo "[WATCHER] waiting for connect REST…"; sleep 3
-          done
-
+          # Wait for Kafka Connect REST
+          until curl -fsS "${CONNECT_URL}/connectors" >/dev/null 2>&1; do echo "[WATCHER] waiting for connect REST…"; sleep 3; done
           need_yb='io.debezium.connector.yugabytedb.YugabyteDBgRPCConnector'
           need_bq='com.wepay.kafka.connect.bigquery.BigQuerySinkConnector'
 
           echo "[WATCHER] waiting for Connect plugins…"
-          ok_plugins=false
           for i in $(seq 1 120); do
             pjson="$(curl -fsS "${CONNECT_URL}/connector-plugins" || true)"
             if echo "$pjson" | grep -q "$need_yb" && echo "$pjson" | grep -q "$need_bq"; then
-              ok_plugins=true; break
+              echo "[WATCHER] required plugins visible"; break
             fi
             sleep 2
           done
           echo "== Connector plugins =="; curl -fsS "${CONNECT_URL}/connector-plugins" | sed 's/.*/  &/'; echo "======================="
-          $ok_plugins || { echo "[WATCHER] Required plugins not visible; exiting so K8s restarts me."; exit 1; }
 
-          # --- Helpers -----------------------------------------------------------------
           list_dbs() {
             for DB in yugabyte postgres "${PGDATABASE:-}"; do
               [ -z "$DB" ] && continue
@@ -1406,18 +1401,18 @@ spec:
             i=0
             while [ ! -f "${READY}" ]; do
               i=$((i+1)); [ $i -gt 360 ] && echo "[WATCHER] timeout waiting for ${READY}" >&2 && return 1
+              # If exporter indicated table is missing in BQ, trigger Debezium snapshot now
+              if [ -f "${INDIR}/NOT_FOUND" ]; then
+                echo "[WATCHER] ${BQMAP} not found in BigQuery; triggering Debezium snapshot to (re)create and load"
+                ensure_signal_table "$DB"
+                signal_snapshot_table "$DB" "$SCH" "$TBL"
+                date -Is > "$SEED_FLAG"
+                return 0
+              fi
               sleep 2
             done
 
-            # If BigQuery table is missing, trigger Debezium snapshot instead of CSV import
-            if [ -f "${INDIR}/NOT_FOUND" ]; then
-              echo "[WATCHER] ${BQMAP} not found in BigQuery; triggering Debezium snapshot"
-              ensure_signal_table "$DB"
-              signal_snapshot_table "$DB" "$SCH" "$TBL"
-              date -Is > "$SEED_FLAG"
-              return 0
-            fi
-
+            # If CSVs arrived (READY) and NOT_FOUND isn't present, load them into YSQL
             get_columns() {
               /home/yugabyte/bin/ysqlsh "${PGURL}" -q -A -t -c "
                 SELECT string_agg(quote_ident(column_name), ',')
@@ -1425,7 +1420,6 @@ spec:
                 WHERE table_schema='${SCH}' AND table_name='${TBL}'
                 ORDER BY ordinal_position;" | tr -d '\n'
             }
-
             local COLS; COLS="$(get_columns)"
             echo "[WATCHER] COPY ${SCH}.${TBL} (${COLS}) from ${INDIR}/*.csv"
             cat ${INDIR}/*.csv \
@@ -1459,14 +1453,15 @@ spec:
 
             local url="postgresql://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${DB}?sslmode=disable"
             local sid=""
-            local slots out
 
-            # A) Existing 32-hex slot (CDC style)
+            # A) existing CDC-style slot
+            local slots
             slots="$(/home/yugabyte/bin/ysqlsh "$url" -Atc "select slot_name from pg_replication_slots where database='${DB}'" 2>/dev/null || true)"
             sid="$(printf '%s\n' "$slots" | grep -E '^[0-9a-fA-F]{32}$' | head -n1 | tr 'A-F' 'a-f' || true)"
             [ -n "$sid" ] && { printf '%s' "$sid"; return 0; }
 
-            # B) Ask masters (per-db then global)
+            # B) ask masters (per-db then global)
+            local out
             out="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" --include_db_streams=true list_change_data_streams ysql.${DB} 2>/dev/null || true)"
             sid="$(printf '%s\n' "$out" | extract32)"
             if [ -z "$sid" ]; then
@@ -1477,12 +1472,12 @@ spec:
             fi
             [ -n "$sid" ] && { printf '%s' "$sid"; return 0; }
 
-            # C) Try to create
+            # C) create
             out="$(/home/yugabyte/bin/yb-admin --master_addresses "$MASTERS" create_change_data_stream ysql.${DB} 2>&1 || true)"
             sid="$(printf '%s\n' "$out" | extract32)"
             [ -n "$sid" ] && { printf '%s' "$sid"; return 0; }
 
-            # D) Best-effort cleanup of non-CDC slots and retry once
+            # D) fallback (optional legacy slot cleanup)
             if echo "$out" | grep -qi 'replication slot'; then
               if [ "${DROP_LEGACY_SLOTS:-false}" = "true" ]; then
                 local allslots
@@ -1503,7 +1498,6 @@ spec:
           SERVER_PREFIX="${SERVER_PREFIX:-yb}"
           SCAN_INTERVAL="${SCAN_INTERVAL:-30}"
 
-          # --- Main loop ---------------------------------------------------------------
           while :; do
             mapfile -t DBS < <(list_dbs)
             echo "[WATCHER] DBs: ${DBS[*]}"
@@ -1550,10 +1544,9 @@ spec:
                   seed_table_if_needed "$DB" "$SCH" "$TBL" "$PREFIX" "$BQMAP" "$HDR"
                 done < "/state/${DB}.plan.tsv"
 
-                TABLES="${TABLES%,}"; TOPICS="${TOPICS%,}"; T2MAP="${T2MAP%,}"
-                DSETS="${DSETS%,}"
+                TABLES="${TABLES%,}"; TOPICS="${TOPICS%,}"; T2MAP="${T2MAP%,}"; DSETS="${DSETS%,}"
 
-                # detect removed targets → schedule BQ drops
+                # detect removed targets and schedule BQ table drops
                 mv -f "$TMP_TGT_FILE" "$TMP_TGT_FILE.done"
                 CUR_TGT_FILE="$TMP_TGT_FILE.done"
                 if [ -f "$PREV_TGT_FILE" ]; then
@@ -1585,7 +1578,7 @@ spec:
                 STREAM_ID="$(get_or_create_stream_id "$DB")" || { echo "ERROR: no CDC stream id; skipping DB ${DB}"; continue; }
                 echo "[WATCHER] DB=${DB} STREAM_ID=${STREAM_ID} (len=${#STREAM_ID})"
 
-                # ----- SOURCE CONNECTOR (unwrap + Extract key=id) -----------------------
+                # ----- SOURCE CONNECTOR
                 SRC_PUT="$(mktmp)"
                 {
                   echo '{'
@@ -1609,12 +1602,9 @@ spec:
                   echo '  "snapshot.mode":"initial",'
                   echo '  "incremental.snapshot.enabled":"true",'
                   echo '  "signal.data.collection":"public.debezium_signal",'
-                  echo '  "transforms":"unwrap,extractKey",'
+                  echo '  "transforms":"unwrap",'
                   echo '  "transforms.unwrap.type":"io.debezium.connector.yugabytedb.transforms.YBExtractNewRecordState",'
                   echo '  "transforms.unwrap.delete.handling.mode":"none",'
-                  echo '  "transforms.unwrap.drop.tombstones":"false",'
-                  echo '  "transforms.extractKey.type":"org.apache.kafka.connect.transforms.ExtractField$Key",'
-                  echo '  "transforms.extractKey.field":"id",'
                   echo '  "topic.creation.default.replication.factor":"1",'
                   echo '  "topic.creation.default.partitions":"1",'
                   echo '  "topic.creation.default.cleanup.policy":"delete"'
@@ -1632,7 +1622,7 @@ spec:
                 done
                 echo "yb-source-${DB} status ($STATUS_CODE):"; tail -c 2000 /tmp/s.json 2>/dev/null || true
 
-                # ----- BigQuery SINK CONNECTOR (upsert/delete with key=id) -------------
+                # ----- BigQuery SINK CONNECTOR
                 SINK_PUT="$(mktmp)"
                 {
                   echo '{'
@@ -1647,18 +1637,18 @@ spec:
                   echo "  \"defaultDataset\":\"$(esc "$BQ_DEFAULT_DATASET")\","
                   echo '  "sanitizeTopics":"false",'
 
-                  # Create table once from first records; do not evolve afterward.
+                  # allow table to be created when missing; but do NOT alter schemas after creation
                   echo '  "autoCreateTables":"true",'
                   echo '  "autoUpdateSchemas":"false",'
                   echo '  "allowNewBigQueryFields":"false",'
 
-                  # Upsert/Delete config: use Kafka key (id). BQ column must be named 'id'.
+                  # upsert & delete using value.id (no extra columns generated)
                   echo '  "upsertEnabled":"true",'
                   echo '  "deleteEnabled":"true",'
-                  echo '  "primaryKeyMode":"record_key",'
-                  echo '  "kafkaKeyFieldName":"id",'
+                  echo '  "primaryKeyMode":"record_value",'
+                  echo '  "primaryKeyFields":"id",'
 
-                  # Error handling / DLQ
+                  # error handling / DLQ
                   echo '  "errors.tolerance":"all",'
                   echo '  "errors.log.enable":"true",'
                   echo '  "errors.deadletterqueue.topic.name":"bq-dlq",'
@@ -1666,13 +1656,14 @@ spec:
                   echo '  "errors.deadletterqueue.topic.replication.factor":"1",'
                   echo '  "errors.deadletterqueue.topic.partitions":"1",'
 
+                  # auth & retry
                   echo '  "enableRetries":"true",'
                   echo '  "bigQueryRetry":"6",'
                   echo '  "bigQueryRetryWait":"2000",'
                   echo '  "keySource":"FILE",'
                   echo '  "keyfile": "/vault/secrets/gcp-key.json",'
 
-                  # Converters
+                  # converters
                   echo '  "value.converter":"org.apache.kafka.connect.json.JsonConverter",'
                   echo '  "value.converter.schemas.enable":"true",'
                   echo '  "key.converter":"org.apache.kafka.connect.json.JsonConverter",'
@@ -1693,7 +1684,7 @@ spec:
                 done
                 echo "bq-sink-${DB} status ($STATUS_CODE):"; tail -c 2000 /tmp/s2.json 2>/dev/null || true
 
-                # one-time per-table snapshot signal
+                # one-time per-table snapshot signal (idempotent)
                 printf '%s' "$TABLES" | tr ',' '\n' | while read -r FQ; do
                   [ -z "$FQ" ] && continue
                   ST="/state/${DB}.${FQ}.snap"
