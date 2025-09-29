@@ -710,11 +710,6 @@ spec:
         - name: BATCH_SIZE
           value: "10000"
 
-        # Provide all rendered env files
-        envFrom:
-        - secretRef:
-            name: ""  # (noop: envFrom requires a source; we rely on files below)
-
         # Mount the Vault-rendered env files and key
         volumeMounts:
         - { name: state, mountPath: /state }
