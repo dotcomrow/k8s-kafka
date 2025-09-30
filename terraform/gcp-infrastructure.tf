@@ -207,6 +207,13 @@ resource "google_project_iam_member" "sa_dataset_admin" {
   depends_on = [google_project_service.enable]
 }
 
+resource "google_project_iam_member" "sa_storage_admin" {
+  project    = google_project.this.project_id
+  role       = "roles/storage.admin"
+  member     = "serviceAccount:${google_service_account.pipeline.email}"
+  depends_on = [google_project_service.enable]
+}
+
 resource "google_storage_bucket_iam_member" "sa_bucket_object_creator" {
   bucket = google_storage_bucket.bootstrap.name
   role   = "roles/storage.objectCreator"
