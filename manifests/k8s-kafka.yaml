@@ -283,6 +283,12 @@ spec:
       - name: broker
         image: apache/kafka:3.9.0
         env:
+        - name: KAFKA_ADVERTISED_LISTENERS
+          value: "PLAINTEXT://kafka.kafka.svc.internal.lan:9092"
+        - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+          value: "1@kafka-0.kafka-hs.kafka.svc.internal.lan:9093"
+        - name: KAFKA_INTER_BROKER_LISTENER_NAME
+          value: "PLAINTEXT"
         - { name: CLUSTER_ID, valueFrom: { secretKeyRef: { name: kafka-cluster-id, key: CLUSTER_ID } } }
         - { name: KAFKA_NODE_ID, value: "1" }
         - { name: KAFKA_PROCESS_ROLES, value: "broker,controller" }
@@ -497,6 +503,11 @@ spec:
           value: "env"
         - name: CONNECT_CONFIG_PROVIDERS_ENV_CLASS
           value: "org.apache.kafka.common.config.provider.EnvVarConfigProvider"
+        - name: CONNECT_BOOTSTRAP_SERVERS
+          value: "kafka.kafka.svc.internal.lan:9092"
+        # optional:
+        - name: CONNECT_REST_ADVERTISED_HOST_NAME
+          value: "kafka-connect.kafka.svc.internal.lan"
         - name: YB_MASTER_ADDRESSES
           value: "yb-master-0.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-1.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-2.yb-master-service.yugabyte.svc.cluster.local:7100"
         - { name: CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR, value: "1" }
@@ -708,7 +719,7 @@ spec:
         emptyDir: {}
       containers:
       - name: table-sync
-        image: ghcr.io/dotcomrow/table-sync-image:ts-20250930-182458
+        image: ghcr.io/dotcomrow/table-sync-image:ts-20250930-190004
         imagePullPolicy: IfNotPresent
         env:
         # README vars:
