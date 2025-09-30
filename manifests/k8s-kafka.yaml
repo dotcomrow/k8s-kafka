@@ -491,6 +491,8 @@ spec:
           value: "true"
         - name: CONNECT_INTERNAL_VALUE_CONVERTER_SCHEMAS_ENABLE
           value: "true"
+        - name: KAFKA_LOG4J_OPTS
+          value: "-Dlog4j.configuration=file:/kafka/etc/log4j.properties"
         - { name: CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR, value: "1" }
         - { name: CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR, value: "1" }
         - { name: CONNECT_STATUS_STORAGE_REPLICATION_FACTOR, value: "1" }
@@ -517,9 +519,7 @@ spec:
           limits: { cpu: "1000m", memory: "1.5Gi" }
         volumeMounts:
         - { name: plugins, mountPath: /plugins }
-        - name: log4j
-          mountPath: /etc/kafka/connect-log4j.properties
-          subPath: log4j.properties
+        - { name: log4j,  mountPath: /kafka/etc }
 # ============================================================================
 # Kafka UI + oauth2-proxy (waves 45-46)
 # ============================================================================
