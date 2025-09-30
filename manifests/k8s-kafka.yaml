@@ -708,7 +708,7 @@ spec:
         emptyDir: {}
       containers:
       - name: table-sync
-        image: ghcr.io/dotcomrow/table-sync-image:ts-20250930-165525
+        image: ghcr.io/dotcomrow/table-sync-image:ts-20250930-171835
         imagePullPolicy: IfNotPresent
         env:
         # README vars:
