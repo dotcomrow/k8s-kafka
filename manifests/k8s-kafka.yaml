@@ -718,6 +718,10 @@ spec:
           value: "INFO"
         - name: BATCH_SIZE
           value: "10000"
+        - name: YUGABYTE_MASTER_ADDRESSES
+          value: "yb-master-0.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-1.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-2.yb-master-service.yugabyte.svc.cluster.local:7100"
+        - name: DEBEZIUM_MASTER_ADDRESSES
+          value: "yb-master-0.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-1.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-2.yb-master-service.yugabyte.svc.cluster.local:7100"
 
         # Mount the Vault-rendered env files and key
         volumeMounts:
