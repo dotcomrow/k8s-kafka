@@ -200,10 +200,9 @@ resource "google_project_iam_member" "sa_bq_job_user" {
   depends_on = [google_project_service.enable]
 }
 
-resource "google_bigquery_dataset_iam_member" "sa_dataset_editor" {
+resource "google_bigquery_iam_member" "sa_dataset_admin" {
   project    = google_project.this.project_id
-  dataset_id = google_bigquery_dataset.target.dataset_id
-  role       = "roles/bigquery.dataEditor"
+  role       = "roles/bigquery.admin"
   member     = "serviceAccount:${google_service_account.pipeline.email}"
   depends_on = [google_project_service.enable]
 }
