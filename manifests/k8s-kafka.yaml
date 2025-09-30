@@ -483,6 +483,14 @@ spec:
           value: "_connect-offsets"
         - name: CONNECT_STATUS_STORAGE_TOPIC
           value: "_connect-status"
+        - name: CONNECT_INTERNAL_KEY_CONVERTER
+          value: "org.apache.kafka.connect.json.JsonConverter"
+        - name: CONNECT_INTERNAL_VALUE_CONVERTER
+          value: "org.apache.kafka.connect.json.JsonConverter"
+        - name: CONNECT_INTERNAL_KEY_CONVERTER_SCHEMAS_ENABLE
+          value: "true"
+        - name: CONNECT_INTERNAL_VALUE_CONVERTER_SCHEMAS_ENABLE
+          value: "true"
         - { name: CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR, value: "1" }
         - { name: CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR, value: "1" }
         - { name: CONNECT_STATUS_STORAGE_REPLICATION_FACTOR, value: "1" }
@@ -509,8 +517,9 @@ spec:
           limits: { cpu: "1000m", memory: "1.5Gi" }
         volumeMounts:
         - { name: plugins, mountPath: /plugins }
-        - { name: log4j,  mountPath: /kafka/etc }
-
+        - name: log4j
+          mountPath: /etc/kafka/connect-log4j.properties
+          subPath: log4j.properties
 # ============================================================================
 # Kafka UI + oauth2-proxy (waves 45-46)
 # ============================================================================
@@ -693,7 +702,7 @@ spec:
         emptyDir: {}
       containers:
       - name: table-sync
-        image: ghcr.io/dotcomrow/table-sync-image:ts-20250930-125852
+        image: ghcr.io/dotcomrow/table-sync-image:ts-20250930-131157
         imagePullPolicy: IfNotPresent
         env:
         # README vars:
