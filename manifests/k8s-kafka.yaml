@@ -744,9 +744,9 @@ spec:
         - name: DEBEZIUM_MASTER_ADDRESSES
           value: "yb-master-0.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-1.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-2.yb-master-service.yugabyte.svc.cluster.local:7100"
         - name: CDC_TEST_MODE
-          value: "true"
+          value: "false"
         - name: E2E_TEST_MODE
-          value: "true"
+          value: "false"
         # Mount the Vault-rendered env files and key
         volumeMounts:
         - { name: state, mountPath: /state }
