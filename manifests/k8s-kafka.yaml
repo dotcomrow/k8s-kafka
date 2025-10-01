@@ -719,7 +719,7 @@ spec:
         emptyDir: {}
       containers:
       - name: table-sync
-        image: ghcr.io/dotcomrow/table-sync-image:ts-20251001-011658
+        image: ghcr.io/dotcomrow/table-sync-image:ts-20251001-103822
         imagePullPolicy: Always
         env:
         # README vars:
@@ -744,6 +744,8 @@ spec:
         - name: DEBEZIUM_MASTER_ADDRESSES
           value: "yb-master-0.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-1.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-2.yb-master-service.yugabyte.svc.cluster.local:7100"
         - name: CDC_TEST_MODE
+          value: "true"
+        - name: E2E_TEST_MODE
           value: "true"
         # Mount the Vault-rendered env files and key
         volumeMounts:
