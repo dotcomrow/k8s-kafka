@@ -720,9 +720,13 @@ spec:
       containers:
       - name: table-sync
         image: ghcr.io/dotcomrow/table-sync-image:ts-20250930-231634
-        imagePullPolicy: IfNotPresent
+        imagePullPolicy: Always
         env:
         # README vars:
+        - name: LOG_LEVEL
+          value: "DEBUG"
+        - name: LOG_VERSION_VERBOSE
+          value: "false"  # or "true" for debugging
         - name: GOOGLE_APPLICATION_CREDENTIALS
           value: "/vault/secrets/gcp-key.json"
         - name: KAFKA_BOOTSTRAP_SERVERS
