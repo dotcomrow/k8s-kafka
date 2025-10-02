@@ -719,7 +719,7 @@ spec:
         emptyDir: {}
       containers:
       - name: table-sync
-        image: ghcr.io/dotcomrow/table-sync-image:ts-20251001-140624
+        image: ghcr.io/dotcomrow/table-sync-image:ts-20251002-021131
         imagePullPolicy: Always
         env:
         # README vars:
@@ -735,8 +735,8 @@ spec:
           value: "http://kafka-connect.kafka.svc.internal.lan:8083"
         - name: SCAN_INTERVAL_SECONDS
           value: "30"
-        - name: LOG_LEVEL
-          value: "INFO"
+        - name: CONFIG_PATH
+          value: "/app/config/orchestrator.yaml"
         - name: BATCH_SIZE
           value: "10000"
         - name: YUGABYTE_MASTER_ADDRESSES
@@ -762,7 +762,7 @@ spec:
           echo "  TEMP_STORAGE_BUCKET=${TEMP_STORAGE_BUCKET:-<unset>}"
           echo "  KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS}"
           echo "  DEBEZIUM_CONNECTOR_URL=${DEBEZIUM_CONNECTOR_URL}"
-          exec python /app/app.py 2>&1
+          exec python /app/src/table_sync_orchestrator.py 2>&1
         readinessProbe:
           httpGet:
             path: /health
