@@ -659,6 +659,38 @@ spec:
 # REFACTORED Table Sync Controller (wave 50) — uses your packaged image
 # ============================================================================
 ---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: table-sync-config
+data:
+  orchestrator.yaml: |
+    scan_interval_seconds: 30
+    comprehensive_database_scan: true
+    excluded_databases: "postgres,yugabyte,vaultadmin,system_platform,kafka"
+    max_scan_threads: 0
+    
+    yugabytedb:
+      host: yb-tserver-service.yugabyte.svc.cluster.local
+      port: 5433
+      user: vaultadmin
+      password: <path:secret/data/vaultadmin#value>
+      database: kafka
+    
+    bigquery:
+      project_id: <path:secret/data/kafka/bq/config#project>
+      credentials_path: /vault/secrets/gcp-key.json
+      location: US
+    
+    kafka_connect:
+      url: http://kafka-connect.kafka.svc.internal.lan:8083
+    
+    logging:
+      level: DEBUG
+    
+    processing:
+      batch_size: 10000
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -683,20 +715,6 @@ spec:
         vault.hashicorp.com/agent-pre-populate-only: "true"
         vault.hashicorp.com/exit-on-error: "false"
 
-        # DATABASE_URL (built from pgconfig + vaultadmin password)
-        vault.hashicorp.com/agent-inject-secret-db.env: "secret/data/kafka/pgconfig,secret/data/vaultadmin"
-        vault.hashicorp.com/agent-inject-template-db.env: |
-          {{- $pg := secret "secret/data/kafka/pgconfig" -}}
-          {{- $pw := secret "secret/data/vaultadmin" -}}
-          DATABASE_URL=postgresql://{{ $pg.Data.data.user }}:{{ $pw.Data.data.value }}@{{ $pg.Data.data.host }}:{{ $pg.Data.data.port }}/{{ $pg.Data.data.database }}
-
-        # BIGQUERY_PROJECT_ID from bq/config
-        vault.hashicorp.com/agent-inject-secret-bq.env: "secret/data/kafka/bq/config"
-        vault.hashicorp.com/agent-inject-template-bq.env: |
-          {{- with secret "secret/data/kafka/bq/config" -}}
-          {{ with .Data.data.project }}BIGQUERY_PROJECT_ID={{ . }}{{ end }}
-          {{- end -}}
-
         # TEMP_STORAGE_BUCKET from bootstrap
         vault.hashicorp.com/agent-inject-secret-bootstrap.env: "secret/data/kafka/bq/bootstrap"
         vault.hashicorp.com/agent-inject-template-bootstrap.env: |
@@ -714,43 +732,27 @@ spec:
     spec:
       serviceAccountName: bq-yb-bootstrap
       securityContext: { fsGroup: 1000 }
-      volumes:
-      - name: state
-        emptyDir: {}
       containers:
       - name: table-sync
-        image: ghcr.io/dotcomrow/table-sync-image:ts-20251002-173324
+        image: ghcr.io/dotcomrow/table-sync-image:ts-20251002-182344
         imagePullPolicy: Always
         env:
-        # README vars:
-        - name: LOG_LEVEL
-          value: "DEBUG"
-        - name: LOG_VERSION_VERBOSE
-          value: "false"  # or "true" for debugging
-        - name: GOOGLE_APPLICATION_CREDENTIALS
-          value: "/vault/secrets/gcp-key.json"
-        - name: KAFKA_BOOTSTRAP_SERVERS
-          value: "kafka.kafka.svc.internal.lan:9092"
-        - name: DEBEZIUM_CONNECTOR_URL
-          value: "http://kafka-connect.kafka.svc.internal.lan:8083"
-        - name: SCAN_INTERVAL_SECONDS
-          value: "30"
         - name: CONFIG_PATH
           value: "/app/config/orchestrator.yaml"
-        - name: BATCH_SIZE
-          value: "10000"
-        - name: YUGABYTE_MASTER_ADDRESSES
-          value: "yb-master-0.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-1.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-2.yb-master-service.yugabyte.svc.cluster.local:7100"
-        - name: DEBEZIUM_MASTER_ADDRESSES
-          value: "yb-master-0.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-1.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-2.yb-master-service.yugabyte.svc.cluster.local:7100"
-        - name: CDC_TEST_MODE
-          value: "false"
-        - name: E2E_TEST_MODE
-          value: "false"
-        # Mount the Vault-rendered env files and key
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: "/vault/secrets/gcp-key.json"
         volumeMounts:
-        - { name: state, mountPath: /state }
-        # The app reads env vars; we'll source the files via a tiny wrapper to export them then exec app
+        - name: config
+          mountPath: /app/config
+        - name: gcp-secrets
+          mountPath: /vault/secrets
+      volumes:
+      - name: config
+        configMap:
+          name: table-sync-config
+      - name: gcp-secrets
+        secret:
+          secretName: gcp-key
         command: ["/bin/sh","-lc"]
         args:
         - |
