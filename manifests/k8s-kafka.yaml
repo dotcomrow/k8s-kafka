@@ -668,7 +668,7 @@ data:
   orchestrator.yaml: |
     scan_interval_seconds: 30
     comprehensive_database_scan: true
-    excluded_databases: "postgres,yugabyte,vaultadmin,system_platform,kafka"
+    excluded_databases: "postgres,yugabyte,vaultadmin,system_platform"
     max_scan_threads: 10
     
     yugabytedb:
@@ -677,6 +677,7 @@ data:
       user: vaultadmin
       password: <path:secret/data/vaultadmin#value>
       database: kafka
+      master_addresses: "yb-master-0.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-1.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-2.yb-master-service.yugabyte.svc.cluster.local:7100"
     
     bigquery:
       project_id: <path:secret/data/kafka/bq/config#project>
@@ -688,9 +689,19 @@ data:
     
     logging:
       level: DEBUG
+      format: json
+    
+    health_check:
+      port: 8080
+    
+    metrics:
+      port: 8000
+      enabled: true
     
     processing:
       batch_size: 10000
+      max_retries: 3
+      retry_delay_seconds: 5
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -748,15 +759,16 @@ spec:
         command: ["/bin/sh","-lc"]
         args:
           - |
-              set -eu
-              for f in /vault/secrets/*.env; do [ -s "$f" ] && set -a && . "$f" && set +a; done
-              echo "Starting table-sync with:"
-              echo "  DATABASE_URL=$(printf '%s' "${DATABASE_URL:-<unset>}" | sed 's/:\/\/[^:]*:[^@]*@/:\/\/****:****@/')"
-              echo "  BIGQUERY_PROJECT_ID=${BIGQUERY_PROJECT_ID:-<unset>}"
-              echo "  TEMP_STORAGE_BUCKET=${TEMP_STORAGE_BUCKET:-<unset>}"
-              echo "  KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS:-<unset>}"
-              echo "  DEBEZIUM_CONNECTOR_URL=${DEBEZIUM_CONNECTOR_URL:-<unset>}"
-              exec python /app/src/table_sync_orchestrator.py 2>&1
+            #!/bin/bash
+            set -eu
+
+            # Source any environment files from vault
+            for f in /vault/secrets/*.env; do
+              [ -s "$f" ] && set -a && . "$f" && set +a
+            done
+
+            # Start the application
+            exec python /app/src/table_sync_orchestrator.py 2>&1
         readinessProbe:
           httpGet: { path: /health, port: 8080 }
           initialDelaySeconds: 20
