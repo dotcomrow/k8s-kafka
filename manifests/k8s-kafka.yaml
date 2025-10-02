@@ -668,7 +668,7 @@ data:
   orchestrator.yaml: |
     scan_interval_seconds: 30
     comprehensive_database_scan: true
-    excluded_databases: "postgres,yugabyte,vaultadmin,system_platform"
+    excluded_databases: "postgres,yugabyte,vaultadmin,system_platform,kafka"
     max_scan_threads: 10
     
     yugabytedb:
