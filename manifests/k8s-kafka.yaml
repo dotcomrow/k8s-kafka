@@ -668,7 +668,7 @@ data:
     scan_interval_seconds: 30
     comprehensive_database_scan: true
     excluded_databases: "postgres,yugabyte,vaultadmin,system_platform,kafka"
-    max_scan_threads: 0
+    max_scan_threads: 10
     
     yugabytedb:
       host: yb-tserver-service.yugabyte.svc.cluster.local
