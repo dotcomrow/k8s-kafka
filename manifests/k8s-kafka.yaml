@@ -744,8 +744,6 @@ spec:
         volumeMounts:
         - name: config
           mountPath: /app/config
-        - name: gcp-secrets
-          mountPath: /vault/secrets
       volumes:
       - name: config
         configMap:
