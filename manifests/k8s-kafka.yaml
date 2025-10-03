@@ -768,7 +768,7 @@ spec:
             done
 
             # Start the application
-            exec python /app/src/table_sync_orchestrator.py 2>&1
+            exec python /app/src/table_sync_orchestrator.py /app/config/orchestrator.yaml 2>&1
         readinessProbe:
           httpGet: { path: /health, port: 8080 }
           initialDelaySeconds: 20
