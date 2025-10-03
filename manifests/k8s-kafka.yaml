@@ -686,6 +686,7 @@ data:
     
     kafka_connect:
       url: http://kafka-connect.kafka.svc.internal.lan:8083
+      recreate_failed_connectors: true
     
     logging:
       level: DEBUG
@@ -746,7 +747,7 @@ spec:
       securityContext: { fsGroup: 1000 }
       containers:
       - name: table-sync
-        image: ghcr.io/dotcomrow/table-sync-image:ts-20251003-171304
+        image: ghcr.io/dotcomrow/table-sync-image:ts-20251003-175157
         imagePullPolicy: Always
         env:
           - name: CONFIG_PATH
