@@ -683,6 +683,7 @@ data:
       project_id: <path:secret/data/kafka/bq/config#project>
       credentials_path: /vault/secrets/gcp-key.json
       location: US
+      default_backup_dataset: yugabyte_backup
     
     kafka_connect:
       url: http://kafka-connect.kafka.svc.internal.lan:8083
@@ -748,7 +749,7 @@ spec:
       securityContext: { fsGroup: 1000 }
       containers:
       - name: table-sync
-        image: ghcr.io/dotcomrow/table-sync-image:ts-20251004-173957
+        image: ghcr.io/dotcomrow/table-sync-image:ts-20251004-183547
         imagePullPolicy: Always
         env:
           - name: CONFIG_PATH
