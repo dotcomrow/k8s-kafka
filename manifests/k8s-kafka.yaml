@@ -364,7 +364,7 @@ spec:
             - name: SCHEMA_REGISTRY_DEBUG
               value: "true"
             - name: PORT
-              value: ""
+              value: " "
           readinessProbe:
             httpGet:
               path: /subjects
