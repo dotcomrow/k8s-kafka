@@ -339,6 +339,9 @@ spec:
       labels:
         app: schema-registry
     spec:
+      volumes:
+        - name: tmp-dir
+          emptyDir: {}
       initContainers:
         - name: fix-log-permissions
           image: busybox:1.36.1
