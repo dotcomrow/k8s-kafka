@@ -368,6 +368,8 @@ spec:
               value: "/tmp"
             - name: LOG_FILE
               value: "schema-registry.log"
+            - name: SCHEMA_REGISTRY_LOG4J_OPTS
+              value: "-Dlog4j.configuration=file:/etc/schema-registry/log4j.properties -Dlog4j.log.file=/tmp/schema-registry.log"
           args:
             - |
               set -eu;
