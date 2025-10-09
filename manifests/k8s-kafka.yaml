@@ -346,45 +346,18 @@ spec:
             - name: http
               containerPort: 8081
           env:
-            # --- Required: point SR at your Kafka cluster (KRaft/modern Kafka; no ZooKeeper needed)
-            - name: PORT
-              value: ""
             - name: SCHEMA_REGISTRY_LISTENERS
               value: "http://0.0.0.0:8081"
             - name: SCHEMA_REGISTRY_HOST_NAME
               value: "schema-registry"
             - name: SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS
               value: "PLAINTEXT://kafka.kafka.svc.cluster.local:9092"
-            - name: SCHEMA_REGISTRY_LOG4J_LOGGERS
-              value: "org.eclipse.jetty=WARN,io.confluent.kafka.schemaregistry.rest.resources.RegisterSchemaResource=INFO"
-            - name: SCHEMA_REGISTRY_DEBUG
-              value: "true"
-            # Default compatibility (BACKWARD is typical for Debezium)
             - name: SCHEMA_REGISTRY_COMPATIBILITY_LEVEL
               value: "BACKWARD"
-
-            # The internal topic for schema storage (auto-created if allowed by Kafka ACLs)
             - name: SCHEMA_REGISTRY_KAFKASTORE_TOPIC
               value: "_schemas"
-
-            # -------- Optional: uncomment and set if your Kafka needs SASL/SCRAM ----------
-            # - name: SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL
-            #   value: "SASL_PLAINTEXT"
-            # - name: SCHEMA_REGISTRY_KAFKASTORE_SASL_MECHANISM
-            #   value: "SCRAM-SHA-512"
-            # - name: SCHEMA_REGISTRY_KAFKASTORE_SASL_JAAS_CONFIG
-            #   value: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="USER" password="PASS";'
-
-            # -------- Optional: if Kafka uses SSL/TLS (no SASL) ----------
-            # - name: SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL
-            #   value: "SSL"
-            # - name: SCHEMA_REGISTRY_KAFKASTORE_SSL_TRUSTSTORE_LOCATION
-            #   value: "/etc/kafka/secrets/kafka.truststore.jks"
-            # - name: SCHEMA_REGISTRY_KAFKASTORE_SSL_TRUSTSTORE_PASSWORD
-            #   valueFrom:
-            #     secretKeyRef:
-            #       name: kafka-tls
-            #       key: truststore-password
+            - name: SCHEMA_REGISTRY_DEBUG
+              value: "true"
 
           readinessProbe:
             httpGet:
