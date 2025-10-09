@@ -346,6 +346,13 @@ spec:
           ports:
             - name: http
               containerPort: 8081
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu;
+              echo "Starting Schema Registry with configuration:";
+              env | grep SCHEMA_REGISTRY;
+              /etc/confluent/docker/run;
           env:
             - name: SCHEMA_REGISTRY_LISTENERS
               value: "http://0.0.0.0:8081"
