@@ -363,10 +363,6 @@ spec:
               value: "_schemas"
             - name: SCHEMA_REGISTRY_DEBUG
               value: "true"
-            - name: PORT
-              value: " "
-            - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
-              value: "true"
           readinessProbe:
             httpGet:
               path: /subjects
