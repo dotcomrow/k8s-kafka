@@ -326,6 +326,8 @@ metadata:
   namespace: kafka
   labels:
     app: schema-registry
+  annotations:
+    argocd.argoproj.io/sync-wave: "49"
 spec:
   replicas: 1
   selector:
@@ -415,6 +417,8 @@ metadata:
   namespace: kafka
   labels:
     app: schema-registry
+  annotations:
+    argocd.argoproj.io/sync-wave: "49"
 spec:
   type: ClusterIP
   selector:
