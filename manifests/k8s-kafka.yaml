@@ -345,8 +345,8 @@ spec:
               containerPort: 8081
           env:
             # --- Required: point SR at your Kafka cluster (KRaft/modern Kafka; no ZooKeeper needed)
-            - name: SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS
-              value: "PLAINTEXT://kafka-connect.kafka.svc.internal.lan:8083"
+            - name: PORT
+              value: ""
             - name: SCHEMA_REGISTRY_LISTENERS
               value: "http://0.0.0.0:8081"
             - name: SCHEMA_REGISTRY_HOST_NAME
