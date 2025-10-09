@@ -314,6 +314,118 @@ spec:
           limits: { cpu: "1500m", memory: "2Gi" }
         volumeMounts: [{ name: kafka-logs, mountPath: /tmp/kraft-combined-logs }]
 
+---
+# ===========================================================================
+# Schema Registry (wave 4)
+# ============================================================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: schema-registry
+  namespace: kafka
+  labels:
+    app: schema-registry
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: schema-registry
+  template:
+    metadata:
+      labels:
+        app: schema-registry
+    spec:
+      containers:
+        - name: schema-registry
+          image: confluentinc/cp-schema-registry:7.7.1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8081
+          env:
+            # --- Required: point SR at your Kafka cluster (KRaft/modern Kafka; no ZooKeeper needed)
+            - name: SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS
+              value: "PLAINTEXT://kafka-connect.kafka.svc.internal.lan:8083"
+
+            # Listen on 8081 inside the pod
+            - name: SCHEMA_REGISTRY_LISTENERS
+              value: "http://0.0.0.0:8081"
+
+            # Optional but nice to set
+            - name: SCHEMA_REGISTRY_HOST_NAME
+              value: "schema-registry"
+            - name: SCHEMA_REGISTRY_LOG4J_LOGGERS
+              value: "org.eclipse.jetty=WARN,io.confluent.kafka.schemaregistry.rest.resources.RegisterSchemaResource=INFO"
+            - name: SCHEMA_REGISTRY_DEBUG
+              value: "true"
+            # Default compatibility (BACKWARD is typical for Debezium)
+            - name: SCHEMA_REGISTRY_COMPATIBILITY_LEVEL
+              value: "BACKWARD"
+
+            # The internal topic for schema storage (auto-created if allowed by Kafka ACLs)
+            - name: SCHEMA_REGISTRY_KAFKASTORE_TOPIC
+              value: "_schemas"
+
+            # -------- Optional: uncomment and set if your Kafka needs SASL/SCRAM ----------
+            # - name: SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL
+            #   value: "SASL_PLAINTEXT"
+            # - name: SCHEMA_REGISTRY_KAFKASTORE_SASL_MECHANISM
+            #   value: "SCRAM-SHA-512"
+            # - name: SCHEMA_REGISTRY_KAFKASTORE_SASL_JAAS_CONFIG
+            #   value: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="USER" password="PASS";'
+
+            # -------- Optional: if Kafka uses SSL/TLS (no SASL) ----------
+            # - name: SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL
+            #   value: "SSL"
+            # - name: SCHEMA_REGISTRY_KAFKASTORE_SSL_TRUSTSTORE_LOCATION
+            #   value: "/etc/kafka/secrets/kafka.truststore.jks"
+            # - name: SCHEMA_REGISTRY_KAFKASTORE_SSL_TRUSTSTORE_PASSWORD
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: kafka-tls
+            #       key: truststore-password
+
+          readinessProbe:
+            httpGet:
+              path: /subjects
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /subjects
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: schema-registry
+  namespace: kafka
+  labels:
+    app: schema-registry
+spec:
+  type: ClusterIP
+  selector:
+    app: schema-registry
+  ports:
+    - name: http
+      port: 8081
+      targetPort: http
+
 # ============================================================================
 # Kafka Connect (wave 4) — with BigQuery + YB gRPC connectors
 # ============================================================================
@@ -575,6 +687,7 @@ spec:
         env:
         - { name: KAFKA_CLUSTERS_0_NAME, value: "local" }
         - { name: KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS, value: "kafka.kafka.svc.internal.lan:9092" }
+        - { name: KAFKA_CLUSTERS_0_SCHEMAREGISTRY, value: "http://schema-registry.kafka.svc.internal.lan:8081" }
         readinessProbe:
           httpGet: { path: /, port: http }
           initialDelaySeconds: 10
