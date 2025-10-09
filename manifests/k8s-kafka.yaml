@@ -354,7 +354,11 @@ spec:
               env | grep SCHEMA_REGISTRY;
               echo "Contents of /etc/confluent/docker/run:";
               cat /etc/confluent/docker/run;
-              /etc/confluent/docker/run;
+              echo "Running preflight checks...";
+              /etc/confluent/docker/ensure || { echo "Preflight checks failed"; exit 1; };
+              echo "Preflight checks completed successfully.";
+              echo "Launching Schema Registry...";
+              /etc/confluent/docker/launch || { echo "Launch failed"; exit 1; };
           env:
             - name: SCHEMA_REGISTRY_LISTENERS
               value: "http://0.0.0.0:8081"
