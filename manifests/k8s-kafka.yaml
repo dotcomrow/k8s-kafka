@@ -351,12 +351,14 @@ spec:
             - name: SCHEMA_REGISTRY_HOST_NAME
               value: "schema-registry"
             - name: SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS
-              value: "PLAINTEXT://kafka.kafka.svc.cluster.local:9092"
+              value: "PLAINTEXT://kafka.kafka.svc.internal.lan:9092"
             - name: SCHEMA_REGISTRY_COMPATIBILITY_LEVEL
               value: "BACKWARD"
             - name: SCHEMA_REGISTRY_KAFKASTORE_TOPIC
               value: "_schemas"
             - name: SCHEMA_REGISTRY_DEBUG
+              value: "true"
+            - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
               value: "true"
 
           readinessProbe:
