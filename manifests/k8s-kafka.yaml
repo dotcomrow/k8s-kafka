@@ -347,14 +347,12 @@ spec:
             # --- Required: point SR at your Kafka cluster (KRaft/modern Kafka; no ZooKeeper needed)
             - name: SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS
               value: "PLAINTEXT://kafka-connect.kafka.svc.internal.lan:8083"
-
-            # Listen on 8081 inside the pod
             - name: SCHEMA_REGISTRY_LISTENERS
               value: "http://0.0.0.0:8081"
-
-            # Optional but nice to set
             - name: SCHEMA_REGISTRY_HOST_NAME
               value: "schema-registry"
+            - name: SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS
+              value: "PLAINTEXT://kafka:9092"
             - name: SCHEMA_REGISTRY_LOG4J_LOGGERS
               value: "org.eclipse.jetty=WARN,io.confluent.kafka.schemaregistry.rest.resources.RegisterSchemaResource=INFO"
             - name: SCHEMA_REGISTRY_DEBUG
