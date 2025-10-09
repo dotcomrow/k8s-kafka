@@ -406,6 +406,10 @@ spec:
             limits:
               cpu: "1"
               memory: "1Gi"
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
 ---
 apiVersion: v1
 kind: Service
