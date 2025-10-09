@@ -365,11 +365,13 @@ spec:
               value: "true"
             - name: PORT
               value: " "
+            - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+              value: "true"
           readinessProbe:
             httpGet:
               path: /subjects
               port: http
-            initialDelaySeconds: 10
+            initialDelaySeconds: 20
             periodSeconds: 10
             timeoutSeconds: 2
             failureThreshold: 6
@@ -377,14 +379,14 @@ spec:
             httpGet:
               path: /subjects
               port: http
-            initialDelaySeconds: 30
+            initialDelaySeconds: 60
             periodSeconds: 20
             timeoutSeconds: 2
             failureThreshold: 3
           resources:
             requests:
-              cpu: "100m"
-              memory: "256Mi"
+              cpu: "500m"
+              memory: "512Mi"
             limits:
               cpu: "1"
               memory: "1Gi"
