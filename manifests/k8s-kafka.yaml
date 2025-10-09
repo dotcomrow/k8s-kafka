@@ -347,18 +347,6 @@ spec:
             - name: http
               containerPort: 8081
           command: ["/bin/sh", "-c"]
-          args:
-            - |
-              set -eu;
-              echo "Starting Schema Registry with configuration:";
-              env | grep SCHEMA_REGISTRY;
-              echo "Contents of /etc/confluent/docker/run:";
-              cat /etc/confluent/docker/run;
-              echo "Running preflight checks...";
-              /etc/confluent/docker/ensure || { echo "Preflight checks failed"; exit 1; };
-              echo "Preflight checks completed successfully.";
-              echo "Launching Schema Registry...";
-              /etc/confluent/docker/launch || { echo "Launch failed"; exit 1; };
           env:
             - name: SCHEMA_REGISTRY_LISTENERS
               value: "http://0.0.0.0:8081"
@@ -376,6 +364,25 @@ spec:
               value: "_schemas"
             - name: SCHEMA_REGISTRY_DEBUG
               value: "true"
+            - name: LOG_DIR
+              value: "/tmp"
+            - name: LOG_FILE
+              value: "schema-registry.log"
+          args:
+            - |
+              set -eu;
+              echo "Starting Schema Registry with configuration:";
+              env | grep SCHEMA_REGISTRY;
+              echo "Contents of /etc/confluent/docker/run:";
+              cat /etc/confluent/docker/run;
+              echo "Running preflight checks...";
+              /etc/confluent/docker/ensure || { echo "Preflight checks failed"; exit 1; };
+              echo "Preflight checks completed successfully.";
+              echo "Launching Schema Registry...";
+              LOG_PATH="$LOG_DIR/$LOG_FILE";
+              export LOG4J_LOG_FILE="$LOG_PATH";
+              echo "Redirecting logs to $LOG_PATH";
+              /etc/confluent/docker/launch || { echo "Launch failed"; exit 1; };
           readinessProbe:
             httpGet:
               path: /subjects
