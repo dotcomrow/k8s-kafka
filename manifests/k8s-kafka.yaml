@@ -346,7 +346,7 @@ spec:
         - name: fix-log-permissions
           image: busybox:1.36.1
           command: ["/bin/sh", "-c"]
-          args: ["chmod -R 777 /tmp && chmod -R 777 /"]
+          args: ["chmod -R 777 /tmp"]
           volumeMounts:
             - name: tmp-dir
               mountPath: /tmp
