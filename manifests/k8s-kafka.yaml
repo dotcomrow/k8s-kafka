@@ -343,6 +343,8 @@ spec:
       volumes:
         - name: tmp-dir
           emptyDir: {}
+        - name: kafka-tools
+          emptyDir: {}
       initContainers:
         - name: fix-log-permissions
           image: busybox:1.36.1
@@ -351,6 +353,12 @@ spec:
           volumeMounts:
             - name: tmp-dir
               mountPath: /tmp
+        - name: install-kafka-tools
+          image: confluentinc/cp-kafka:7.7.1
+          command: ["sh", "-c", "cp /usr/bin/kafka-* /opt/kafka-tools/ && chmod +x /opt/kafka-tools/kafka-*"]
+          volumeMounts:
+          - name: kafka-tools
+            mountPath: /opt/kafka-tools
       containers:
         - name: schema-registry
           image: confluentinc/cp-schema-registry:7.7.1
