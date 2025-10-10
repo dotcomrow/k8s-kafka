@@ -395,7 +395,6 @@ spec:
             - |
               set -eu;
               echo "Starting Schema Registry with configuration:";
-              env | grep SCHEMA_REGISTRY;
               echo "Contents of /etc/confluent/docker/run:";
               cat /etc/confluent/docker/run;
               echo "Running preflight checks...";
