@@ -367,6 +367,11 @@ spec:
             - name: http
               containerPort: 8081
           command: ["/bin/sh", "-c"]
+          volumeMounts:
+            - name: tmp-dir
+              mountPath: /tmp
+            - name: kafka-tools
+              mountPath: /usr/bin
           env:
             - name: SCHEMA_REGISTRY_LISTENERS
               value: "http://0.0.0.0:8081"
@@ -398,6 +403,8 @@ spec:
           args:
             - |
               set -eu;
+              touch /schema-registry.log;
+              chmod 666 /schema-registry.log;
               echo "Starting Schema Registry with configuration:";
               env | grep SCHEMA_REGISTRY;
               echo "Contents of /etc/confluent/docker/run:";
@@ -481,7 +488,7 @@ metadata:
     argocd.argoproj.io/sync-wave: "4"
 data:
   log4j.properties: |
-    log4j.rootLogger=INFO, stdout
+    log4j.rootLogger=INFO,stdout
     log4j.appender.stdout=org.apache.log4j.ConsoleAppender
     log4j.appender.stdout.layout=org.apache.log4j.PatternLayout
     log4j.appender.stdout.layout.ConversionPattern=[%d{ISO8601}] %-5p %c - %m%n
