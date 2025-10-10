@@ -362,8 +362,6 @@ spec:
             - name: kafka-tools
               mountPath: /opt/kafka-tools
           env:
-            - name: PATH
-              value: "/opt/kafka-tools:$PATH"
             - name: SCHEMA_REGISTRY_LISTENERS
               value: "http://0.0.0.0:8081"
             - name: SCHEMA_REGISTRY_HOST_NAME
@@ -395,6 +393,7 @@ spec:
             - |
               set -eu;
               echo "Starting Schema Registry with configuration:";
+              env | grep SCHEMA_REGISTRY;
               echo "Contents of /etc/confluent/docker/run:";
               cat /etc/confluent/docker/run;
               echo "Running preflight checks...";
