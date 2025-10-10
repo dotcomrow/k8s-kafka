@@ -405,7 +405,7 @@ spec:
           args:
             - |
               set -eu;
-              touch /schema-registry.log;
+              echo "" > /schema-registry.log;
               chmod 666 /schema-registry.log;
               echo "Starting Schema Registry with configuration:";
               env | grep SCHEMA_REGISTRY;
