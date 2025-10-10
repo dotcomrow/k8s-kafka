@@ -330,7 +330,7 @@ data:
     listeners=http://0.0.0.0:8081
 
     # Updated to point to the correct Kafka bootstrap servers
-    kafkastore.bootstrap.servers=PLAINTEXT://kafka-broker.kafka.svc.cluster.local:9092
+    kafkastore.bootstrap.servers=PLAINTEXT://kafka.kafka.svc.cluster.local:9092
 
     # The name of the topic to store schemas in
     kafkastore.topic=_schemas
