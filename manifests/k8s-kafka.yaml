@@ -371,8 +371,10 @@ spec:
             - name: tmp-dir
               mountPath: /tmp
             - name: kafka-tools
-              mountPath: /usr/bin
+              mountPath: /opt/kafka-tools
           env:
+            - name: PATH
+              value: "/opt/kafka-tools:$PATH"
             - name: SCHEMA_REGISTRY_LISTENERS
               value: "http://0.0.0.0:8081"
             - name: SCHEMA_REGISTRY_HOST_NAME
