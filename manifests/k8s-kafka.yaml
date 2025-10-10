@@ -319,7 +319,29 @@ spec:
 # ===========================================================================
 # Schema Registry (wave 4)
 # ============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: schema-registry-config
+  namespace: kafka
+data:
+  schema-registry.properties: |
+    # The address the socket server listens on.
+    listeners=http://0.0.0.0:8081
 
+    # Updated to point to the correct Kafka bootstrap servers
+    kafkastore.bootstrap.servers=PLAINTEXT://kafka-broker.kafka.svc.cluster.local:9092
+
+    # The name of the topic to store schemas in
+    kafkastore.topic=_schemas
+
+    # If true, API requests that fail will include extra debugging information, including stack traces
+    debug=false
+
+    metadata.encoder.secret=REPLACE_ME_WITH_HIGH_ENTROPY_STRING
+
+    resource.extension.class=io.confluent.dekregistry.DekRegistryResourceExtension
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -343,6 +365,10 @@ spec:
       volumes:
         - name: kafka-tools
           emptyDir: {}
+        - name: schema-registry-config-volume
+          configMap:
+            name: schema-registry-config
+            items: [{ key: schema-registry.properties, path: schema-registry.properties }]
       initContainers:
         - name: install-kafka-tools
           image: confluentinc/cp-kafka:7.7.1
@@ -361,6 +387,9 @@ spec:
           volumeMounts:
             - name: kafka-tools
               mountPath: /opt/kafka-tools
+            - name: schema-registry-config-volume
+              mountPath: /etc/schema-registry/schema-registry.properties
+              subPath: schema-registry.properties
           env:
             - name: SCHEMA_REGISTRY_LISTENERS
               value: "http://0.0.0.0:8081"
@@ -410,7 +439,7 @@ spec:
               port: http
             initialDelaySeconds: 20
             periodSeconds: 10
-            timeoutSeconds: 2
+            timeoutSeconds: 10
             failureThreshold: 6
           livenessProbe:
             httpGet:
@@ -418,7 +447,7 @@ spec:
               port: http
             initialDelaySeconds: 60
             periodSeconds: 20
-            timeoutSeconds: 2
+            timeoutSeconds: 10
             failureThreshold: 3
           resources:
             requests:
