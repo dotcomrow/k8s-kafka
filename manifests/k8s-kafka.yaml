@@ -198,11 +198,16 @@ spec:
           until [ -s /vault-token/VAULT_TOKEN ]; do sleep 2; done
           export VAULT_TOKEN="$(cat /vault-token/VAULT_TOKEN)"
           while :; do PASS="$(vault kv get -field=value "secret/${PG_USER}" 2>/dev/null || true)"; [ -n "$PASS" ] && break; sleep 5; done
-          PSQL_CMD="PGPASSWORD=$PASS psql -h $PG_HOST -p $PG_PORT -U $PG_USER -d postgres"
-          DB_EXISTS=$($PSQL_CMD -tAc "SELECT 1 FROM pg_database WHERE datname = '$PG_DATABASE'")
+          # Export the PGPASSWORD environment variable to avoid syntax issues
+          export PGPASSWORD="$PASS"
+          PSQL_CMD="psql -h $PG_HOST -p $PG_PORT -U $PG_USER"
+
+          # Check if the Kafka database exists in Yugabyte, and create it if it doesn't
+          DB_EXISTS=$($PSQL_CMD -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$PG_DATABASE'")
           if [ "$DB_EXISTS" != "1" ]; then
-            $PSQL_CMD -c "CREATE DATABASE $PG_DATABASE"
+            $PSQL_CMD -d postgres -c "CREATE DATABASE $PG_DATABASE"
           fi
+
           # Grant necessary privileges to the user on the Kafka database
           $PSQL_CMD -d $PG_DATABASE -c "ALTER SCHEMA public OWNER TO \"$PG_USER\""
           $PSQL_CMD -d $PG_DATABASE -c "GRANT ALL ON SCHEMA public TO \"$PG_USER\""
