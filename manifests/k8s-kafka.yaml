@@ -194,7 +194,26 @@ spec:
           export VAULT_TOKEN="$(cat /vault-token/VAULT_TOKEN)"
           BQ_SA_JSON="$(vault kv get -field=value secret/k8s-kafka-gcp-service-account-json 2>/dev/null || true)"
           [ -n "$BQ_SA_JSON" ] && printf '%s' "$BQ_SA_JSON" > /tmp/sa.json || true
+          # Check if the Kafka database exists in Yugabyte, and create it if it doesn't
+          until [ -s /vault-token/VAULT_TOKEN ]; do sleep 2; done
+          export VAULT_TOKEN="$(cat /vault-token/VAULT_TOKEN)"
           while :; do PASS="$(vault kv get -field=value "secret/${PG_USER}" 2>/dev/null || true)"; [ -n "$PASS" ] && break; sleep 5; done
+          PSQL_CMD="PGPASSWORD=$PASS psql -h $PG_HOST -p $PG_PORT -U $PG_USER -d postgres"
+          DB_EXISTS=$($PSQL_CMD -tAc "SELECT 1 FROM pg_database WHERE datname = '$PG_DATABASE'")
+          if [ "$DB_EXISTS" != "1" ]; then
+            $PSQL_CMD -c "CREATE DATABASE $PG_DATABASE"
+          fi
+          # Grant necessary privileges to the user on the Kafka database
+          $PSQL_CMD -d $PG_DATABASE -c "ALTER SCHEMA public OWNER TO \"$PG_USER\""
+          $PSQL_CMD -d $PG_DATABASE -c "GRANT ALL ON SCHEMA public TO \"$PG_USER\""
+          $PSQL_CMD -d $PG_DATABASE -c "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO \"$PG_USER\""
+          $PSQL_CMD -d $PG_DATABASE -c "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO \"$PG_USER\""
+          $PSQL_CMD -d $PG_DATABASE -c "GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO \"$PG_USER\""
+          $PSQL_CMD -d $PG_DATABASE -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO \"$PG_USER\""
+          $PSQL_CMD -d $PG_DATABASE -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO \"$PG_USER\""
+          $PSQL_CMD -d $PG_DATABASE -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO \"$PG_USER\""
+          $PSQL_CMD -d $PG_DATABASE -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TYPES TO \"$PG_USER\""
+          $PSQL_CMD -d postgres -c "GRANT CREATE ON DATABASE \"$PG_DATABASE\" TO \"$PG_USER\""
           PG_ARGS="host=$PG_HOST port=$PG_PORT database=$PG_DATABASE user=$PG_USER"
           [ -n "${YB_MASTER_ADDRESSES:-}" ] && PG_ARGS="$PG_ARGS master_addresses=$YB_MASTER_ADDRESSES"
           vault kv put secret/kafka/pgconfig $PG_ARGS >/dev/null
