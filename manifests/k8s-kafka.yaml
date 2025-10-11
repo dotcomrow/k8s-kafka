@@ -198,6 +198,9 @@ spec:
           until [ -s /vault-token/VAULT_TOKEN ]; do sleep 2; done
           export VAULT_TOKEN="$(cat /vault-token/VAULT_TOKEN)"
           while :; do PASS="$(vault kv get -field=value "secret/${PG_USER}" 2>/dev/null || true)"; [ -n "$PASS" ] && break; sleep 5; done
+          # Install PostgreSQL client to use psql
+          apk add --no-cache postgresql-client
+
           # Export the PGPASSWORD environment variable to avoid syntax issues
           export PGPASSWORD="$PASS"
           PSQL_CMD="psql -h $PG_HOST -p $PG_PORT -U $PG_USER"
