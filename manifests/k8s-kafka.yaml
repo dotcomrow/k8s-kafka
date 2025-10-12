@@ -906,7 +906,7 @@ spec:
         linkerd.io/inject: "disabled"
 
         # ---- VAULT agent: render env files this app expects per README ----
-
+        vault.hashicorp.com/agent-inject-permissions-gcp-key.json: "0644"
         vault.hashicorp.com/agent-inject: "true"
         vault.hashicorp.com/role: "data-bootstrap"
         vault.hashicorp.com/agent-pre-populate-only: "true"
@@ -925,13 +925,13 @@ spec:
           {{- with secret "secret/data/kafka/bq/config" -}}
           {{ .Data.data.sa_json }}
           {{- end -}}
-        vault.hashicorp.com/agent-inject-permissions-gcp-key.json: "0644"
+        
     spec:
       serviceAccountName: bq-yb-bootstrap
       securityContext: { fsGroup: 1000 }
       containers:
       - name: table-sync
-        image: ghcr.io/dotcomrow/table-sync-image:ts-20251012-191658
+        image: ghcr.io/dotcomrow/table-sync-image:ts-20251012-193212
         imagePullPolicy: Always
         env:
           - name: CONFIG_PATH
