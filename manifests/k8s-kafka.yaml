@@ -881,12 +881,9 @@ data:
     health_check:
       port: 8080
     
-    metrics:
-      port: 8000
-      enabled: true
-    
     processing:
       max_scan_threads: 10
+      scan_interval_seconds: 30
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -931,7 +928,7 @@ spec:
       securityContext: { fsGroup: 1000 }
       containers:
       - name: table-sync
-        image: ghcr.io/dotcomrow/table-sync-image:ts-20251012-195022
+        image: ghcr.io/dotcomrow/table-sync-image:ts-20251012-200709
         imagePullPolicy: Always
         env:
           - name: CONFIG_PATH
