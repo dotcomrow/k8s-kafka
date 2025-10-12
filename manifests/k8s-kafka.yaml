@@ -872,19 +872,13 @@ data:
       master_addresses: "yb-master-0.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-1.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-2.yb-master-service.yugabyte.svc.cluster.local:7100"
     
     bigquery:
-      project_id: <path:secret/data/kafka/bq/config#project>
       credentials_path: /vault/secrets/gcp-key.json
-      location: US
-      default_backup_dataset: yugabyte_backup
     
     kafka_connect:
       url: http://kafka-connect.kafka.svc.internal.lan:8083
-      recreate_failed_connectors: true
     
     logging:
       level: DEBUG
-      format: json
-      log_http_bodies_on_failure: true
     
     health_check:
       port: 8080
@@ -894,9 +888,7 @@ data:
       enabled: true
     
     processing:
-      batch_size: 10000
-      max_retries: 3
-      retry_delay_seconds: 5
+      max_scan_threads: 10
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -941,7 +933,7 @@ spec:
       securityContext: { fsGroup: 1000 }
       containers:
       - name: table-sync
-        image: ghcr.io/dotcomrow/table-sync-image:ts-20251011-233431
+        image: ghcr.io/dotcomrow/table-sync-image:ts-20251012-000715
         imagePullPolicy: Always
         env:
           - name: CONFIG_PATH
