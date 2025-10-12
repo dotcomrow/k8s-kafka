@@ -858,11 +858,6 @@ metadata:
   namespace: kafka
 data:
   orchestrator.yaml: |
-    scan_interval_seconds: 30
-    comprehensive_database_scan: true
-    excluded_databases: "postgres,yugabyte,vaultadmin,system_platform,kafka"
-    max_scan_threads: 10
-    
     yugabytedb:
       host: yb-tserver-service.yugabyte.svc.cluster.local
       port: 5433
@@ -870,6 +865,7 @@ data:
       password: <path:secret/data/vaultadmin#value>
       database: kafka
       master_addresses: "yb-master-0.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-1.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-2.yb-master-service.yugabyte.svc.cluster.local:7100"
+      excluded_databases: "postgres,yugabyte,vaultadmin,system_platform,kafka"
     
     bigquery:
       credentials_path: /vault/secrets/gcp-key.json
@@ -933,7 +929,7 @@ spec:
       securityContext: { fsGroup: 1000 }
       containers:
       - name: table-sync
-        image: ghcr.io/dotcomrow/table-sync-image:ts-20251012-000715
+        image: ghcr.io/dotcomrow/table-sync-image:ts-20251012-002621
         imagePullPolicy: Always
         env:
           - name: CONFIG_PATH
