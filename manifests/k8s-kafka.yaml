@@ -872,6 +872,8 @@ data:
     
     kafka_connect:
       url: http://kafka-connect.kafka.svc.internal.lan:8083
+      schema_registry_url: http://schema-registry.kafka.svc.internal.lan:8081
+      bootstrap: http://kafka.kafka.svc.internal.lan:9092
     
     logging:
       level: DEBUG
