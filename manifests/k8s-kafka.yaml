@@ -323,6 +323,26 @@ spec:
         env:
         - name: GOOGLE_APPLICATION_CREDENTIALS
           value: /vault/secrets/gcp-key.json
+        - name: KAFKA_ADVERTISED_LISTENERS
+          value: "PLAINTEXT://kafka.kafka.svc.internal.lan:9092"
+        - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+          value: "1@kafka-0.kafka-hs.kafka.svc.internal.lan:9093"
+        - name: KAFKA_INTER_BROKER_LISTENER_NAME
+          value: "PLAINTEXT"
+        - { name: CLUSTER_ID, valueFrom: { secretKeyRef: { name: kafka-cluster-id, key: CLUSTER_ID } } }
+        - { name: KAFKA_NODE_ID, value: "1" }
+        - { name: KAFKA_PROCESS_ROLES, value: "broker,controller" }
+        - { name: KAFKA_CONTROLLER_LISTENER_NAMES, value: "CONTROLLER" }
+        - { name: KAFKA_LISTENERS, value: "PLAINTEXT://:9092,CONTROLLER://:9093" }
+        - { name: KAFKA_ADVERTISED_LISTENERS, value: "PLAINTEXT://kafka.kafka.svc.internal.lan:9092" }
+        - { name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP, value: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT" }
+        - { name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "1@kafka-0.kafka-hs.kafka.svc.internal.lan:9093" }
+        - { name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "1" }
+        - { name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "1" }
+        - { name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR, value: "1" }
+        - { name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS, value: "0" }
+        - { name: KAFKA_LOG_DIRS, value: "/tmp/kraft-combined-logs" }
+        - { name: KAFKA_AUTO_CREATE_TOPICS_ENABLE, value: "true" }
         args:
         - |
           set -eu;
