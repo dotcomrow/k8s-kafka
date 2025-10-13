@@ -228,6 +228,13 @@ resource "google_project_iam_member" "sa_logging_writer" {
   depends_on = [google_project_service.enable]
 }
 
+resource "google_project_iam_member" "sa_logging_viewer" {
+  project = google_project.this.project_id
+  role    = "roles/logging.viewer"
+  member  = "serviceAccount:${google_service_account.pipeline.email}"
+  depends_on = [google_project_service.enable]
+}
+
 ########################################
 # SA key → Secret Manager (Kafka project)
 ########################################
