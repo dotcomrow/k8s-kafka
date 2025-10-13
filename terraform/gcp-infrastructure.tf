@@ -221,6 +221,13 @@ resource "google_storage_bucket_iam_member" "sa_bucket_object_creator" {
   depends_on = [google_project_service.enable]
 }
 
+resource "google_project_iam_member" "sa_logging_writer" {
+  project = google_project.this.project_id
+  role    = "roles/logging.logWriter"
+  member  = "serviceAccount:${google_service_account.pipeline.email}"
+  depends_on = [google_project_service.enable]
+}
+
 ########################################
 # SA key → Secret Manager (Kafka project)
 ########################################
