@@ -5,6 +5,7 @@ on:
       branches:
         - prod
       paths: ["terraform/**"]
+    workflow_dispatch:
 
 permissions: write-all
 
