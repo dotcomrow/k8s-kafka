@@ -298,6 +298,7 @@ spec:
           {{- end -}}
         vault.hashicorp.com/agent-inject-permissions-gcp-key.json: "0644"
     spec:
+      serviceAccountName: bq-yb-bootstrap
       securityContext:
         fsGroup: 1000
       volumes: [{ name: kafka-logs, emptyDir: {} }]
