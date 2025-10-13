@@ -877,6 +877,7 @@ data:
     
     logging:
       level: DEBUG
+      enable_cloud_logging: true
     
     health_check:
       port: 8080
@@ -928,7 +929,7 @@ spec:
       securityContext: { fsGroup: 1000 }
       containers:
       - name: table-sync
-        image: ghcr.io/dotcomrow/table-sync-image:ts-20251013-111042
+        image: ghcr.io/dotcomrow/table-sync-image:ts-20251013-114805
         imagePullPolicy: Always
         env:
           - name: CONFIG_PATH
