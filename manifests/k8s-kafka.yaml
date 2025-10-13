@@ -884,7 +884,7 @@ data:
     
     processing:
       max_scan_threads: 10
-      scan_interval_seconds: 30
+      scan_interval_seconds: 300
 ---
 apiVersion: apps/v1
 kind: Deployment
