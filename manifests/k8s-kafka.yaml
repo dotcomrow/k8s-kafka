@@ -343,6 +343,7 @@ spec:
         - { name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS, value: "0" }
         - { name: KAFKA_LOG_DIRS, value: "/tmp/kraft-combined-logs" }
         - { name: KAFKA_AUTO_CREATE_TOPICS_ENABLE, value: "true" }
+        command: ["/bin/sh","-c"]
         args:
         - |
           set -eu;
