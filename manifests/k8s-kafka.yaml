@@ -301,6 +301,7 @@ spec:
       serviceAccountName: bq-yb-bootstrap
       securityContext:
         fsGroup: 1000
+        runAsUser: 0
       volumes: [{ name: kafka-logs, emptyDir: {} }]
       initContainers:
       - name: format-storage
