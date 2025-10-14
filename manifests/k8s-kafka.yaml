@@ -892,7 +892,7 @@ data:
     
     logging:
       level: DEBUG
-      enable_cloud_logging: true
+      enable_cloud_logging: false
     
     health_check:
       port: 8080
