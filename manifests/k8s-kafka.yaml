@@ -463,9 +463,6 @@ spec:
           args:
             - |
               set -eu;
-              # Install Google Cloud Logging agent
-              curl -sSO https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh && bash add-google-cloud-ops-agent-repo.sh --also-install
-              service google-cloud-ops-agent restart
               echo "Starting Schema Registry with configuration:";
               env | grep SCHEMA_REGISTRY;
               echo "Contents of /etc/confluent/docker/run:";
