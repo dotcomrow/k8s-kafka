@@ -884,6 +884,13 @@ data:
     
     bigquery:
       credentials_path: /vault/secrets/gcp-key.json
+
+    redis:
+      url: redis://:<path:secret/data/redis#password>@redis-0.redis-headless.redis.svc.cluster.local:6379/0
+      cacheKey: "table-sync-cache"
+      default_ttl: 300
+      cache_keys:
+        row_counts: "row_counts"
     
     kafka_connect:
       url: http://kafka-connect.kafka.svc.internal.lan:8083
