@@ -905,8 +905,21 @@ data:
       port: 8080
     
     processing:
-      max_scan_threads: 10
-      scan_interval_seconds: 300
+      table_scanner: 
+        max_scan_threads: 10
+        scan_interval_seconds: 300
+
+      database_prep:
+        max_preparation_threads: 2
+        scan_interval_seconds: 90
+
+      cache_check:
+        max_cache_check_threads: 6
+        scan_interval_seconds: 90
+
+      connector_cleanup:
+        max_connector_cleanup_threads: 4
+        scan_interval_seconds: 90
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -951,7 +964,7 @@ spec:
       securityContext: { fsGroup: 1000 }
       containers:
       - name: table-sync
-        image: ghcr.io/dotcomrow/table-sync-image:ts-20251019-114219
+        image: ghcr.io/dotcomrow/table-sync-image:ts-20251020-221947
         imagePullPolicy: Always
         env:
           - name: CONFIG_PATH
