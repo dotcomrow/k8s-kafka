@@ -1080,8 +1080,8 @@ spec:
           - name: KAFKA_CONNECT_URIS
             value: "http://kafka-connect.kafka.svc.cluster.local:8083"
           # Optional: turn on DEBUG for initial bring-up, then remove
-          # - name: QUARKUS_LOG_LEVEL
-          #   value: "DEBUG"
+          - name: QUARKUS_LOG_LEVEL
+            value: "DEBUG"
         readinessProbe:
           httpGet: { path: /, port: http }
           initialDelaySeconds: 10
