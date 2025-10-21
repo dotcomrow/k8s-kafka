@@ -964,7 +964,7 @@ spec:
       securityContext: { fsGroup: 1000 }
       containers:
       - name: table-sync
-        image: ghcr.io/dotcomrow/table-sync-image:ts-20251021-183245
+        image: ghcr.io/dotcomrow/table-sync-image:ts-20251021-202553
         imagePullPolicy: Always
         env:
           - name: CONFIG_PATH
