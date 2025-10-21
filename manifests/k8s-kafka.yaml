@@ -589,6 +589,19 @@ spec:
           name: kafka-connect-log4j
           items: [{ key: log4j.properties, path: log4j.properties }]
       initContainers:
+      - name: install-debezium-rest-extension
+        image: curlimages/curl:8.8.0
+        command: ["/bin/sh","-lc"]
+        args:
+          - |
+            set -eux
+            mkdir -p /plugins/debezium-rest
+            # Grab a recent matching version; 3.1.1.Final shown as example
+            curl -fL -o /plugins/debezium-rest/debezium-connect-rest-extension.jar \
+              https://repo1.maven.org/maven2/io/debezium/debezium-connect-rest-extension/3.1.1.Final/debezium-connect-rest-extension-3.1.1.Final.jar
+            echo "Installed Debezium REST extension:"
+            ls -l /plugins/debezium-rest
+        volumeMounts: [{ name: plugins, mountPath: /plugins }]
       - name: install-bq
         image: confluentinc/cp-kafka-connect:7.6.1
         command: ["/bin/bash","-lc"]
@@ -681,10 +694,14 @@ spec:
       - name: connect
         image: confluentinc/cp-kafka-connect:7.6.1
         env:
+        - name: CONNECT_REST_EXTENSION_CLASSES
+          value: "io.debezium.rest.extension.DebeziumConnectRestExtension"   # see note below
+        - name: CONNECT_TOPIC_CREATION_ENABLE
+          value: "true"
         - name: CONNECT_PLUGIN_DISCOVERY
           value: "only_scan"
         - name: CONNECT_PLUGIN_PATH
-          value: "/plugins/wepay-kafka-connect-bigquery,/plugins/yb/debezium-postgres,/plugins/yb/yugabytedb-grpc"
+          value: "/plugins/wepay-kafka-connect-bigquery,/plugins/yb/debezium-postgres,/plugins/yb/yugabytedb-grpc,/plugins/debezium-rest"
         - name: CONNECT_BOOTSTRAP_SERVERS
           value: "kafka.kafka.svc.internal.lan:9092"
         - name: CONNECT_GROUP_ID
@@ -1082,6 +1099,14 @@ spec:
           # Optional: turn on DEBUG for initial bring-up, then remove
           - name: QUARKUS_LOG_LEVEL
             value: "DEBUG"
+          - name: QUARKUS_HTTP_CORS
+            value: "true"
+          - name: QUARKUS_HTTP_CORS_ORIGINS
+            value: "https://debezium-ui.app.suncoast.systems"
+          - name: QUARKUS_HTTP_CORS_METHODS
+            value: "GET,POST,PUT,DELETE,OPTIONS"
+          - name: QUARKUS_HTTP_CORS_HEADERS
+            value: "Authorization,Content-Type,X-Requested-With,Accept,Origin"
         readinessProbe:
           httpGet: { path: /, port: http }
           initialDelaySeconds: 10
@@ -1159,6 +1184,7 @@ spec:
           - --pass-access-token=true
           - --skip-provider-button=true
           - --allowed-group=dotcomrow:kafka_gui_users
+          - --skip-auth-preflight=true
         env:
         - name: OAUTH2_PROXY_CLIENT_ID
           valueFrom: { secretKeyRef: { name: oauth2-proxy-debezium-secrets, key: client_id } }
