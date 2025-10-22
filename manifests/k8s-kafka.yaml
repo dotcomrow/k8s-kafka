@@ -593,18 +593,40 @@ spec:
         image: confluentinc/cp-kafka-connect:7.7.1
         command: ["/bin/bash","-lc"]
         args:
-        - |
-          set -eux
-          mkdir -p /plugins/debezium
-          # Let Hub resolve to the latest it actually has (typically 2.x)
-          confluent-hub install --no-prompt --component-dir /plugins/debezium debezium/debezium-connector-postgresql:latest
-          # Discover the installed dir (e.g., /plugins/debezium/debezium-connector-postgresql)
-          DBZ_DIR="$(dirname "$(find /plugins/debezium -maxdepth 2 -name 'debezium-connector-postgresql-*.jar' | head -n1)")"
-          # Match the REST extension version to the connector major.minor (good-enough heuristic)
-          DBZ_VER="$(basename "$(find "$DBZ_DIR" -maxdepth 1 -name 'debezium-connector-postgresql-*.jar' | head -n1)" | sed -E 's/.*-([0-9]+\.[0-9]+)\..*/\1/')"
-          curl -fL -o "$DBZ_DIR/debezium-connect-rest-extension.jar" \
-            "https://repo1.maven.org/maven2/io/debezium/debezium-connect-rest-extension/${DBZ_VER}.Final/debezium-connect-rest-extension-${DBZ_VER}.Final.jar"
-          ls -l "$DBZ_DIR"
+          - |
+            set -euo pipefail
+            ROOT="/plugins/debezium"
+            mkdir -p "$ROOT"
+
+            echo "[DBZ] Installing from Confluent Hub..."
+            confluent-hub install --no-prompt --component-dir "$ROOT" debezium/debezium-connector-postgresql:latest
+
+            echo "[DBZ] Locating installed connector JAR..."
+            JAR="$(find "$ROOT" -maxdepth 3 \
+                    -type f \( -name 'debezium-connector-postgres*.jar' -o -name 'debezium-connector-postgresql-*.jar' \) \
+                    | head -n1 || true)"
+
+            if [ -z "${JAR}" ]; then
+              echo "[DBZ][ERROR] Could not find Debezium Postgres connector JAR after install."
+              echo "[DBZ] Installed tree for debugging:"
+              find "$ROOT" -maxdepth 3 -print
+              exit 1
+            fi
+
+            DBZ_DIR="$(dirname "$JAR")"
+            echo "[DBZ] Using plugin dir: $DBZ_DIR"
+            echo "[DBZ] JAR: $(basename "$JAR")"
+
+            # Extract X.Y from the JAR name; fallback to 3.1 if pattern changes
+            DBZ_VER_MM="$(basename "$JAR" | sed -nE 's/.*-([0-9]+)\.([0-9]+)\..*/\1.\2/p' | head -n1)"
+            DBZ_VER_MM="${DBZ_VER_MM:-3.1}"
+            REST_URL="https://repo1.maven.org/maven2/io/debezium/debezium-connect-rest-extension/${DBZ_VER_MM}.Final/debezium-connect-rest-extension-${DBZ_VER_MM}.Final.jar"
+
+            echo "[DBZ] Fetching REST extension: $REST_URL"
+            curl -fL -o "${DBZ_DIR}/debezium-connect-rest-extension.jar" "$REST_URL"
+
+            echo "[DBZ] Final plugin contents:"
+            ls -l "${DBZ_DIR}"
         volumeMounts: [{ name: plugins, mountPath: /plugins }]
       - name: install-bq
         image: confluentinc/cp-kafka-connect:7.6.1
