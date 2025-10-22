@@ -1278,7 +1278,7 @@ data:
   env-config.js: |
     // Overridden by ops to keep Stage calls same-origin and HTTPS
     window.__ENV__ = {
-      CONDUCTOR_URL: '/api'
+      CONDUCTOR_URL: 'https://debezium-ui-api.app.suncoast.systems'
     };
 ---
 apiVersion: apps/v1
