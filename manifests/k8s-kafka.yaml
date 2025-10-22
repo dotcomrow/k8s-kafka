@@ -692,10 +692,10 @@ spec:
           done
       containers:
       - name: connect
-        image: confluentinc/cp-kafka-connect:7.6.1
+        image: confluentinc/cp-kafka-connect:7.7.1
         env:
         - name: CONNECT_REST_EXTENSION_CLASSES
-          value: "io.debezium.rest.extension.DebeziumConnectRestExtension"   # see note below
+          value: "io.debezium.kcrestextension.DebeziumConnectRestExtension"
         - name: CONNECT_TOPIC_CREATION_ENABLE
           value: "true"
         - name: CONNECT_PLUGIN_DISCOVERY
@@ -720,14 +720,18 @@ spec:
           value: "true"
         - name: CONNECT_INTERNAL_VALUE_CONVERTER_SCHEMAS_ENABLE
           value: "true"
+        - name: KAFKA_OPTS
+          value: >-
+            --add-opens=java.base/java.lang=ALL-UNNAMED
+            --add-opens=java.base/java.util=ALL-UNNAMED
+            --add-opens=java.base/java.time=ALL-UNNAMED
+            --add-opens=java.base/sun.nio.ch=ALL-UNNAMED
         - name: KAFKA_LOG4J_OPTS
           value: "-Dlog4j.configuration=file:/kafka/etc/log4j.properties"
         - name: CONNECT_CONFIG_PROVIDERS
           value: "env"
         - name: CONNECT_CONFIG_PROVIDERS_ENV_CLASS
           value: "org.apache.kafka.common.config.provider.EnvVarConfigProvider"
-        - name: CONNECT_BOOTSTRAP_SERVERS
-          value: "kafka.kafka.svc.internal.lan:9092"
         # optional:
         - name: CONNECT_REST_ADVERTISED_HOST_NAME
           value: "kafka-connect.kafka.svc.internal.lan"
