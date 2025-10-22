@@ -1279,26 +1279,26 @@ spec:
           servicePort: 80
       priority: 1000  # ensure this wins over the catch-all UI route
 ---
-apiVersion: apisix.apache.org/v2
-kind: ApisixRoute
-metadata:
-  name: debezium-ui-api
-  namespace: kafka
-spec:
-  http:
-    - name: api
-      match:
-        hosts: ["debezium-ui.app.suncoast.systems"]
-        paths: ["/api/*"]
-      backends:
-        - serviceName: conductor
-          servicePort: 8080
-      # Optional: if Conductor expects paths without the /api prefix
-      plugins:
-        - name: proxy-rewrite
-          enable: true
-          config:
-            regex_uri:
-              - "^/api/(.*)"
-              - "/$1"
-      priority: 900
+# apiVersion: apisix.apache.org/v2
+# kind: ApisixRoute
+# metadata:
+#   name: debezium-ui-api
+#   namespace: kafka
+# spec:
+#   http:
+#     - name: api
+#       match:
+#         hosts: ["debezium-ui.app.suncoast.systems"]
+#         paths: ["/api/*"]
+#       backends:
+#         - serviceName: conductor
+#           servicePort: 8080
+#       # Optional: if Conductor expects paths without the /api prefix
+#       plugins:
+#         - name: proxy-rewrite
+#           enable: true
+#           config:
+#             regex_uri:
+#               - "^/api/(.*)"
+#               - "/$1"
+#       priority: 900
