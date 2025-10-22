@@ -589,18 +589,19 @@ spec:
           name: kafka-connect-log4j
           items: [{ key: log4j.properties, path: log4j.properties }]
       initContainers:
-      - name: install-debezium-rest-extension
-        image: curlimages/curl:8.8.0
-        command: ["/bin/sh","-lc"]
+      - name: install-debezium
+        image: confluentinc/cp-kafka-connect:7.7.1
+        command: ["/bin/bash","-lc"]
         args:
-          - |
-            set -eux
-            mkdir -p /plugins/debezium-rest
-            # Grab a recent matching version; 3.1.1.Final shown as example
-            curl -fL -o /plugins/debezium-rest/debezium-connect-rest-extension.jar \
-              https://repo1.maven.org/maven2/io/debezium/debezium-connect-rest-extension/3.1.1.Final/debezium-connect-rest-extension-3.1.1.Final.jar
-            echo "Installed Debezium REST extension:"
-            ls -l /plugins/debezium-rest
+        - |
+          set -eux
+          mkdir -p /plugins/debezium
+          # Install Debezium Postgres connector (brings Debezium core + API)
+          confluent-hub install --no-prompt --component-dir /plugins/debezium debezium/debezium-connector-postgresql:3.1.1
+          # Put the REST extension JAR INTO THE SAME DIRECTORY so it shares the classloader
+          curl -fL -o /plugins/debezium/debezium-connector-postgresql/debezium-connect-rest-extension-3.1.1.Final.jar \
+            https://repo1.maven.org/maven2/io/debezium/debezium-connect-rest-extension/3.1.1.Final/debezium-connect-rest-extension-3.1.1.Final.jar
+          ls -l /plugins/debezium/debezium-connector-postgresql
         volumeMounts: [{ name: plugins, mountPath: /plugins }]
       - name: install-bq
         image: confluentinc/cp-kafka-connect:7.6.1
@@ -701,7 +702,7 @@ spec:
         - name: CONNECT_PLUGIN_DISCOVERY
           value: "only_scan"
         - name: CONNECT_PLUGIN_PATH
-          value: "/plugins/wepay-kafka-connect-bigquery,/plugins/yb/debezium-postgres,/plugins/yb/yugabytedb-grpc,/plugins/debezium-rest"
+          value: "/plugins/debezium,/plugins/wepay-kafka-connect-bigquery,/plugins/yb/debezium-postgres,/plugins/yb/yugabytedb-grpc"
         - name: CONNECT_BOOTSTRAP_SERVERS
           value: "kafka.kafka.svc.internal.lan:9092"
         - name: CONNECT_GROUP_ID
