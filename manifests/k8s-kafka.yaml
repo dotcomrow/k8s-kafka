@@ -1105,14 +1105,18 @@ kind: Service
 metadata:
   name: debezium-ui
   namespace: kafka
-  annotations:
-    argocd.argoproj.io/sync-wave: "47"
+  labels:
+    app.kubernetes.io/part-of: debezium-platform
 spec:
-  selector: { app: debezium-ui }
+  type: ClusterIP
   ports:
     - name: http
       port: 8080
-      targetPort: http
+      targetPort: 8080
+  selector:
+    # Typical labels emitted by the chart; adjust if needed after first sync:
+    app.kubernetes.io/instance: debezium-platform
+    app.kubernetes.io/component: ui
 # ---
 # apiVersion: apps/v1
 # kind: Deployment
