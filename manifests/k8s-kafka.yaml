@@ -1152,6 +1152,8 @@ spec:
             value: "GET,POST,PUT,DELETE,OPTIONS"
           - name: QUARKUS_HTTP_CORS_HEADERS
             value: "Authorization,Content-Type,X-Requested-With,Accept,Origin"
+          - name: QUARKUS_HTTP_PROXY_PROXY_ADDRESS_FORWARDING
+            value: "true"
         readinessProbe:
           httpGet: { path: /, port: http }
           initialDelaySeconds: 10
