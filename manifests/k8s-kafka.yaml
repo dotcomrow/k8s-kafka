@@ -1204,7 +1204,7 @@ spec:
         - name: OAUTH2_PROXY_CLIENT_SECRET
           valueFrom: { secretKeyRef: { name: oauth2-proxy-debezium-secrets, key: client_secret } }
         - name: OAUTH2_PROXY_COOKIE_SECRET
-          valueFrom: { secretKeyRef: { name: oauth2-proxy-debezium-secrets, key: cookie_secret } }
+          valueFrom: { secretKeyRef: { name: oauth2-proxy-secrets, key: cookie_secret } }
         readinessProbe:
           httpGet: { path: /ping, port: http }
           initialDelaySeconds: 5
@@ -1258,7 +1258,7 @@ spec:
         - name: OAUTH2_PROXY_CLIENT_SECRET
           valueFrom: { secretKeyRef: { name: oauth2-proxy-debezium-secrets, key: client_secret } }
         - name: OAUTH2_PROXY_COOKIE_SECRET
-          valueFrom: { secretKeyRef: { name: oauth2-proxy-debezium-secrets, key: cookie_secret } }
+          valueFrom: { secretKeyRef: { name: oauth2-proxy-secrets, key: cookie_secret } }
         readinessProbe:
           httpGet: { path: /api, port: http }
           initialDelaySeconds: 5
