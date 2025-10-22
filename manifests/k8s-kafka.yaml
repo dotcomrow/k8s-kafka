@@ -1114,7 +1114,7 @@ spec:
       port: 8080
       targetPort: 8080
   selector:
-    app.kubernetes.io/name: debezium-operator
+    app.kubernetes.io/name: conductor
     app.kubernetes.io/managed-by: quarkus
 # ---
 # apiVersion: apps/v1
