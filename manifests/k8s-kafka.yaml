@@ -1134,7 +1134,7 @@ spec:
       containers:
       - name: ui
         # Pin later if you prefer: e.g., quay.io/debezium/debezium-ui:2.x.y.Final
-        image: quay.io/debezium/debezium-ui:2.6.2.Final
+        image: quay.io/debezium/debezium-ui:2.5
         imagePullPolicy: IfNotPresent
         ports: [{ name: http, containerPort: 8080 }]
         env:
