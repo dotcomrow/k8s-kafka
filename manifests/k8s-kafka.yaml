@@ -1185,8 +1185,9 @@ spec:
           - --http-address=0.0.0.0:4180
           - --upstream=http://debezium-ui.kafka.svc.cluster.local:8080/
           - --redirect-url=https://debezium-ui.app.suncoast.systems/oauth2/callback
+          - --cookie-name=_oauth2_proxy
           - --cookie-secure=true
-          - --cookie-samesite=none
+          - --cookie-samesite=lax
           - --cookie-refresh=1h
           - --cookie-expire=8h
           - --cookie-domain=.app.suncoast.systems
@@ -1238,8 +1239,9 @@ spec:
           - --http-address=0.0.0.0:4180
           - --upstream=http://conductor.kafka.svc.cluster.local:8080/
           - --redirect-url=https://debezium-ui.app.suncoast.systems/oauth2/callback
+          - --cookie-name=_oauth2_proxy
           - --cookie-secure=true
-          - --cookie-samesite=none
+          - --cookie-samesite=lax
           - --cookie-refresh=1h
           - --cookie-expire=8h
           - --cookie-domain=.app.suncoast.systems
