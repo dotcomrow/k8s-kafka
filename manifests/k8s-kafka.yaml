@@ -598,34 +598,49 @@ spec:
             ROOT="/plugins/debezium"
             mkdir -p "$ROOT"
 
-            echo "[DBZ] Installing from Confluent Hub..."
+            echo "[DBZ] Installing connector from Confluent Hub..."
             confluent-hub install --no-prompt --component-dir "$ROOT" debezium/debezium-connector-postgresql:latest
 
-            echo "[DBZ] Locating installed connector JAR..."
-            JAR="$(find "$ROOT" -maxdepth 3 \
-                    -type f \( -name 'debezium-connector-postgres*.jar' -o -name 'debezium-connector-postgresql-*.jar' \) \
+            echo "[DBZ] Locating connector JAR..."
+            JAR="$(find "$ROOT" -maxdepth 4 -type f \
+                    \( -name 'debezium-connector-postgres-*.jar' -o -name 'debezium-connector-postgresql-*.jar' \) \
                     | head -n1 || true)"
-
             if [ -z "${JAR}" ]; then
-              echo "[DBZ][ERROR] Could not find Debezium Postgres connector JAR after install."
-              echo "[DBZ] Installed tree for debugging:"
-              find "$ROOT" -maxdepth 3 -print
+              echo "[DBZ][ERROR] Unable to find Debezium Postgres connector JAR after install."
+              echo "Tree for debugging:"; find "$ROOT" -maxdepth 4 -print
               exit 1
             fi
 
             DBZ_DIR="$(dirname "$JAR")"
-            echo "[DBZ] Using plugin dir: $DBZ_DIR"
-            echo "[DBZ] JAR: $(basename "$JAR")"
+            DBZ_VER_FULL="$(basename "$JAR" | sed -nE 's/.*-([0-9]+\.[0-9]+\.[0-9]+)\.Final\.jar/\1/p' | head -n1)"
+            DBZ_VER_MM="$(echo "${DBZ_VER_FULL:-3.1.1}" | cut -d. -f1-2)"
 
-            # Extract X.Y from the JAR name; fallback to 3.1 if pattern changes
-            DBZ_VER_MM="$(basename "$JAR" | sed -nE 's/.*-([0-9]+)\.([0-9]+)\..*/\1.\2/p' | head -n1)"
-            DBZ_VER_MM="${DBZ_VER_MM:-3.1}"
-            REST_URL="https://repo1.maven.org/maven2/io/debezium/debezium-connect-rest-extension/${DBZ_VER_MM}.Final/debezium-connect-rest-extension-${DBZ_VER_MM}.Final.jar"
+            echo "[DBZ] Connector jar: $(basename "$JAR")"
+            echo "[DBZ] Derived versions: full=${DBZ_VER_FULL:-unknown}, minor=${DBZ_VER_MM}"
 
-            echo "[DBZ] Fetching REST extension: $REST_URL"
-            curl -fL -o "${DBZ_DIR}/debezium-connect-rest-extension.jar" "$REST_URL"
+            # Try full patch first if present, then roll back within the same minor
+            CANDIDATES=()
+            if [ -n "${DBZ_VER_FULL:-}" ]; then CANDIDATES+=("${DBZ_VER_FULL}.Final"); fi
+            CANDIDATES+=("${DBZ_VER_MM}.2.Final" "${DBZ_VER_MM}.1.Final" "${DBZ_VER_MM}.0.Final")
+            # Last resort: known good
+            CANDIDATES+=("3.1.1.Final" "3.1.0.Final" "3.0.4.Final")
 
-            echo "[DBZ] Final plugin contents:"
+            DL_OK=""
+            for V in "${CANDIDATES[@]}"; do
+              URL="https://repo1.maven.org/maven2/io/debezium/debezium-connect-rest-extension/${V}/debezium-connect-rest-extension-${V}.jar"
+              echo "[DBZ] Trying REST extension ${V} -> ${URL}"
+              if curl -fsSL -o "${DBZ_DIR}/debezium-connect-rest-extension.jar" "$URL"; then
+                DL_OK="${V}"
+                break
+              fi
+            done
+
+            if [ -z "$DL_OK" ]; then
+              echo "[DBZ][ERROR] Could not fetch any debezium-connect-rest-extension version."
+              exit 1
+            fi
+
+            echo "[DBZ] Installed REST extension version: ${DL_OK} into: ${DBZ_DIR}"
             ls -l "${DBZ_DIR}"
         volumeMounts: [{ name: plugins, mountPath: /plugins }]
       - name: install-bq
