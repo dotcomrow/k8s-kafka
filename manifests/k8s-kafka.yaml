@@ -659,66 +659,66 @@ spec:
           value: "https://github.com/yugabyte/debezium-connector-yugabytedb/releases/download/vdz.1.9.5.yb.grpc.2024.2.3/debezium-connector-yugabytedb-dz.1.9.5.yb.grpc.2024.2.3.jar"
         command: ["/bin/sh","-lc"]
         args:
-          - |
-            set -eu
+        - |
+          set -eu
 
-            echo "[FETCH-YB] preparing plugin dirs..."
-            mkdir -p /plugins/yb /plugins/yb/debezium-postgres /plugins/yb/yugabytedb-grpc
+          echo "[FETCH-YB] preparing plugin dirs..."
+          mkdir -p /plugins/yb /plugins/yb/debezium-postgres /plugins/yb/yugabytedb-grpc
 
-            copy_if_dir() { d="$1"; [ -d "$d" ] && cp -R "$d"/. /plugins/yb/ || true; }
+          copy_if_dir() { d="$1"; [ -d "$d" ] && cp -R "$d"/. /plugins/yb/ || true; }
 
-            # 1) Copy anything embedded in the image (if present)
-            for C in \
-              /kafka/connect/yugabytedb \
-              /opt/kafka/connect/yugabytedb \
-              /debezium-connector/yugabytedb \
-              /opt/debezium-connector/yugabytedb \
-              /kafka/connect/debezium-connector-postgres \
-              /debezium-connector/debezium-connector-postgres \
-              /opt/kafka/connect/yugabytedb/debezium-connector-postgres
-            do
-              copy_if_dir "$C"
-            done
+          # 1) Copy anything embedded in the image (if present)
+          for C in \
+            /kafka/connect/yugabytedb \
+            /opt/kafka/connect/yugabytedb \
+            /debezium-connector/yugabytedb \
+            /opt/debezium-connector/yugabytedb \
+            /kafka/connect/debezium-connector-postgres \
+            /debezium-connector/debezium-connector-postgres \
+            /opt/kafka/connect/yugabytedb/debezium-connector-postgres
+          do
+            copy_if_dir "$C"
+          done
 
-            # 2) Fetch the Yugabyte gRPC connector JAR
-            if [ -n "${YB_CONNECTOR_URL:-}" ]; then
-              echo "[FETCH-YB] downloading Yugabyte gRPC connector from: ${YB_CONNECTOR_URL}"
-              fname="$(basename "${YB_CONNECTOR_URL%%\?*}")"
-              tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
-              curl -fL --retry 5 --retry-delay 2 -o "$tmp/$fname" "$YB_CONNECTOR_URL"
-              case "$fname" in
-                *.jar) cp "$tmp/$fname" "/plugins/yb/yugabytedb-grpc/$fname" ;;
-                *)     cp "$tmp/$fname" "/plugins/yb/$fname" ;;
-              esac
-            fi
+          # 2) Fetch the Yugabyte gRPC connector JAR
+          if [ -n "${YB_CONNECTOR_URL:-}" ]; then
+            echo "[FETCH-YB] downloading Yugabyte gRPC connector from: ${YB_CONNECTOR_URL}"
+            fname="$(basename "${YB_CONNECTOR_URL%%\?*}")"
+            tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+            curl -fL --retry 5 --retry-delay 2 -o "$tmp/$fname" "$YB_CONNECTOR_URL"
+            case "$fname" <=?
+              *.jar) cp "$tmp/$fname" "/plugins/yb/yugabytedb-grpc/$fname" ;;
+              *)     cp "$tmp/$fname" "/plugins/yb/$fname" ;;
+            esac
+          fi
 
-            # 3) Filename heuristic sorting (no unzip dependency)
-            set +e
-            for J in /plugins/yb/*.jar; do
-              [ -f "$J" ] || continue
-              b="$(basename "$J" | tr '[:upper:]' '[:lower:]')"
-              case "$b" in
-                *yugabytedb*connector*|*connector*yugabytedb*|*yugabyte*grpc*)
-                  mv -f "$J" /plugins/yb/yugabytedb-grpc/
-                  ;;
-                *)
-                  mv -f "$J" /plugins/yb/debezium-postgres/
-                  ;;
-              esac
-            done
-            set -e
+          # 3) Filename heuristic sorting (no unzip dependency)
+          set +e
+          for J in /plugins/yb/*.jar; do
+            [ -f "$J" ] || continue
+            b="$(basename "$J" | tr '[:upper:]' '[:lower:]')"
+            case "$b" in
+              *yugabytedb*connector*|*connector*yugabytedb*|*yugabyte*grpc*)
+                mv -f "$J" /plugins/yb/yugabytedb-grpc/
+                ;;
+              *)
+                mv -f "$J" /plugins/yb/debezium-postgres/
+                ;;
+            esac
+          done
+          set -e
 
-            # 4) Validate presence
-            if ! find /plugins/yb/yugabytedb-grpc -type f -name '*.jar' -print | head -n1 | grep -q . ; then
-              echo "[FETCH-YB] ERROR: YugabyteDB gRPC connector not found after download."
-              echo "           Check network/URL or supply a reachable YB_CONNECTOR_URL."
-              exit 1
-            fi
+          # 4) Validate presence
+          if ! find /plugins/yb/yugabytedb-grpc -type f -name '*.jar' -print | head -n1 | grep -q . ; then
+            echo "[FETCH-YB] ERROR: YugabyteDB gRPC connector not found after download."
+            echo "           Check network/URL or supply a reachable YB_CONNECTOR_URL."
+            exit 1
+          fi
 
-            echo "[FETCH-YB] Installed files:"
-            find /plugins/yb -maxdepth 2 -type f -name '*.jar' -print | sed 's/^/  /'
+          echo "[FETCH-YB] Installed files:"
+          find /plugins/yb -maxdepth 2 -type f -name '*.jar' -print | sed 's/^/  /'
         volumeMounts:
-          - { name: plugins, mountPath: /plugins }
+        - { name: plugins, mountPath: /plugins }
 
       - name: create-connect-topics
         image: apache/kafka:3.9.0
@@ -805,6 +805,7 @@ spec:
         volumeMounts:
         - { name: plugins, mountPath: /plugins }
         - { name: log4j,  mountPath: /kafka/etc }
+
 # ============================================================================
 # Kafka UI + oauth2-proxy (waves 45-46)
 # ============================================================================
@@ -1116,61 +1117,8 @@ spec:
   selector:
     app.kubernetes.io/name: stage
 # ---
-# apiVersion: apps/v1
-# kind: Deployment
-# metadata:
-#   name: debezium-ui
-#   namespace: kafka
-#   annotations:
-#     argocd.argoproj.io/sync-wave: "47"
-# spec:
-#   replicas: 1
-#   selector:
-#     matchLabels: { app: debezium-ui }
-#   template:
-#     metadata:
-#       labels: { app: debezium-ui }
-#       annotations:
-#         linkerd.io/inject: "disabled"
-#     spec:
-#       containers:
-#       - name: ui
-#         # Pin later if you prefer: e.g., quay.io/debezium/debezium-ui:2.x.y.Final
-#         image: quay.io/debezium/debezium-ui:2.5
-#         imagePullPolicy: IfNotPresent
-#         ports: [{ name: http, containerPort: 8080 }]
-#         env:
-#           # Comma-separate if you add more Connect clusters later
-#           - name: KAFKA_CONNECT_URIS
-#             value: "http://kafka-connect.kafka.svc.cluster.local:8083"
-#           # Optional: turn on DEBUG for initial bring-up, then remove
-#           - name: QUARKUS_LOG_LEVEL
-#             value: "DEBUG"
-#           - name: QUARKUS_HTTP_CORS
-#             value: "true"
-#           - name: QUARKUS_HTTP_CORS_ORIGINS
-#             value: "https://debezium-ui.app.suncoast.systems"
-#           - name: QUARKUS_HTTP_CORS_METHODS
-#             value: "GET,POST,PUT,DELETE,OPTIONS"
-#           - name: QUARKUS_HTTP_CORS_HEADERS
-#             value: "Authorization,Content-Type,X-Requested-With,Accept,Origin"
-#           - name: QUARKUS_HTTP_PROXY_PROXY_ADDRESS_FORWARDING
-#             value: "true"
-#         readinessProbe:
-#           httpGet: { path: /, port: http }
-#           initialDelaySeconds: 10
-#           periodSeconds: 5
-#           failureThreshold: 6
-#         livenessProbe:
-#           httpGet: { path: /, port: http }
-#           initialDelaySeconds: 30
-#           periodSeconds: 10
-#           failureThreshold: 6
-#         resources:
-#           requests: { cpu: "100m", memory: "128Mi" }
-#           limits: { cpu: "500m", memory: "512Mi" }
+# (Deployment for Debezium UI via Stage is external to this manifest)
 
-# # ----- OAuth2-Proxy front-end for Debezium UI (separate instance from Kafka UI) -----
 ---
 apiVersion: v1
 kind: Secret
@@ -1248,3 +1196,100 @@ spec:
         resources:
           requests: { cpu: "50m", memory: "64Mi" }
           limits: { cpu: "300m", memory: "256Mi" }
+
+# ============================================================================
+# NEW: env-config.js override + path routing for Stage UI (waves 48–49)
+# ============================================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: stage-env-config
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "48"
+data:
+  env-config.js: |
+    // Overridden by ops to keep Stage calls same-origin and HTTPS
+    window.__ENV__ = {
+      CONDUCTOR_URL: '/api'
+    };
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stage-envconfig-srv
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "48"
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: stage-envconfig-srv }
+  template:
+    metadata:
+      labels: { app: stage-envconfig-srv }
+      annotations:
+        linkerd.io/inject: "disabled"
+    spec:
+      containers:
+      - name: web
+        image: nginx:1.27-alpine
+        ports:
+        - { containerPort: 80, name: http }
+        volumeMounts:
+        - name: webroot
+          mountPath: /usr/share/nginx/html
+      volumes:
+      - name: webroot
+        configMap:
+          name: stage-env-config
+          items:
+          - key: env-config.js
+            path: env-config.js
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: stage-envconfig-srv
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "48"
+spec:
+  type: ClusterIP
+  selector: { app: stage-envconfig-srv }
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: debezium-ui-extras
+  namespace: kafka
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    argocd.argoproj.io/sync-wave: "49"
+spec:
+  rules:
+  - host: debezium-ui.app.suncoast.systems
+    http:
+      paths:
+      # Serve the fixed env-config.js
+      - path: /env-config.js
+        pathType: Exact
+        backend:
+          service:
+            name: stage-envconfig-srv
+            port:
+              number: 80
+
+      # Forward /api to Conductor (expects /api/*)
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: conductor
+            port:
+              number: 8080
