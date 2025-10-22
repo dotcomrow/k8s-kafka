@@ -1115,8 +1115,7 @@ spec:
       targetPort: 8080
   selector:
     # Typical labels emitted by the chart; adjust if needed after first sync:
-    app.kubernetes.io/instance: debezium-platform
-    app.kubernetes.io/component: ui
+    app.kubernetes.io/name: debezium-operator
 # ---
 # apiVersion: apps/v1
 # kind: Deployment
