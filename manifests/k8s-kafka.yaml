@@ -1352,6 +1352,8 @@ kind: ApisixRoute
 metadata:
   name: debezium-api-route
   namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "49"
 spec:
   ingressClassName: apisix
   http:
