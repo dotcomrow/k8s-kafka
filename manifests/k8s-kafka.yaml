@@ -596,12 +596,15 @@ spec:
         - |
           set -eux
           mkdir -p /plugins/debezium
-          # Install Debezium Postgres connector (brings Debezium core + API)
-          confluent-hub install --no-prompt --component-dir /plugins/debezium debezium/debezium-connector-postgresql:3.1.1
-          # Put the REST extension JAR INTO THE SAME DIRECTORY so it shares the classloader
-          curl -fL -o /plugins/debezium/debezium-connector-postgresql/debezium-connect-rest-extension-3.1.1.Final.jar \
-            https://repo1.maven.org/maven2/io/debezium/debezium-connect-rest-extension/3.1.1.Final/debezium-connect-rest-extension-3.1.1.Final.jar
-          ls -l /plugins/debezium/debezium-connector-postgresql
+          # Let Hub resolve to the latest it actually has (typically 2.x)
+          confluent-hub install --no-prompt --component-dir /plugins/debezium debezium/debezium-connector-postgresql:latest
+          # Discover the installed dir (e.g., /plugins/debezium/debezium-connector-postgresql)
+          DBZ_DIR="$(dirname "$(find /plugins/debezium -maxdepth 2 -name 'debezium-connector-postgresql-*.jar' | head -n1)")"
+          # Match the REST extension version to the connector major.minor (good-enough heuristic)
+          DBZ_VER="$(basename "$(find "$DBZ_DIR" -maxdepth 1 -name 'debezium-connector-postgresql-*.jar' | head -n1)" | sed -E 's/.*-([0-9]+\.[0-9]+)\..*/\1/')"
+          curl -fL -o "$DBZ_DIR/debezium-connect-rest-extension.jar" \
+            "https://repo1.maven.org/maven2/io/debezium/debezium-connect-rest-extension/${DBZ_VER}.Final/debezium-connect-rest-extension-${DBZ_VER}.Final.jar"
+          ls -l "$DBZ_DIR"
         volumeMounts: [{ name: plugins, mountPath: /plugins }]
       - name: install-bq
         image: confluentinc/cp-kafka-connect:7.6.1
