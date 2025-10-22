@@ -1371,8 +1371,7 @@ spec:
         - name: cors
           enable: true
           config:
-            allow_origins: 
-             - "https://debezium-ui.app.suncoast.systems"
+            allow_origins: "https://debezium-ui.app.suncoast.systems"
             allow_origins_by_regex: 
              - "^https://.*\\.app\\.suncoast\\.systems$"
             allow_methods: "GET,POST,PUT,PATCH,DELETE,OPTIONS"
