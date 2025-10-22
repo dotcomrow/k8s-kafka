@@ -1114,8 +1114,8 @@ spec:
       port: 8080
       targetPort: 8080
   selector:
-    # Typical labels emitted by the chart; adjust if needed after first sync:
     app.kubernetes.io/name: debezium-operator
+    app.kubernetes.io/managed-by: quarkus
 # ---
 # apiVersion: apps/v1
 # kind: Deployment
