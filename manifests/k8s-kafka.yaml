@@ -1172,80 +1172,80 @@ spec:
 #           limits: { cpu: "500m", memory: "512Mi" }
 
 # # ----- OAuth2-Proxy front-end for Debezium UI (separate instance from Kafka UI) -----
-# ---
-# apiVersion: v1
-# kind: Secret
-# metadata:
-#   name: oauth2-proxy-debezium-secrets
-#   namespace: kafka
-# type: Opaque
-# stringData:
-#   client_id: "<path:secret/data/k8s-kafka-debezium-ui-oauth-clientid#value>"
-#   client_secret: "<path:secret/data/k8s-kafka-debezium-ui-oauth-clientsecret#value>"
-#   cookie_secret: "<path:secret/data/k8s-kafka-debezium-ui-oauth-cookiesecret#value>"
-# ---
-# apiVersion: v1
-# kind: Service
-# metadata:
-#   name: oauth2-proxy-debezium
-#   namespace: kafka
-#   annotations:
-#     argocd.argoproj.io/sync-wave: "48"
-# spec:
-#   selector: { app: oauth2-proxy-debezium }
-#   ports:
-#     - name: http
-#       port: 4180
-#       targetPort: http
-# ---
-# apiVersion: apps/v1
-# kind: Deployment
-# metadata:
-#   name: oauth2-proxy-debezium
-#   namespace: kafka
-#   annotations:
-#     argocd.argoproj.io/sync-wave: "48"
-# spec:
-#   replicas: 1
-#   selector:
-#     matchLabels: { app: oauth2-proxy-debezium }
-#   template:
-#     metadata:
-#       labels: { app: oauth2-proxy-debezium }
-#       annotations:
-#         linkerd.io/inject: "disabled"
-#     spec:
-#       containers:
-#       - name: proxy
-#         image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
-#         ports: [{ name: http, containerPort: 4180 }]
-#         args:
-#           - --provider=github
-#           - --http-address=0.0.0.0:4180
-#           - --upstream=http://debezium-ui.kafka.svc.cluster.local:8080/
-#           - --redirect-url=https://debezium-ui.app.suncoast.systems/oauth2/callback
-#           - --cookie-secure=true
-#           - --cookie-samesite=lax
-#           - --cookie-refresh=1h
-#           - --cookie-expire=8h
-#           - --email-domain=*
-#           - --set-authorization-header=true
-#           - --pass-authorization-header=true
-#           - --pass-access-token=true
-#           - --skip-provider-button=true
-#           - --allowed-group=dotcomrow:kafka_gui_users
-#           - --skip-auth-preflight=true
-#         env:
-#         - name: OAUTH2_PROXY_CLIENT_ID
-#           valueFrom: { secretKeyRef: { name: oauth2-proxy-debezium-secrets, key: client_id } }
-#         - name: OAUTH2_PROXY_CLIENT_SECRET
-#           valueFrom: { secretKeyRef: { name: oauth2-proxy-debezium-secrets, key: client_secret } }
-#         - name: OAUTH2_PROXY_COOKIE_SECRET
-#           valueFrom: { secretKeyRef: { name: oauth2-proxy-debezium-secrets, key: cookie_secret } }
-#         readinessProbe:
-#           httpGet: { path: /ping, port: http }
-#           initialDelaySeconds: 5
-#           periodSeconds: 5
-#         resources:
-#           requests: { cpu: "50m", memory: "64Mi" }
-#           limits: { cpu: "300m", memory: "256Mi" }
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: oauth2-proxy-debezium-secrets
+  namespace: kafka
+type: Opaque
+stringData:
+  client_id: "<path:secret/data/k8s-kafka-debezium-ui-oauth-clientid#value>"
+  client_secret: "<path:secret/data/k8s-kafka-debezium-ui-oauth-clientsecret#value>"
+  cookie_secret: "<path:secret/data/k8s-kafka-debezium-ui-oauth-cookiesecret#value>"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oauth2-proxy-debezium
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "48"
+spec:
+  selector: { app: oauth2-proxy-debezium }
+  ports:
+    - name: http
+      port: 4180
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oauth2-proxy-debezium
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "48"
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: oauth2-proxy-debezium }
+  template:
+    metadata:
+      labels: { app: oauth2-proxy-debezium }
+      annotations:
+        linkerd.io/inject: "disabled"
+    spec:
+      containers:
+      - name: proxy
+        image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
+        ports: [{ name: http, containerPort: 4180 }]
+        args:
+          - --provider=github
+          - --http-address=0.0.0.0:4180
+          - --upstream=http://debezium-ui.kafka.svc.cluster.local:8080/
+          - --redirect-url=https://debezium-ui.app.suncoast.systems/oauth2/callback
+          - --cookie-secure=true
+          - --cookie-samesite=lax
+          - --cookie-refresh=1h
+          - --cookie-expire=8h
+          - --email-domain=*
+          - --set-authorization-header=true
+          - --pass-authorization-header=true
+          - --pass-access-token=true
+          - --skip-provider-button=true
+          - --allowed-group=dotcomrow:kafka_gui_users
+          - --skip-auth-preflight=true
+        env:
+        - name: OAUTH2_PROXY_CLIENT_ID
+          valueFrom: { secretKeyRef: { name: oauth2-proxy-debezium-secrets, key: client_id } }
+        - name: OAUTH2_PROXY_CLIENT_SECRET
+          valueFrom: { secretKeyRef: { name: oauth2-proxy-debezium-secrets, key: client_secret } }
+        - name: OAUTH2_PROXY_COOKIE_SECRET
+          valueFrom: { secretKeyRef: { name: oauth2-proxy-debezium-secrets, key: cookie_secret } }
+        readinessProbe:
+          httpGet: { path: /ping, port: http }
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          requests: { cpu: "50m", memory: "64Mi" }
+          limits: { cpu: "300m", memory: "256Mi" }
