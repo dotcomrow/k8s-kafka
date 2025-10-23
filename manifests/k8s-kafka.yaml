@@ -871,6 +871,15 @@ metadata:
   namespace: kafka
   annotations:
     argocd.argoproj.io/sync-wave: "46"
+    teleport.dev/name: "kafka-gui"
+    teleport.dev/protocol: "http"
+    teleport.dev/public_addr: "kafka-gui.app.suncoast.systems"
+    teleport.dev/labels: "environment=production,service=kafka"
+  labels:
+    teleport.dev/enroll: "true"
+    app.kubernetes.io/name: kafka-gui
+    app.kubernetes.io/component: kafka
+    teleport.dev/app: "kafka-gui"
 spec:
   ports: [{ name: http, port: 4180, targetPort: 4180 }]
   selector: { app: oauth2-proxy }
