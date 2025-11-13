@@ -952,7 +952,7 @@ data:
       password: <path:secret/data/vaultadmin#value>
       database: kafka
       master_addresses: "yb-master-0.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-1.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-2.yb-master-service.yugabyte.svc.cluster.local:7100"
-      excluded_databases: "postgres,yugabyte,vaultadmin,system_platform,kafka,directus"
+      excluded_databases: "postgres,yugabyte,vaultadmin,system_platform,kafka,directus,gravitee"
     
     bigquery:
       credentials_path: /vault/secrets/gcp-key.json
