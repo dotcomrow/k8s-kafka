@@ -152,7 +152,7 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: yb-vault-config
+  name: yb-kafka-vault-config
   namespace: vault
   annotations:
     argocd.argoproj.io/sync-wave: "1"
@@ -205,23 +205,42 @@ spec:
           export PGPASSWORD="$PASS"
           PSQL_CMD="psql -h $PG_HOST -p $PG_PORT -U $PG_USER"
 
+          # Retry helper to dodge Yugabyte's occasional "Restarting a DDL transaction not supported" errors
+          run_psql() {
+            local db="$1" stmt="$2" attempt=1
+            while :; do
+              if out=$($PSQL_CMD -d "$db" -v ON_ERROR_STOP=1 -c "$stmt" 2>&1); then
+                printf '%s\n' "$out"
+                return 0
+              fi
+              if printf '%s\n' "$out" | grep -q "Restarting a DDL transaction not supported"; then
+                echo "psql DDL restart error, retrying (attempt $attempt)..."
+                attempt=$((attempt+1))
+                sleep 2
+                continue
+              fi
+              printf '%s\n' "$out" >&2
+              return 1
+            done
+          }
+
           # Check if the Kafka database exists in Yugabyte, and create it if it doesn't
           DB_EXISTS=$($PSQL_CMD -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$PG_DATABASE'")
           if [ "$DB_EXISTS" != "1" ]; then
-            $PSQL_CMD -d postgres -c "CREATE DATABASE $PG_DATABASE"
+            run_psql postgres "CREATE DATABASE \"$PG_DATABASE\""
           fi
 
           # Grant necessary privileges to the user on the Kafka database
-          $PSQL_CMD -d $PG_DATABASE -c "ALTER SCHEMA public OWNER TO \"$PG_USER\""
-          $PSQL_CMD -d $PG_DATABASE -c "GRANT ALL ON SCHEMA public TO \"$PG_USER\""
-          $PSQL_CMD -d $PG_DATABASE -c "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO \"$PG_USER\""
-          $PSQL_CMD -d $PG_DATABASE -c "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO \"$PG_USER\""
-          $PSQL_CMD -d $PG_DATABASE -c "GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO \"$PG_USER\""
-          $PSQL_CMD -d $PG_DATABASE -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO \"$PG_USER\""
-          $PSQL_CMD -d $PG_DATABASE -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO \"$PG_USER\""
-          $PSQL_CMD -d $PG_DATABASE -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO \"$PG_USER\""
-          $PSQL_CMD -d $PG_DATABASE -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TYPES TO \"$PG_USER\""
-          $PSQL_CMD -d postgres -c "GRANT CREATE ON DATABASE \"$PG_DATABASE\" TO \"$PG_USER\""
+          run_psql "$PG_DATABASE" "ALTER SCHEMA public OWNER TO \"$PG_USER\""
+          run_psql "$PG_DATABASE" "GRANT ALL ON SCHEMA public TO \"$PG_USER\""
+          run_psql "$PG_DATABASE" "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO \"$PG_USER\""
+          run_psql "$PG_DATABASE" "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO \"$PG_USER\""
+          run_psql "$PG_DATABASE" "GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO \"$PG_USER\""
+          run_psql "$PG_DATABASE" "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO \"$PG_USER\""
+          run_psql "$PG_DATABASE" "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO \"$PG_USER\""
+          run_psql "$PG_DATABASE" "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO \"$PG_USER\""
+          run_psql "$PG_DATABASE" "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TYPES TO \"$PG_USER\""
+          run_psql postgres "GRANT CREATE ON DATABASE \"$PG_DATABASE\" TO \"$PG_USER\""
           PG_ARGS="host=$PG_HOST port=$PG_PORT database=$PG_DATABASE user=$PG_USER"
           [ -n "${YB_MASTER_ADDRESSES:-}" ] && PG_ARGS="$PG_ARGS master_addresses=$YB_MASTER_ADDRESSES"
           vault kv put secret/kafka/pgconfig $PG_ARGS >/dev/null
