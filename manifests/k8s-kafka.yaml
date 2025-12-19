@@ -568,9 +568,9 @@ data:
     log4j.appender.stdout=org.apache.log4j.ConsoleAppender
     log4j.appender.stdout.layout=org.apache.log4j.PatternLayout
     log4j.appender.stdout.layout.ConversionPattern=[%d{ISO8601}] %-5p %c - %m%n
-    log4j.logger.io.debezium=DEBUG
-    log4j.logger.io.debezium.connector.yugabytedb=DEBUG
-    log4j.logger.com.wepay.kafka.connect.bigquery=DEBUG
+    log4j.logger.io.debezium=INFO
+    log4j.logger.io.debezium.connector.yugabytedb=INFO
+    log4j.logger.com.wepay.kafka.connect.bigquery=INFO
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -989,7 +989,7 @@ data:
       bootstrap: http://kafka.kafka.svc.internal.lan:9092
     
     logging:
-      level: DEBUG
+      level: INFO
       enable_cloud_logging: true
     
     health_check:
