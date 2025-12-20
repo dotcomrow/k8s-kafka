@@ -310,7 +310,7 @@ metadata:
     gravitee.io/definition-properties: '{"tier":"prod","region":"us-central1"}'
     gravitee.io/definition-services: '{"healthCheck":{"enabled":true,"schedule":"*/30 * * * * *"}}'
     gravitee.io/definition-resources: '[]'
-    gravitee.io/definition-plans: '{"KeyLess":{"name":"Free plan","description":"Auto plan","security":{"type":"KEY_LESS"}}}'
+    gravitee.io/definition-plans: '[{"name":"Open access","description":"No auth","security":"KEY_LESS","status":"PUBLISHED","validation":"AUTO","type":"API"}]'
     gravitee.io/definition-flows: '[]'
     gravitee.io/definition-response-templates: '{}'
 
