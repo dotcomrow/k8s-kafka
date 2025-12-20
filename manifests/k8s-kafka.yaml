@@ -273,6 +273,55 @@ metadata:
   namespace: kafka
   annotations:
     argocd.argoproj.io/sync-wave: "3"
+
+    # Gravitee discovery
+    gravitee.io/expose: "true"
+    gravitee.io/context-path: "/kafka"
+    gravitee.io/auth-required: "kafka-token"
+    gravitee.io/approval-required: "admin"
+
+    # Definition metadata (string)
+    gravitee.io/description: "Kafka API"
+    gravitee.io/version: "3.9.0"
+    gravitee.io/tags: "kafka,streaming,messaging"
+    gravitee.io/definition-name: "kafka-api"
+    gravitee.io/definition-summary: "Kafka API"
+    gravitee.io/definition-description: "Apache Kafka API"
+    gravitee.io/definition-version: "3.9.0"
+    gravitee.io/definition-context-path: "/kafka"
+    gravitee.io/definition-visibility: "PRIVATE"
+    gravitee.io/definition-state: "STARTED"
+    gravitee.io/definition-lifecycle-state: "PUBLISHED"
+
+    # Definition list fields (comma-separated)
+    gravitee.io/definition-groups: "platform,streaming"
+    gravitee.io/definition-tags: "kafka,streaming,events"
+    gravitee.io/definition-labels: "internal,critical"
+    gravitee.io/definition-categories: "streaming,messaging"
+    gravitee.io/definition-path-mappings: "/kafka/*"
+
+    # Definition assets (URLs)
+    gravitee.io/definition-picture-url: "https://example.com/images/kafka.png"
+    gravitee.io/definition-background-url: "https://example.com/images/kafka-bg.png"
+
+    # Definition JSON fields (raw JSON strings)
+    gravitee.io/definition-metadata: '{"owner":"platform","slack":"#platform"}'
+    gravitee.io/definition-properties: '{"tier":"prod","region":"us-central1"}'
+    gravitee.io/definition-services: '{"healthCheck":{"enabled":true,"schedule":"*/30 * * * * *"}}'
+    gravitee.io/definition-resources: '[]'
+    gravitee.io/definition-plans: '[]'
+    gravitee.io/definition-flows: '[]'
+    gravitee.io/definition-response-templates: '{}'
+    gravitee.io/definition-entrypoints: '[]'
+    gravitee.io/definition-endpoints: '[{"name":"kafka-internal","type":"kafka","target":"kafka://kafka.kafka.svc.cluster.local:9092","weight":1}]'
+
+    # Definition execution options
+    gravitee.io/definition-execution-mode: "V3"
+    gravitee.io/definition-flow-mode: "DEFAULT"
+
+    # OpenAPI import (if supported by discovery provider)
+    gravitee.io/definition-openapi-url: "http://kafka.kafka.svc.cluster.local:9092/openapi"
+    gravitee.io/definition-openapi: '{"openapi":"3.0.1","info":{"title":"Kafka API","version":"3.9.0"}}'
 spec:
   type: ClusterIP
   ports: [{ name: kafka, port: 9092, targetPort: 9092 }]
