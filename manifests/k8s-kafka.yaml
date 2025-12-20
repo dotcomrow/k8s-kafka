@@ -288,6 +288,7 @@ metadata:
     gravitee.io/definition-summary: "Kafka API"
     gravitee.io/definition-description: "Apache Kafka API"
     gravitee.io/definition-version: "3.9.0"
+    gravitee.io/definition-type: "KAFKA"
     gravitee.io/definition-context-path: "/kafka"
     gravitee.io/definition-visibility: "PRIVATE"
     gravitee.io/definition-state: "STARTED"
@@ -319,9 +320,6 @@ metadata:
     gravitee.io/definition-execution-mode: "V3"
     gravitee.io/definition-flow-mode: "DEFAULT"
 
-    # OpenAPI import (if supported by discovery provider)
-    gravitee.io/definition-openapi-url: "http://kafka.kafka.svc.cluster.local:9092/openapi"
-    gravitee.io/definition-openapi: '{"openapi":"3.0.1","info":{"title":"Kafka API","version":"3.9.0"}}'
 spec:
   type: ClusterIP
   ports: [{ name: kafka, port: 9092, targetPort: 9092 }]
