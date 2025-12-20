@@ -290,7 +290,7 @@ metadata:
     gravitee.io/definition-version: "3.9.0"
     gravitee.io/definition-type: "KAFKA"
     gravitee.io/definition-context-path: "/kafka"
-    gravitee.io/definition-visibility: "PRIVATE"
+    gravitee.io/definition-visibility: "PUBLIC"
     gravitee.io/definition-state: "STARTED"
     gravitee.io/definition-lifecycle-state: "PUBLISHED"
 
