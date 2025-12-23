@@ -273,49 +273,6 @@ metadata:
   namespace: kafka
   annotations:
     argocd.argoproj.io/sync-wave: "3"
-
-    # Gravitee discovery
-    gravitee.io/expose: "true"
-    gravitee.io/context-path: "/kafka"
-    gravitee.io/auth-required: "kafka-token"
-    gravitee.io/approval-required: "admin"
-
-    # Definition metadata (string)
-    gravitee.io/description: "Kafka API"
-    gravitee.io/version: "3.9.0"
-    gravitee.io/tags: "kafka,streaming,messaging"
-    gravitee.io/definition-name: "kafka-api"
-    gravitee.io/definition-summary: "Kafka API"
-    gravitee.io/definition-description: "Apache Kafka API"
-    gravitee.io/definition-version: "3.9.0"
-    gravitee.io/definition-type: "KAFKA"
-    gravitee.io/definition-context-path: "/kafka"
-    gravitee.io/definition-visibility: "PUBLIC"
-    gravitee.io/definition-state: "STARTED"
-    gravitee.io/definition-lifecycle-state: "PUBLISHED"
-
-    # Listener hints for native Kafka
-    gravitee.io/definition-listener-host: "kafka.kafka.svc.cluster.local"
-    gravitee.io/definition-listener-port: "9092"
-
-    # Definition list fields (comma-separated)
-    gravitee.io/definition-groups: "platform,streaming"
-    gravitee.io/definition-tags: "kafka,streaming,events"
-    gravitee.io/definition-labels: "internal,critical"
-    gravitee.io/definition-categories: "streaming,messaging"
-    gravitee.io/definition-path-mappings: "/kafka/*"
-
-    # Definition JSON fields (raw JSON strings)
-    gravitee.io/definition-metadata: '{"owner":"platform","slack":"#platform"}'
-    gravitee.io/definition-properties: '{"tier":"prod","region":"us-central1"}'
-    gravitee.io/definition-services: '{"healthCheck":{"enabled":true,"schedule":"*/30 * * * * *"}}'
-    gravitee.io/definition-resources: '[]'
-    gravitee.io/definition-plans: '{"open-access":{"name":"Open access","description":"No auth","security":{"type":"KEY_LESS"},"status":"PUBLISHED","validation":"AUTO","type":"API"}}'
-    gravitee.io/definition-flows: '[]'
-    gravitee.io/definition-response-templates: '{}'
-
-    # Optional overrides (leave empty to let sync controller generate)
-    gravitee.io/definition-entrypoints: '[]'
 spec:
   type: ClusterIP
   ports:
