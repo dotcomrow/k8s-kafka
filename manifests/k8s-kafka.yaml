@@ -343,9 +343,18 @@ spec:
         args:
         - |
           set -eu
-          META="/tmp/kraft-combined-logs/meta.properties"
+          LOG_DIR="/tmp/kraft-combined-logs/kafka-data"
+          CONF="/tmp/kraft/server.properties"
+          mkdir -p "$LOG_DIR" /tmp/kraft
+          cp /opt/kafka/config/kraft/server.properties "$CONF"
+          if grep -q '^log.dirs=' "$CONF"; then
+            sed -i "s|^log.dirs=.*|log.dirs=${LOG_DIR}|" "$CONF"
+          else
+            printf '\nlog.dirs=%s\n' "$LOG_DIR" >> "$CONF"
+          fi
+          META="${LOG_DIR}/meta.properties"
           if [ ! -f "$META" ]; then
-            /opt/kafka/bin/kafka-storage.sh format -t "${CLUSTER_ID}" -c /opt/kafka/config/kraft/server.properties --ignore-formatted
+            /opt/kafka/bin/kafka-storage.sh format -t "${CLUSTER_ID}" -c "$CONF" --ignore-formatted
           fi
         volumeMounts: [{ name: kafka-logs, mountPath: /tmp/kraft-combined-logs }]
       containers:
@@ -372,7 +381,7 @@ spec:
         - { name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "1" }
         - { name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR, value: "1" }
         - { name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS, value: "0" }
-        - { name: KAFKA_LOG_DIRS, value: "/tmp/kraft-combined-logs" }
+        - { name: KAFKA_LOG_DIRS, value: "/tmp/kraft-combined-logs/kafka-data" }
         - { name: KAFKA_LOG_RETENTION_HOURS, value: "48" }
         - { name: KAFKA_AUTO_CREATE_TOPICS_ENABLE, value: "true" }
         ports:
