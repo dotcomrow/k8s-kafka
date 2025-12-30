@@ -305,6 +305,14 @@ spec:
   serviceName: kafka-hs
   replicas: 1
   selector: { matchLabels: { app: kafka } }
+  volumeClaimTemplates:
+  - metadata:
+      name: kafka-logs
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 20Gi
   template:
     metadata:
       labels: { app: kafka }
@@ -325,7 +333,6 @@ spec:
       securityContext:
         fsGroup: 1000
         runAsUser: 0
-      volumes: [{ name: kafka-logs, emptyDir: {} }]
       initContainers:
       - name: format-storage
         image: apache/kafka:3.9.0
@@ -366,6 +373,7 @@ spec:
         - { name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR, value: "1" }
         - { name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS, value: "0" }
         - { name: KAFKA_LOG_DIRS, value: "/tmp/kraft-combined-logs" }
+        - { name: KAFKA_LOG_RETENTION_HOURS, value: "48" }
         - { name: KAFKA_AUTO_CREATE_TOPICS_ENABLE, value: "true" }
         ports:
         - { containerPort: 9092 }
@@ -394,6 +402,7 @@ data:
 
     # The name of the topic to store schemas in
     kafkastore.topic=_schemas
+    kafkastore.topic.replication.factor=1
 
     # If true, API requests that fail will include extra debugging information, including stack traces
     debug=false
@@ -436,6 +445,22 @@ spec:
           volumeMounts:
           - name: kafka-tools
             mountPath: /opt/kafka-tools
+        - name: ensure-schema-topics
+          image: apache/kafka:3.9.0
+          command: ["/bin/bash","-lc"]
+          args:
+          - |
+            set -eu
+            BOOT=kafka.kafka.svc.cluster.local:9092
+            until /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --list >/dev/null 2>&1; do
+              echo "Waiting for Kafka at $BOOT..."
+              sleep 5
+            done
+            for t in _schemas _schema_encoders; do
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --list | grep -qx "$t" || \
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --create --topic "$t" --partitions 1 --replication-factor 1 --config cleanup.policy=compact
+              /opt/kafka/bin/kafka-configs.sh --bootstrap-server "$BOOT" --entity-type topics --entity-name "$t" --alter --add-config cleanup.policy=compact
+            done
       containers:
         - name: schema-registry
           image: confluentinc/cp-schema-registry:7.7.1
@@ -740,9 +765,14 @@ spec:
         - |
           set -eu
           BOOT=kafka.kafka.svc.cluster.local:9092
+          until /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --list >/dev/null 2>&1; do
+            echo "Waiting for Kafka at $BOOT..."
+            sleep 5
+          done
           for t in _connect-configs _connect-offsets _connect-status; do
             /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --list | grep -qx "$t" || \
             /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --create --topic "$t" --partitions 1 --replication-factor 1 --config cleanup.policy=compact
+            /opt/kafka/bin/kafka-configs.sh --bootstrap-server "$BOOT" --entity-type topics --entity-name "$t" --alter --add-config cleanup.policy=compact
           done
       containers:
       - name: connect
