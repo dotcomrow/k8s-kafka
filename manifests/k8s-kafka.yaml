@@ -374,9 +374,6 @@ spec:
           tcpSocket: { port: 9092 }
           initialDelaySeconds: 10
           periodSeconds: 5
-        resources:
-          requests: { cpu: "250m", memory: "512Mi" }
-          limits: { cpu: "1500m", memory: "2Gi" }
         volumeMounts: [{ name: kafka-logs, mountPath: /tmp/kraft-combined-logs }]
 ---
 # ===========================================================================
@@ -514,13 +511,6 @@ spec:
             periodSeconds: 20
             timeoutSeconds: 10
             failureThreshold: 3
-          resources:
-            requests:
-              cpu: "500m"
-              memory: "512Mi"
-            limits:
-              cpu: "1"
-              memory: "1Gi"
           securityContext:
             runAsUser: 1000
             runAsGroup: 1000
@@ -822,9 +812,6 @@ spec:
           initialDelaySeconds: 60
           periodSeconds: 10
           failureThreshold: 6
-        resources:
-          requests: { cpu: "250m", memory: "768Mi" }
-          limits: { cpu: "1000m", memory: "1.5Gi" }
         volumeMounts:
         - { name: plugins, mountPath: /plugins }
         - { name: log4j,  mountPath: /kafka/etc }
@@ -872,9 +859,6 @@ spec:
           httpGet: { path: /, port: http }
           initialDelaySeconds: 10
           periodSeconds: 5
-        resources:
-          requests: { cpu: "100m", memory: "128Mi" }
-          limits: { cpu: "500m", memory: "512Mi" }
 ---
 apiVersion: v1
 kind: Secret
@@ -953,9 +937,6 @@ spec:
           httpGet: { path: /ping, port: http }
           initialDelaySeconds: 5
           periodSeconds: 5
-        resources:
-          requests: { cpu: "50m", memory: "64Mi" }
-          limits: { cpu: "300m", memory: "256Mi" }
 
 # ============================================================================
 # REFACTORED Table Sync Controller (wave 50) — uses your packaged image
@@ -1090,9 +1071,6 @@ spec:
           httpGet: { path: /health, port: 8080 }
           initialDelaySeconds: 60
           periodSeconds: 20
-        resources:
-          requests: { cpu: "200m", memory: "256Mi" }
-          limits: { cpu: "1000m", memory: "1Gi" }
       volumes:
         - name: config
           configMap:
