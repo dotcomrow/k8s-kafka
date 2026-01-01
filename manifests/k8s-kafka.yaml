@@ -303,6 +303,8 @@ metadata:
 spec:
   serviceName: kafka-hs
   replicas: 1
+  updateStrategy:
+    type: OnDelete
   selector: { matchLabels: { app: kafka } }
   volumeClaimTemplates:
   - metadata:
