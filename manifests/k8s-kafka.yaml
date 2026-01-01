@@ -9,7 +9,6 @@ metadata:
     app: bq-yb-bootstrap
   annotations:
     linkerd.io/inject: "disabled"
-    scheduler.alpha.kubernetes.io/node-selector: "dedicated=ctrl-node"
     field.cattle.io/projectId: "local:infrastructure"
 ---
 apiVersion: v1
