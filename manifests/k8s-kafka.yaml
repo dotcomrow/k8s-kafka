@@ -920,6 +920,7 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "46"
     teleport.dev/name: "kafka-gui"
+    teleport.dev/description: "Kafka GUI"
     teleport.dev/protocol: "http"
     teleport.dev/public_addr: "kafka-gui.app.suncoast.systems"
     teleport.dev/labels: "environment=production,service=kafka"
