@@ -879,6 +879,8 @@ metadata:
   namespace: kafka
   annotations:
     argocd.argoproj.io/sync-wave: "45"
+  labels:
+    platform.suncoast.systems/vpa-exclude: "true"
 spec:
   replicas: 1
   selector: { matchLabels: { app: kafka-ui } }
@@ -896,6 +898,13 @@ spec:
         - { name: KAFKA_CLUSTERS_0_NAME, value: "local" }
         - { name: KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS, value: "kafka.kafka.svc.internal.lan:9092" }
         - { name: KAFKA_CLUSTERS_0_SCHEMAREGISTRY, value: "http://schema-registry.kafka.svc.internal.lan:8081" }
+        resources:
+          requests:
+            cpu: 100m
+            memory: "671629701"
+          limits:
+            cpu: 200m
+            memory: "751637651"
         readinessProbe:
           httpGet: { path: /, port: http }
           initialDelaySeconds: 10
