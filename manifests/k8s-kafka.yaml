@@ -940,6 +940,11 @@ spec:
           initialDelaySeconds: 60
           periodSeconds: 10
           failureThreshold: 6
+        startupProbe:
+          httpGet: { path: /actuator/health, port: http }
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          failureThreshold: 30
 ---
 apiVersion: v1
 kind: Secret
