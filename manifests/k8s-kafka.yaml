@@ -871,9 +871,14 @@ spec:
           failureThreshold: 6
         livenessProbe:
           httpGet: { path: /, port: 8083 }
-          initialDelaySeconds: 60
+          initialDelaySeconds: 180
           periodSeconds: 10
           failureThreshold: 6
+        startupProbe:
+          httpGet: { path: /connectors, port: 8083 }
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          failureThreshold: 30
         volumeMounts:
         - { name: plugins, mountPath: /plugins }
         - { name: log4j,  mountPath: /kafka/etc }
