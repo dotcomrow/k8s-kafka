@@ -1,0 +1,68 @@
+# ============================================================================
+# Namespace & RBAC (namespace: kafka)
+# ============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kafka
+  labels:
+    app: bq-yb-bootstrap
+  annotations:
+    linkerd.io/inject: "disabled"
+    field.cattle.io/projectId: "local:infrastructure"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bq-yb-bootstrap
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kafka-security-credentials
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+type: Opaque
+stringData:
+  admin_username: "<path:secret/data/kafka-admin-username#value>"
+  admin_password: "<path:secret/data/kafka-admin-password#value>"
+  connect_username: "<path:secret/data/kafka-connect-username#value>"
+  connect_password: "<path:secret/data/kafka-connect-password#value>"
+  schema_registry_username: "<path:secret/data/kafka-schema-registry-username#value>"
+  schema_registry_password: "<path:secret/data/kafka-schema-registry-password#value>"
+  kafka_ui_username: "<path:secret/data/kafka-ui-username#value>"
+  kafka_ui_password: "<path:secret/data/kafka-ui-password#value>"
+  graphql_async_username: "<path:secret/data/graphql-kafka-async-username#value>"
+  graphql_async_password: "<path:secret/data/graphql-kafka-async-password#value>"
+---
+# apiVersion: rbac.authorization.k8s.io/v1
+# kind: Role
+# metadata:
+#   name: bootstrap-ok-writer
+#   namespace: kafka
+#   annotations:
+#     argocd.argoproj.io/sync-wave: "0"
+# rules:
+# - apiGroups: [""]
+#   resources: ["configmaps"]
+#   verbs: ["get","list","create","update","patch"]
+# ---
+# apiVersion: rbac.authorization.k8s.io/v1
+# kind: RoleBinding
+# metadata:
+#   name: bootstrap-ok-writer
+#   namespace: kafka
+#   annotations:
+#     argocd.argoproj.io/sync-wave: "0"
+# subjects:
+# - kind: ServiceAccount
+#   name: bq-yb-bootstrap
+#   namespace: kafka
+# roleRef:
+#   apiGroup: rbac.authorization.k8s.io
+#   kind: Role
+#   name: bootstrap-ok-writer

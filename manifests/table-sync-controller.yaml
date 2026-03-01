@@ -1,0 +1,145 @@
+# # ============================================================================
+# # REFACTORED Table Sync Controller (wave 50) — uses your packaged image
+# # ============================================================================
+# ---
+# apiVersion: v1
+# kind: ConfigMap
+# metadata:
+#   name: table-sync-config
+#   namespace: kafka
+# data:
+#   orchestrator.yaml: |
+#     yugabytedb:
+#       host: yb-tserver-service.yugabyte.svc.cluster.local
+#       port: 5433
+#       user: vaultadmin
+#       password: <path:secret/data/vaultadmin#value>
+#       database: kafka
+#       master_addresses: "yb-master-0.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-1.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-2.yb-master-service.yugabyte.svc.cluster.local:7100"
+#       excluded_databases: "postgres,yugabyte,vaultadmin,system_platform,kafka,directus,gravitee,keycloak,openwebui"
+    
+#     bigquery:
+#       credentials_path: /vault/secrets/gcp-key.json
+
+#     redis:
+#       url: redis://<path:secret/data/redis#password>@redis-0.redis-headless.redis.svc.cluster.local:6379/0
+#       cacheKey: "table-sync-cache"
+#       default_ttl: 300
+#       cache_keys:
+#         row_counts: "row_counts"
+    
+#     kafka_connect:
+#       url: http://kafka-connect.kafka.svc.internal.lan:8083
+#       schema_registry_url: http://schema-registry.kafka.svc.internal.lan:8081
+#       bootstrap: http://kafka.kafka.svc.internal.lan:9092
+    
+#     logging:
+#       level: INFO
+#       enable_cloud_logging: true
+    
+#     health_check:
+#       port: 8080
+    
+#     processing:
+#       table_scanner: 
+#         max_scan_threads: 10
+#         scan_interval_seconds: 300
+
+#       database_prep:
+#         max_preparation_threads: 2
+#         scan_interval_seconds: 90
+
+#       cache_check:
+#         max_cache_check_threads: 6
+#         scan_interval_seconds: 90
+
+#       connector_cleanup:
+#         max_connector_cleanup_threads: 4
+#         scan_interval_seconds: 90
+# ---
+# apiVersion: apps/v1
+# kind: Deployment
+# metadata:
+#   name: bootstrap-watcher
+#   namespace: kafka
+#   annotations:
+#     argocd.argoproj.io/sync-wave: "50"
+# spec:
+#   replicas: 1
+#   selector:
+#     matchLabels: { app: bootstrap-watcher }
+#   template:
+#     metadata:
+#       labels: { app: bootstrap-watcher }
+#       annotations:
+#         linkerd.io/inject: "disabled"
+
+#         # ---- VAULT agent: render env files this app expects per README ----
+#         vault.hashicorp.com/agent-inject-permissions-gcp-key.json: "0644"
+#         vault.hashicorp.com/agent-inject: "true"
+#         vault.hashicorp.com/role: "data-bootstrap"
+#         vault.hashicorp.com/agent-pre-populate-only: "true"
+#         vault.hashicorp.com/exit-on-error: "false"
+
+#         # TEMP_STORAGE_BUCKET from bootstrap
+#         vault.hashicorp.com/agent-inject-secret-bootstrap.env: "secret/data/kafka/bq/bootstrap"
+#         vault.hashicorp.com/agent-inject-template-bootstrap.env: |
+#           {{- with secret "secret/data/kafka/bq/bootstrap" -}}
+#           {{ with .Data.data.bucket }}TEMP_STORAGE_BUCKET={{ . }}{{ end }}
+#           {{- end -}}
+
+#         # GCP SA JSON used by the app (and by BigQuery libs)
+#         vault.hashicorp.com/agent-inject-secret-gcp-key.json: "secret/data/kafka/bq/config"
+#         vault.hashicorp.com/agent-inject-template-gcp-key.json: |
+#           {{- with secret "secret/data/kafka/bq/config" -}}
+#           {{ .Data.data.sa_json }}
+#           {{- end -}}
+        
+#     spec:
+#       serviceAccountName: bq-yb-bootstrap
+#       securityContext: { fsGroup: 1000 }
+#       containers:
+#       - name: table-sync
+#         image: ghcr.io/dotcomrow/table-sync-image:ts-20251021-202553
+#         imagePullPolicy: Always
+#         resources:
+#           requests:
+#             cpu: "100m"
+#             memory: "256Mi"
+#           limits:
+#             cpu: "250m"
+#             memory: "512Mi"
+#         env:
+#           - name: CONFIG_PATH
+#             value: "/app/config/orchestrator.yaml"
+#           - name: GOOGLE_APPLICATION_CREDENTIALS
+#             value: "/vault/secrets/gcp-key.json"
+#         volumeMounts:
+#           - name: config
+#             mountPath: /app/config
+#         command: ["/bin/sh","-lc"]
+#         args:
+#           - |
+#             #!/bin/bash
+#             set -eu
+
+#             # Source any environment files from vault
+#             for f in /vault/secrets/*.env; do
+#               [ -s "$f" ] && set -a && . "$f" && set +a
+#             done
+
+#             # Start the application
+#             exec python /app/src/table_sync_orchestrator.py /app/config/orchestrator.yaml 2>&1
+#         readinessProbe:
+#           httpGet: { path: /health, port: 8080 }
+#           initialDelaySeconds: 20
+#           periodSeconds: 10
+#         livenessProbe:
+#           httpGet: { path: /health, port: 8080 }
+#           initialDelaySeconds: 60
+#           periodSeconds: 20
+#       volumes:
+#         - name: config
+#           configMap:
+#             name: table-sync-config
+# ---

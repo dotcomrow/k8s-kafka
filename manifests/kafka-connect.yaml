@@ -1,0 +1,339 @@
+# ============================================================================
+# Kafka Connect (wave 4) — with BigQuery + YB gRPC connectors
+# ============================================================================
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-connect
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+spec:
+  type: ClusterIP
+  ports: [{ name: rest, port: 8083, targetPort: 8083 }]
+  selector: { app: kafka-connect }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kafka-connect-log4j
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+data:
+  log4j.properties: |
+    log4j.rootLogger=INFO,stdout
+    log4j.appender.stdout=org.apache.log4j.ConsoleAppender
+    log4j.appender.stdout.layout=org.apache.log4j.PatternLayout
+    log4j.appender.stdout.layout.ConversionPattern=[%d{ISO8601}] %-5p %c - %m%n
+    log4j.logger.io.debezium=INFO
+    log4j.logger.io.debezium.connector.yugabytedb=INFO
+    log4j.logger.com.wepay.kafka.connect.bigquery=INFO
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-connect
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: kafka-connect } }
+  template:
+    metadata:
+      labels: { app: kafka-connect }
+      annotations:
+        linkerd.io/inject: "disabled"
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: "data-bootstrap"
+        vault.hashicorp.com/agent-pre-populate-only: "true"
+        vault.hashicorp.com/exit-on-error: "false"
+        vault.hashicorp.com/agent-inject-secret-gcp-key.json: "secret/data/kafka/bq/config"
+        vault.hashicorp.com/agent-inject-template-gcp-key.json: |
+          {{- with secret "secret/data/kafka/bq/config" -}}
+          {{ .Data.data.sa_json }}
+          {{- end -}}
+        vault.hashicorp.com/agent-inject-permissions-gcp-key.json: "0644"
+    spec:
+      serviceAccountName: bq-yb-bootstrap
+      securityContext: { fsGroup: 1000 }
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - { name: plugins, emptyDir: {} }
+      - name: log4j
+        configMap:
+          name: kafka-connect-log4j
+          items: [{ key: log4j.properties, path: log4j.properties }]
+      initContainers:
+      - name: install-debezium
+        image: confluentinc/cp-kafka-connect:7.7.1
+        command: ["/bin/bash","-lc"]
+        args:
+          - |
+            set -euo pipefail
+            ROOT="/plugins/debezium"
+            mkdir -p "$ROOT"
+
+            echo "[DBZ] Installing connector from Confluent Hub..."
+            confluent-hub install --no-prompt --component-dir "$ROOT" debezium/debezium-connector-postgresql:latest
+
+            echo "[DBZ] Locating connector JAR..."
+            JAR="$(find "$ROOT" -maxdepth 4 -type f \
+                    \( -name 'debezium-connector-postgres-*.jar' -o -name 'debezium-connector-postgresql-*.jar' \) \
+                    | head -n1 || true)"
+            if [ -z "${JAR}" ]; then
+              echo "[DBZ][ERROR] Unable to find Debezium Postgres connector JAR after install."
+              echo "Tree for debugging:"; find "$ROOT" -maxdepth 4 -print
+              exit 1
+            fi
+
+            DBZ_DIR="$(dirname "$JAR")"
+            DBZ_VER_FULL="$(basename "$JAR" | sed -nE 's/.*-([0-9]+\.[0-9]+\.[0-9]+)\.Final\.jar/\1/p' | head -n1)"
+            DBZ_VER_MM="$(echo "${DBZ_VER_FULL:-3.1.1}" | cut -d. -f1-2)"
+
+            echo "[DBZ] Connector jar: $(basename "$JAR")"
+            echo "[DBZ] Derived versions: full=${DBZ_VER_FULL:-unknown}, minor=${DBZ_VER_MM}"
+
+            # Try full patch first if present, then roll back within the same minor
+            CANDIDATES=()
+            if [ -n "${DBZ_VER_FULL:-}" ]; then CANDIDATES+=("${DBZ_VER_FULL}.Final"); fi
+            CANDIDATES+=("${DBZ_VER_MM}.2.Final" "${DBZ_VER_MM}.1.Final" "${DBZ_VER_MM}.0.Final")
+            # Last resort: known good
+            CANDIDATES+=("3.1.1.Final" "3.1.0.Final" "3.0.4.Final")
+
+            DL_OK=""
+            for V in "${CANDIDATES[@]}"; do
+              URL="https://repo1.maven.org/maven2/io/debezium/debezium-connect-rest-extension/${V}/debezium-connect-rest-extension-${V}.jar"
+              echo "[DBZ] Trying REST extension ${V} -> ${URL}"
+              if curl -fsSL -o "${DBZ_DIR}/debezium-connect-rest-extension.jar" "$URL"; then
+                DL_OK="${V}"
+                break
+              fi
+            done
+
+            if [ -z "$DL_OK" ]; then
+              echo "[DBZ][ERROR] Could not fetch any debezium-connect-rest-extension version."
+              exit 1
+            fi
+
+            echo "[DBZ] Installed REST extension version: ${DL_OK} into: ${DBZ_DIR}"
+            ls -l "${DBZ_DIR}"
+        volumeMounts: [{ name: plugins, mountPath: /plugins }]
+      - name: install-bq
+        image: confluentinc/cp-kafka-connect:7.6.1
+        command: ["/bin/bash","-lc"]
+        args:
+        - |
+          set -eu
+          mkdir -p /plugins
+          confluent-hub install --no-prompt --component-dir /plugins wepay/kafka-connect-bigquery:2.5.7
+        volumeMounts: [{ name: plugins, mountPath: /plugins }]
+      - name: fetch-yb-connector
+        image: curlimages/curl:8.8.0
+        env:
+        - name: YB_CONNECTOR_URL
+          value: "https://github.com/yugabyte/debezium-connector-yugabytedb/releases/download/vdz.1.9.5.yb.grpc.2024.2.3/debezium-connector-yugabytedb-dz.1.9.5.yb.grpc.2024.2.3.jar"
+        command: ["/bin/sh","-lc"]
+        args:
+          - |
+            set -eu
+
+            echo "[FETCH-YB] preparing plugin dirs..."
+            mkdir -p /plugins/yb /plugins/yb/debezium-postgres /plugins/yb/yugabytedb-grpc
+
+            copy_if_dir() { d="$1"; [ -d "$d" ] && cp -R "$d"/. /plugins/yb/ || true; }
+
+            # 1) Copy anything embedded in the image (if present)
+            for C in \
+              /kafka/connect/yugabytedb \
+              /opt/kafka/connect/yugabytedb \
+              /debezium-connector/yugabytedb \
+              /opt/debezium-connector/yugabytedb \
+              /kafka/connect/debezium-connector-postgres \
+              /debezium-connector/debezium-connector-postgres \
+              /opt/kafka/connect/yugabytedb/debezium-connector-postgres
+            do
+              copy_if_dir "$C"
+            done
+
+            # 2) Fetch the Yugabyte gRPC connector JAR
+            if [ -n "${YB_CONNECTOR_URL:-}" ]; then
+              echo "[FETCH-YB] downloading Yugabyte gRPC connector from: ${YB_CONNECTOR_URL}"
+              fname="$(basename "${YB_CONNECTOR_URL%%\?*}")"
+              tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+              curl -fL --retry 5 --retry-delay 2 -o "$tmp/$fname" "$YB_CONNECTOR_URL"
+              case "$fname" in
+                *.jar) cp "$tmp/$fname" "/plugins/yb/yugabytedb-grpc/$fname" ;;
+                *)     cp "$tmp/$fname" "/plugins/yb/$fname" ;;
+              esac
+            fi
+
+            # 3) Filename heuristic sorting (no unzip dependency)
+            set +e
+            for J in /plugins/yb/*.jar; do
+              [ -f "$J" ] || continue
+              b="$(basename "$J" | tr '[:upper:]' '[:lower:]')"
+              case "$b" in
+                *yugabytedb*connector*|*connector*yugabytedb*|*yugabyte*grpc*)
+                  mv -f "$J" /plugins/yb/yugabytedb-grpc/
+                  ;;
+                *)
+                  mv -f "$J" /plugins/yb/debezium-postgres/
+                  ;;
+              esac
+            done
+            set -e
+
+            # 4) Validate presence
+            if ! find /plugins/yb/yugabytedb-grpc -type f -name '*.jar' -print | head -n1 | grep -q . ; then
+              echo "[FETCH-YB] ERROR: YugabyteDB gRPC connector not found after download."
+              echo "           Check network/URL or supply a reachable YB_CONNECTOR_URL."
+              exit 1
+            fi
+
+            echo "[FETCH-YB] Installed files:"
+            find /plugins/yb -maxdepth 2 -type f -name '*.jar' -print | sed 's/^/  /'
+        volumeMounts:
+          - { name: plugins, mountPath: /plugins }
+
+      - name: create-connect-topics
+        image: apache/kafka:3.9.0
+        env:
+        - name: KAFKA_ADMIN_USERNAME
+          valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: admin_username } }
+        - name: KAFKA_ADMIN_PASSWORD
+          valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: admin_password } }
+        command: ["/bin/bash","-lc"]
+        args:
+        - |
+          set -eu
+          BOOT=kafka.kafka.svc.cluster.local:9092
+          CLIENT_CFG=/tmp/kafka-admin.properties
+          cat > "$CLIENT_CFG" <<EOF
+          security.protocol=SASL_PLAINTEXT
+          sasl.mechanism=SCRAM-SHA-256
+          sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="${KAFKA_ADMIN_USERNAME}" password="${KAFKA_ADMIN_PASSWORD}";
+          EOF
+          until /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --command-config "$CLIENT_CFG" --list >/dev/null 2>&1; do
+            echo "Waiting for Kafka at $BOOT..."
+            sleep 5
+          done
+          for t in _connect-configs _connect-offsets _connect-status; do
+            /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --command-config "$CLIENT_CFG" --list | grep -qx "$t" || \
+            /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --command-config "$CLIENT_CFG" --create --topic "$t" --partitions 1 --replication-factor 1 --config cleanup.policy=compact
+            /opt/kafka/bin/kafka-configs.sh --bootstrap-server "$BOOT" --command-config "$CLIENT_CFG" --entity-type topics --entity-name "$t" --alter --add-config cleanup.policy=compact
+          done
+      containers:
+      - name: connect
+        image: confluentinc/cp-kafka-connect:7.7.1
+        env:
+        - name: CONNECT_REST_EXTENSION_CLASSES
+          value: "io.debezium.kcrestextension.DebeziumConnectRestExtension"
+        - name: CONNECT_TOPIC_CREATION_ENABLE
+          value: "true"
+        - name: CONNECT_PLUGIN_DISCOVERY
+          value: "only_scan"
+        - name: CONNECT_PLUGIN_PATH
+          value: "/plugins/debezium,/plugins/wepay-kafka-connect-bigquery,/plugins/yb/debezium-postgres,/plugins/yb/yugabytedb-grpc"
+        - name: CONNECT_BOOTSTRAP_SERVERS
+          value: "kafka.kafka.svc.internal.lan:9092"
+        - name: KAFKA_CONNECT_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: kafka-security-credentials
+              key: connect_username
+        - name: KAFKA_CONNECT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: kafka-security-credentials
+              key: connect_password
+        - name: CONNECT_SECURITY_PROTOCOL
+          value: "SASL_PLAINTEXT"
+        - name: CONNECT_SASL_MECHANISM
+          value: "SCRAM-SHA-256"
+        - name: CONNECT_SASL_JAAS_CONFIG
+          value: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="$(KAFKA_CONNECT_USERNAME)" password="$(KAFKA_CONNECT_PASSWORD)";'
+        - name: CONNECT_PRODUCER_SECURITY_PROTOCOL
+          value: "SASL_PLAINTEXT"
+        - name: CONNECT_PRODUCER_SASL_MECHANISM
+          value: "SCRAM-SHA-256"
+        - name: CONNECT_PRODUCER_SASL_JAAS_CONFIG
+          value: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="$(KAFKA_CONNECT_USERNAME)" password="$(KAFKA_CONNECT_PASSWORD)";'
+        - name: CONNECT_CONSUMER_SECURITY_PROTOCOL
+          value: "SASL_PLAINTEXT"
+        - name: CONNECT_CONSUMER_SASL_MECHANISM
+          value: "SCRAM-SHA-256"
+        - name: CONNECT_CONSUMER_SASL_JAAS_CONFIG
+          value: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="$(KAFKA_CONNECT_USERNAME)" password="$(KAFKA_CONNECT_PASSWORD)";'
+        - name: CONNECT_GROUP_ID
+          value: "connect-cluster"
+        - name: CONNECT_CONFIG_STORAGE_TOPIC
+          value: "_connect-configs"
+        - name: CONNECT_OFFSET_STORAGE_TOPIC
+          value: "_connect-offsets"
+        - name: CONNECT_STATUS_STORAGE_TOPIC
+          value: "_connect-status"
+        - name: CONNECT_INTERNAL_KEY_CONVERTER
+          value: "org.apache.kafka.connect.json.JsonConverter"
+        - name: CONNECT_INTERNAL_VALUE_CONVERTER
+          value: "org.apache.kafka.connect.json.JsonConverter"
+        - name: CONNECT_INTERNAL_KEY_CONVERTER_SCHEMAS_ENABLE
+          value: "true"
+        - name: CONNECT_INTERNAL_VALUE_CONVERTER_SCHEMAS_ENABLE
+          value: "true"
+        - name: KAFKA_OPTS
+          value: >-
+            --add-opens=java.base/java.lang=ALL-UNNAMED
+            --add-opens=java.base/java.util=ALL-UNNAMED
+            --add-opens=java.base/java.time=ALL-UNNAMED
+            --add-opens=java.base/sun.nio.ch=ALL-UNNAMED
+        - name: KAFKA_LOG4J_OPTS
+          value: "-Dlog4j.configuration=file:/kafka/etc/log4j.properties"
+        - name: CONNECT_CONFIG_PROVIDERS
+          value: "env"
+        - name: CONNECT_CONFIG_PROVIDERS_ENV_CLASS
+          value: "org.apache.kafka.common.config.provider.EnvVarConfigProvider"
+        # optional:
+        - name: CONNECT_REST_ADVERTISED_HOST_NAME
+          value: "kafka-connect.kafka.svc.internal.lan"
+        - name: YB_MASTER_ADDRESSES
+          value: "yb-master-0.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-1.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-2.yb-master-service.yugabyte.svc.cluster.local:7100"
+        - { name: CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR, value: "1" }
+        - { name: CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR, value: "1" }
+        - { name: CONNECT_STATUS_STORAGE_REPLICATION_FACTOR, value: "1" }
+        - { name: CONNECT_KEY_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
+        - { name: CONNECT_VALUE_CONVERTER, value: "org.apache.kafka.connect.json.JsonConverter" }
+        - { name: CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE, value: "true" }
+        - { name: CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE, value: "true" }
+        - { name: CONNECT_REST_ADVERTISED_HOST_NAME, value: "kafka-connect.kafka.svc.internal.lan" }
+        - { name: CONNECT_REST_PORT, value: "8083" }
+        - { name: GOOGLE_APPLICATION_CREDENTIALS, value: "/vault/secrets/gcp-key.json" }
+        ports: [{ containerPort: 8083 }]
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "1Gi"
+          limits:
+            cpu: "1"
+            memory: "2Gi"
+        readinessProbe:
+          httpGet: { path: /connectors, port: 8083 }
+          initialDelaySeconds: 60
+          periodSeconds: 5
+          failureThreshold: 6
+        livenessProbe:
+          httpGet: { path: /, port: 8083 }
+          initialDelaySeconds: 180
+          periodSeconds: 10
+          failureThreshold: 6
+        startupProbe:
+          httpGet: { path: /connectors, port: 8083 }
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          failureThreshold: 30
+        volumeMounts:
+        - { name: plugins, mountPath: /plugins }
+        - { name: log4j,  mountPath: /kafka/etc }
+

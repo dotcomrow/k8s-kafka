@@ -1,0 +1,118 @@
+# ============================================================================
+# Vault CONFIG job — namespace: vault
+# ============================================================================
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: yb-kafka-vault-config
+  namespace: vault
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: Force=true,Replace=true
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      annotations:
+        linkerd.io/inject: "disabled"
+    spec:
+      restartPolicy: Never
+      serviceAccountName: default
+      volumes:
+      - name: root-token
+        secret: { secretName: vault-root-token }
+      containers:
+      - name: setup-yb-vault
+        image: hashicorp/vault:1.15.4
+        env:
+        - { name: VAULT_ADDR, value: "http://vault.vault.svc.cluster.local:8200" }
+        - { name: AUTH_PATH, value: "kubernetes" }
+        - { name: PG_USER, value: "vaultadmin" }
+        - { name: SA_NAME, value: "bq-yb-bootstrap" }
+        - { name: SA_NAMESPACE, value: "kafka" }
+        - { name: PG_HOST, value: "yb-tserver-service.yugabyte.svc.cluster.local" }
+        - { name: PG_PORT, value: "5433" }
+        - { name: PG_DATABASE, value: "kafka" }
+        - { name: YB_MASTER_ADDRESSES, value: "yb-master-0.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-1.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-2.yb-master-service.yugabyte.svc.cluster.local:7100" }
+        # - { name: BQ_BOOTSTRAP_LOCATION, value: "US" }
+        # - { name: BQ_BOOTSTRAP_PROJECT, value: "k8s-kafka-774d" }
+        - { name: BQ_PROJECT, value: "k8s-kafka-774d" }
+        # - { name: BQ_BOOTSTRAP_BUCKET, value: "suncoast-systems-yb-bootstrap" }
+        - { name: BQ_DEFAULT_DATASET, value: "yugabyte_backup" }
+        command: ["/bin/sh","-c"]
+        args:
+        - |
+          set -eu
+          until [ -s /vault-token/VAULT_TOKEN ]; do sleep 2; done
+          export VAULT_TOKEN="$(cat /vault-token/VAULT_TOKEN)"
+          BQ_SA_JSON="$(vault kv get -field=value secret/k8s-kafka-gcp-service-account-json 2>/dev/null || true)"
+          [ -n "$BQ_SA_JSON" ] && printf '%s' "$BQ_SA_JSON" > /tmp/sa.json || true
+          # Check if the Kafka database exists in Yugabyte, and create it if it doesn't
+          until [ -s /vault-token/VAULT_TOKEN ]; do sleep 2; done
+          export VAULT_TOKEN="$(cat /vault-token/VAULT_TOKEN)"
+          while :; do PASS="$(vault kv get -field=value "secret/${PG_USER}" 2>/dev/null || true)"; [ -n "$PASS" ] && break; sleep 5; done
+          # Install PostgreSQL client
+          apk add --no-cache postgresql-client
+
+          # Export the PGPASSWORD environment variable to avoid syntax issues
+          export PGPASSWORD="$PASS"
+          PSQL_CMD="psql -h $PG_HOST -p $PG_PORT -U $PG_USER"
+
+          # Retry helper to dodge Yugabyte's occasional "Restarting a DDL transaction not supported" errors
+          run_psql() {
+            local db="$1" stmt="$2" attempt=1
+            while :; do
+              if out=$($PSQL_CMD -d "$db" -v ON_ERROR_STOP=1 -c "$stmt" 2>&1); then
+                printf '%s\n' "$out"
+                return 0
+              fi
+              if printf '%s\n' "$out" | grep -q "Restarting a DDL transaction not supported"; then
+                echo "psql DDL restart error, retrying (attempt $attempt)..."
+                attempt=$((attempt+1))
+                sleep 2
+                continue
+              fi
+              printf '%s\n' "$out" >&2
+              return 1
+            done
+          }
+
+          # Check if the Kafka database exists in Yugabyte, and create it if it doesn't
+          DB_EXISTS=$($PSQL_CMD -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$PG_DATABASE'")
+          if [ "$DB_EXISTS" != "1" ]; then
+            run_psql postgres "CREATE DATABASE \"$PG_DATABASE\""
+          fi
+
+          # Grant necessary privileges to the user on the Kafka database
+          run_psql "$PG_DATABASE" "ALTER SCHEMA public OWNER TO \"$PG_USER\""
+          run_psql "$PG_DATABASE" "GRANT ALL ON SCHEMA public TO \"$PG_USER\""
+          run_psql "$PG_DATABASE" "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO \"$PG_USER\""
+          run_psql "$PG_DATABASE" "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO \"$PG_USER\""
+          run_psql "$PG_DATABASE" "GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO \"$PG_USER\""
+          run_psql "$PG_DATABASE" "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO \"$PG_USER\""
+          run_psql "$PG_DATABASE" "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO \"$PG_USER\""
+          run_psql "$PG_DATABASE" "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO \"$PG_USER\""
+          run_psql "$PG_DATABASE" "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TYPES TO \"$PG_USER\""
+          run_psql postgres "GRANT CREATE ON DATABASE \"$PG_DATABASE\" TO \"$PG_USER\""
+          PG_ARGS="host=$PG_HOST port=$PG_PORT database=$PG_DATABASE user=$PG_USER"
+          [ -n "${YB_MASTER_ADDRESSES:-}" ] && PG_ARGS="$PG_ARGS master_addresses=$YB_MASTER_ADDRESSES"
+          vault kv put secret/kafka/pgconfig $PG_ARGS >/dev/null
+          # vault kv put secret/kafka/bq/bootstrap bucket="$BQ_BOOTSTRAP_BUCKET" project="$BQ_BOOTSTRAP_PROJECT" location="$BQ_BOOTSTRAP_LOCATION" >/dev/null
+          CFG="project=$BQ_PROJECT dataset=$BQ_DEFAULT_DATASET"
+          [ -s /tmp/sa.json ] && CFG="$CFG sa_json=@/tmp/sa.json"
+          vault kv put secret/kafka/bq/config $CFG >/dev/null
+          [ -s /tmp/sa.json ] && vault kv put secret/kafka/bq/exporter sa_json=@/tmp/sa.json >/dev/null
+
+          vault policy write data-bootstrap - <<'EOP'
+          path "secret/data/kafka/pgconfig"     { capabilities = ["read"] }
+          # path "secret/data/kafka/bq/bootstrap" { capabilities = ["read"] }
+          path "secret/data/kafka/bq/config"    { capabilities = ["read"] }
+          path "secret/data/kafka/bq/exporter"  { capabilities = ["read"] }
+          path "secret/data/vaultadmin"         { capabilities = ["read"] }
+          EOP
+          vault write auth/${AUTH_PATH}/role/data-bootstrap \
+            bound_service_account_names="${SA_NAME}" \
+            bound_service_account_namespaces="${SA_NAMESPACE}" \
+            policies="data-bootstrap" ttl="24h" >/dev/null
+        volumeMounts: [{ name: root-token, mountPath: /vault-token, readOnly: true }]

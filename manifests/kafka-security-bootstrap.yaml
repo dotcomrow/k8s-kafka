@@ -1,0 +1,132 @@
+# ============================================================================
+# Kafka security bootstrap (wave 3) — idempotent SCRAM users
+# ============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kafka-security-bootstrap
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+    argocd.argoproj.io/sync-options: Force=true,Replace=true
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      annotations:
+        linkerd.io/inject: "disabled"
+    spec:
+      restartPolicy: Never
+      serviceAccountName: bq-yb-bootstrap
+      containers:
+      - name: configure-security
+        image: apache/kafka:3.9.0
+        env:
+        - { name: KAFKA_BOOTSTRAP_INTERNAL, value: "kafka-0.kafka-hs.kafka.svc.internal.lan:9094" }
+        - name: KAFKA_ADMIN_USERNAME
+          valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: admin_username } }
+        - name: KAFKA_ADMIN_PASSWORD
+          valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: admin_password } }
+        - name: KAFKA_CONNECT_USERNAME
+          valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: connect_username } }
+        - name: KAFKA_CONNECT_PASSWORD
+          valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: connect_password } }
+        - name: KAFKA_SCHEMA_REGISTRY_USERNAME
+          valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: schema_registry_username } }
+        - name: KAFKA_SCHEMA_REGISTRY_PASSWORD
+          valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: schema_registry_password } }
+        - name: KAFKA_UI_USERNAME
+          valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: kafka_ui_username } }
+        - name: KAFKA_UI_PASSWORD
+          valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: kafka_ui_password } }
+        - name: KAFKA_GRAPHQL_ASYNC_USERNAME
+          valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: graphql_async_username } }
+        - name: KAFKA_GRAPHQL_ASYNC_PASSWORD
+          valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: graphql_async_password } }
+        command: ["/bin/bash","-lc"]
+        args:
+        - |
+          set -euo pipefail
+
+          BOOT_INTERNAL="${KAFKA_BOOTSTRAP_INTERNAL}"
+          BOOT_AUTH="kafka.kafka.svc.internal.lan:9092"
+          CLI_TIMEOUT="${KAFKA_CLI_TIMEOUT:-15s}"
+          ADMIN_CFG="/tmp/kafka-admin.properties"
+          cat > "$ADMIN_CFG" <<EOF
+          security.protocol=SASL_PLAINTEXT
+          sasl.mechanism=SCRAM-SHA-256
+          sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="${KAFKA_ADMIN_USERNAME}" password="${KAFKA_ADMIN_PASSWORD}";
+          EOF
+
+          BOOT="$BOOT_INTERNAL"
+          CMD_CFG=()
+          if timeout "$CLI_TIMEOUT" /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT_AUTH" --command-config "$ADMIN_CFG" --list >/dev/null 2>&1; then
+            BOOT="$BOOT_AUTH"
+            CMD_CFG=(--command-config "$ADMIN_CFG")
+            echo "Using authenticated bootstrap server ${BOOT}"
+          else
+            echo "Admin authentication not available yet; bootstrapping via ${BOOT_INTERNAL}"
+          fi
+
+          kafka_cli() {
+            local script="$1"
+            shift
+            timeout "$CLI_TIMEOUT" /opt/kafka/bin/"${script}" --bootstrap-server "$BOOT" "${CMD_CFG[@]}" "$@"
+          }
+
+          until kafka_cli kafka-topics.sh --list >/dev/null 2>&1; do
+            echo "Waiting for Kafka at ${BOOT}..."
+            sleep 5
+          done
+
+          ensure_scram_user() {
+            local user="$1"
+            local pass="$2"
+            kafka_cli kafka-configs.sh \
+              --alter \
+              --entity-type users \
+              --entity-name "$user" \
+              --add-config "SCRAM-SHA-256=[iterations=4096,password=${pass}]"
+          }
+
+          ensure_scram_user "$KAFKA_ADMIN_USERNAME" "$KAFKA_ADMIN_PASSWORD"
+          ensure_scram_user "$KAFKA_CONNECT_USERNAME" "$KAFKA_CONNECT_PASSWORD"
+          ensure_scram_user "$KAFKA_SCHEMA_REGISTRY_USERNAME" "$KAFKA_SCHEMA_REGISTRY_PASSWORD"
+          ensure_scram_user "$KAFKA_UI_USERNAME" "$KAFKA_UI_PASSWORD"
+          ensure_scram_user "$KAFKA_GRAPHQL_ASYNC_USERNAME" "$KAFKA_GRAPHQL_ASYNC_PASSWORD"
+
+          add_acl() {
+            local principal="$1"
+            shift
+            kafka_cli kafka-acls.sh \
+              --add \
+              --allow-principal "User:${principal}" \
+              "$@"
+          }
+
+          for t in _connect-configs _connect-offsets _connect-status; do
+            add_acl "$KAFKA_CONNECT_USERNAME" --topic "$t" --operation Read --operation Write --operation Describe --operation Create
+          done
+          add_acl "$KAFKA_CONNECT_USERNAME" --group "connect-cluster" --operation Read --operation Describe
+
+          for t in _schemas _schema_encoders _dek_registry_keys; do
+            add_acl "$KAFKA_SCHEMA_REGISTRY_USERNAME" --topic "$t" --operation All
+          done
+          add_acl "$KAFKA_SCHEMA_REGISTRY_USERNAME" --group "schema-registry" --operation Read --operation Describe
+          add_acl "$KAFKA_SCHEMA_REGISTRY_USERNAME" --group "kafka-cache-schema-registry-" --resource-pattern-type prefixed --operation Read --operation Describe
+          add_acl "$KAFKA_SCHEMA_REGISTRY_USERNAME" --cluster --operation Describe
+
+          for t in graphql.async.requests.v1 graphql.async.responses.v1 graphql.async.responses.dlq.v1; do
+            add_acl "$KAFKA_GRAPHQL_ASYNC_USERNAME" --topic "$t" --operation All
+          done
+          add_acl "$KAFKA_GRAPHQL_ASYNC_USERNAME" --group "graphql-async-workers" --operation Read --operation Describe
+
+          add_acl "$KAFKA_UI_USERNAME" --topic "*" --operation Read --operation Describe
+          add_acl "$KAFKA_UI_USERNAME" --group "*" --operation Read --operation Describe
+          add_acl "$KAFKA_UI_USERNAME" --cluster --operation Describe
+          add_acl "$KAFKA_ADMIN_USERNAME" --cluster --operation All
+
+          kafka_cli kafka-acls.sh --list || true
+
+          echo "Kafka SCRAM users are configured"
+---

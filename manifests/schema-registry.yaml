@@ -1,0 +1,194 @@
+# ===========================================================================
+# Schema Registry (wave 4)
+# ============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: schema-registry-config
+  namespace: kafka
+data:
+  schema-registry.properties: |
+    # The address the socket server listens on.
+    listeners=http://0.0.0.0:8081
+
+    # Updated to point to the secured Kafka bootstrap servers
+    kafkastore.bootstrap.servers=SASL_PLAINTEXT://kafka.kafka.svc.internal.lan:9092
+
+    # The name of the topic to store schemas in
+    kafkastore.topic=_schemas
+    kafkastore.topic.replication.factor=1
+
+    # If true, API requests that fail will include extra debugging information, including stack traces
+    debug=false
+
+    metadata.encoder.secret=REPLACE_ME_WITH_HIGH_ENTROPY_STRING
+
+    resource.extension.class=io.confluent.dekregistry.DekRegistryResourceExtension
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: schema-registry
+  namespace: kafka
+  labels:
+    app: schema-registry
+  annotations:
+    argocd.argoproj.io/sync-wave: "49"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: schema-registry
+  template:
+    metadata:
+      labels:
+        app: schema-registry
+    spec:
+      serviceAccountName: schema-registry
+      enableServiceLinks: false
+      volumes:
+        - name: kafka-tools
+          emptyDir: {}
+      initContainers:
+        - name: install-kafka-tools
+          image: confluentinc/cp-kafka:7.7.1
+          command: ["sh", "-c", "cp /usr/bin/kafka-* /opt/kafka-tools/ && chmod +x /opt/kafka-tools/kafka-*"]
+          volumeMounts:
+          - name: kafka-tools
+            mountPath: /opt/kafka-tools
+        - name: ensure-schema-topics
+          image: apache/kafka:3.9.0
+          env:
+          - name: KAFKA_ADMIN_USERNAME
+            valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: admin_username } }
+          - name: KAFKA_ADMIN_PASSWORD
+            valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: admin_password } }
+          command: ["/bin/bash","-lc"]
+          args:
+          - |
+            set -eu
+            BOOT=kafka.kafka.svc.internal.lan:9092
+            CLIENT_CFG=/tmp/kafka-admin.properties
+            cat > "$CLIENT_CFG" <<EOF
+            security.protocol=SASL_PLAINTEXT
+            sasl.mechanism=SCRAM-SHA-256
+            sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="${KAFKA_ADMIN_USERNAME}" password="${KAFKA_ADMIN_PASSWORD}";
+            EOF
+            until /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --command-config "$CLIENT_CFG" --list >/dev/null 2>&1; do
+              echo "Waiting for Kafka at $BOOT..."
+              sleep 5
+            done
+            for t in _schemas _schema_encoders _dek_registry_keys; do
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --command-config "$CLIENT_CFG" --list | grep -qx "$t" || \
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --command-config "$CLIENT_CFG" --create --topic "$t" --partitions 1 --replication-factor 1 --config cleanup.policy=compact
+              /opt/kafka/bin/kafka-configs.sh --bootstrap-server "$BOOT" --command-config "$CLIENT_CFG" --entity-type topics --entity-name "$t" --alter --add-config cleanup.policy=compact
+            done
+      containers:
+        - name: schema-registry
+          image: confluentinc/cp-schema-registry:7.7.1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8081
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "500m"
+              memory: "1Gi"
+          volumeMounts:
+            - name: kafka-tools
+              mountPath: /opt/kafka-tools
+          env:
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /vault/secrets/gcp-key.json
+            - name: SCHEMA_REGISTRY_LISTENERS
+              value: "http://0.0.0.0:8081"
+            # Must be unique per pod for leader election during rolling updates.
+            - name: SCHEMA_REGISTRY_HOST_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            # Match your broker’s advertised listener
+            - name: SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS
+              value: "kafka.kafka.svc.internal.lan:9092"
+            - name: SCHEMA_REGISTRY_KAFKA_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-security-credentials
+                  key: schema_registry_username
+            - name: SCHEMA_REGISTRY_KAFKA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-security-credentials
+                  key: schema_registry_password
+            - name: SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL
+              value: "SASL_PLAINTEXT"
+            - name: SCHEMA_REGISTRY_KAFKASTORE_SASL_MECHANISM
+              value: "SCRAM-SHA-256"
+            - name: SCHEMA_REGISTRY_KAFKASTORE_SASL_JAAS_CONFIG
+              value: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="$(SCHEMA_REGISTRY_KAFKA_USERNAME)" password="$(SCHEMA_REGISTRY_KAFKA_PASSWORD)";'
+            # Single-node RF
+            - name: SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR
+              value: "1"
+            - name: SCHEMA_REGISTRY_COMPATIBILITY_LEVEL
+              value: "BACKWARD"
+            - name: SCHEMA_REGISTRY_KAFKASTORE_TOPIC
+              value: "_schemas"
+            - name: SCHEMA_REGISTRY_METADATA_ENCODER_SECRET
+              value: "REPLACE_ME_WITH_HIGH_ENTROPY_STRING"
+            - name: SCHEMA_REGISTRY_RESOURCE_EXTENSION_CLASS
+              value: "io.confluent.dekregistry.DekRegistryResourceExtension"
+            - name: SCHEMA_REGISTRY_DEBUG
+              value: "true"
+            - name: SCHEMA_REGISTRY_KAFKASTORE_CLUSTER_ID
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-cluster-id
+                  key: CLUSTER_ID
+          readinessProbe:
+            httpGet:
+              path: /subjects
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 6
+          startupProbe:
+            httpGet:
+              path: /subjects
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /subjects
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 3
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: schema-registry
+  namespace: kafka
+  labels:
+    app: schema-registry
+  annotations:
+    argocd.argoproj.io/sync-wave: "49"
+spec:
+  type: ClusterIP
+  selector:
+    app: schema-registry
+  ports:
+    - name: http
+      port: 8081
+      targetPort: http

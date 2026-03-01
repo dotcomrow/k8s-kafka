@@ -1,0 +1,166 @@
+# ============================================================================
+# Kafka (wave 3): single-broker KRaft
+# ============================================================================
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  type: ClusterIP
+  ports:
+    - name: kafka
+      port: 9092
+      targetPort: 9092
+  selector:
+    app: kafka
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-hs
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  clusterIP: None
+  ports: [{ name: controller, port: 9093, targetPort: 9093 }]
+  selector: { app: kafka }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  serviceName: kafka-hs
+  replicas: 1
+  updateStrategy:
+    type: OnDelete
+    rollingUpdate: null
+  selector: { matchLabels: { app: kafka } }
+  volumeClaimTemplates:
+  - metadata:
+      name: kafka-logs
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 20Gi
+  template:
+    metadata:
+      labels: { app: kafka }
+      annotations:
+        linkerd.io/inject: "disabled"
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: "data-bootstrap"
+        vault.hashicorp.com/agent-pre-populate-only: "true"
+        vault.hashicorp.com/exit-on-error: "false"
+        vault.hashicorp.com/agent-inject-secret-gcp-key.json: "secret/data/kafka/bq/config"
+        vault.hashicorp.com/agent-inject-template-gcp-key.json: |
+          {{- with secret "secret/data/kafka/bq/config" -}}
+          {{ .Data.data.sa_json }}
+          {{- end -}}
+        vault.hashicorp.com/agent-inject-permissions-gcp-key.json: "0644"
+    spec:
+      serviceAccountName: bq-yb-bootstrap
+      securityContext:
+        fsGroup: 1000
+        runAsUser: 0
+      initContainers:
+      - name: format-storage
+        image: apache/kafka:3.9.0
+        env:
+        - name: CLUSTER_ID
+          valueFrom: { secretKeyRef: { name: kafka-cluster-id, key: CLUSTER_ID } }
+        command: ["/bin/bash","-lc"]
+        args:
+        - |
+          set -eu
+          LOG_DIR="/tmp/kraft-combined-logs/kafka-data"
+          CONF="/tmp/kraft/server.properties"
+          mkdir -p "$LOG_DIR" /tmp/kraft
+          cp /opt/kafka/config/kraft/server.properties "$CONF"
+          if grep -q '^log.dirs=' "$CONF"; then
+            sed -i "s|^log.dirs=.*|log.dirs=${LOG_DIR}|" "$CONF"
+          else
+            printf '\nlog.dirs=%s\n' "$LOG_DIR" >> "$CONF"
+          fi
+          META="${LOG_DIR}/meta.properties"
+          if [ ! -f "$META" ]; then
+            /opt/kafka/bin/kafka-storage.sh format -t "${CLUSTER_ID}" -c "$CONF" --ignore-formatted
+          fi
+        volumeMounts: [{ name: kafka-logs, mountPath: /tmp/kraft-combined-logs }]
+      containers:
+      - name: broker
+        image: apache/kafka:3.9.0
+        command: ["/bin/bash","-lc"]
+        args:
+        - |
+          set -euo pipefail
+          u_esc="$(printf '%s' "$KAFKA_ADMIN_USERNAME" | sed 's/[\\"]/\\&/g')"
+          p_esc="$(printf '%s' "$KAFKA_ADMIN_PASSWORD" | sed 's/[\\"]/\\&/g')"
+          cat > /tmp/kafka_server_jaas.conf <<EOF
+          KafkaServer {
+            org.apache.kafka.common.security.scram.ScramLoginModule required username="${u_esc}" password="${p_esc}";
+          };
+          EOF
+          export KAFKA_OPTS="-Djava.security.auth.login.config=/tmp/kafka_server_jaas.conf ${KAFKA_OPTS:-}"
+          exec /etc/kafka/docker/run
+        env:
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: /vault/secrets/gcp-key.json
+        - name: KAFKA_ADMIN_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: kafka-security-credentials
+              key: admin_username
+        - name: KAFKA_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: kafka-security-credentials
+              key: admin_password
+        - { name: CLUSTER_ID, valueFrom: { secretKeyRef: { name: kafka-cluster-id, key: CLUSTER_ID } } }
+        - { name: KAFKA_NODE_ID, value: "1" }
+        - { name: KAFKA_PROCESS_ROLES, value: "broker,controller" }
+        - { name: KAFKA_CONTROLLER_LISTENER_NAMES, value: "CONTROLLER" }
+        - { name: KAFKA_LISTENERS, value: "SASL_PLAINTEXT://:9092,INTERNAL://:9094,CONTROLLER://:9093" }
+        - { name: KAFKA_ADVERTISED_LISTENERS, value: "SASL_PLAINTEXT://kafka.kafka.svc.internal.lan:9092,INTERNAL://kafka-0.kafka-hs.kafka.svc.internal.lan:9094" }
+        - { name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP, value: "SASL_PLAINTEXT:SASL_PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT" }
+        - { name: KAFKA_INTER_BROKER_LISTENER_NAME, value: "INTERNAL" }
+        - { name: KAFKA_SASL_ENABLED_MECHANISMS, value: "SCRAM-SHA-256" }
+        - { name: KAFKA_LISTENER_NAME_SASL_PLAINTEXT_SCRAM_SHA_256_SASL_JAAS_CONFIG, value: "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"$(KAFKA_ADMIN_USERNAME)\" password=\"$(KAFKA_ADMIN_PASSWORD)\";" }
+        - { name: KAFKA_OPTS, value: "-Djava.security.auth.login.config=/tmp/kafka_server_jaas.conf" }
+        - { name: KAFKA_AUTHORIZER_CLASS_NAME, value: "org.apache.kafka.metadata.authorizer.StandardAuthorizer" }
+        - { name: KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND, value: "true" }
+        - { name: KAFKA_SUPER_USERS, value: "User:kafka_admin;User:ANONYMOUS" }
+        - { name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "1@kafka-0.kafka-hs.kafka.svc.internal.lan:9093" }
+        - { name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "1" }
+        - { name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "1" }
+        - { name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR, value: "1" }
+        - { name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS, value: "0" }
+        - { name: KAFKA_LOG_DIRS, value: "/tmp/kraft-combined-logs/kafka-data" }
+        - { name: KAFKA_LOG_RETENTION_HOURS, value: "48" }
+        - { name: KAFKA_AUTO_CREATE_TOPICS_ENABLE, value: "true" }
+        ports:
+        - { containerPort: 9092 }
+        - { containerPort: 9093 }
+        - { containerPort: 9094 }
+        resources:
+          requests:
+            cpu: "1"
+            memory: "2Gi"
+          limits:
+            cpu: "2"
+            memory: "4Gi"
+        readinessProbe:
+          tcpSocket: { port: 9092 }
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        volumeMounts: [{ name: kafka-logs, mountPath: /tmp/kraft-combined-logs }]
+---
