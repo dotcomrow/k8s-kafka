@@ -561,9 +561,12 @@ spec:
           done
           add_acl "$KAFKA_CONNECT_USERNAME" --group "connect-cluster" --operation Read --operation Describe
 
-          for t in _schemas _schema_encoders; do
-            add_acl "$KAFKA_SCHEMA_REGISTRY_USERNAME" --topic "$t" --operation Read --operation Write --operation Describe --operation Create
+          for t in _schemas _schema_encoders _dek_registry_keys; do
+            add_acl "$KAFKA_SCHEMA_REGISTRY_USERNAME" --topic "$t" --operation All
           done
+          add_acl "$KAFKA_SCHEMA_REGISTRY_USERNAME" --group "schema-registry" --operation Read --operation Describe
+          add_acl "$KAFKA_SCHEMA_REGISTRY_USERNAME" --group "kafka-cache-schema-registry-" --resource-pattern-type prefixed --operation Read --operation Describe
+          add_acl "$KAFKA_SCHEMA_REGISTRY_USERNAME" --cluster --operation Describe
 
           for t in graphql.async.requests.v1 graphql.async.responses.v1 graphql.async.responses.dlq.v1; do
             add_acl "$KAFKA_GRAPHQL_ASYNC_USERNAME" --topic "$t" --operation All
@@ -626,13 +629,10 @@ spec:
         app: schema-registry
     spec:
       serviceAccountName: schema-registry
+      enableServiceLinks: false
       volumes:
         - name: kafka-tools
           emptyDir: {}
-        - name: schema-registry-config-volume
-          configMap:
-            name: schema-registry-config
-            items: [{ key: schema-registry.properties, path: schema-registry.properties }]
       initContainers:
         - name: install-kafka-tools
           image: confluentinc/cp-kafka:7.7.1
@@ -662,7 +662,7 @@ spec:
               echo "Waiting for Kafka at $BOOT..."
               sleep 5
             done
-            for t in _schemas _schema_encoders; do
+            for t in _schemas _schema_encoders _dek_registry_keys; do
               /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --command-config "$CLIENT_CFG" --list | grep -qx "$t" || \
               /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --command-config "$CLIENT_CFG" --create --topic "$t" --partitions 1 --replication-factor 1 --config cleanup.policy=compact
               /opt/kafka/bin/kafka-configs.sh --bootstrap-server "$BOOT" --command-config "$CLIENT_CFG" --entity-type topics --entity-name "$t" --alter --add-config cleanup.policy=compact
@@ -684,9 +684,6 @@ spec:
           volumeMounts:
             - name: kafka-tools
               mountPath: /opt/kafka-tools
-            - name: schema-registry-config-volume
-              mountPath: /etc/schema-registry/schema-registry.properties
-              subPath: schema-registry.properties
           env:
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: /vault/secrets/gcp-key.json
@@ -720,6 +717,10 @@ spec:
               value: "BACKWARD"
             - name: SCHEMA_REGISTRY_KAFKASTORE_TOPIC
               value: "_schemas"
+            - name: SCHEMA_REGISTRY_METADATA_ENCODER_SECRET
+              value: "REPLACE_ME_WITH_HIGH_ENTROPY_STRING"
+            - name: SCHEMA_REGISTRY_RESOURCE_EXTENSION_CLASS
+              value: "io.confluent.dekregistry.DekRegistryResourceExtension"
             - name: SCHEMA_REGISTRY_DEBUG
               value: "true"
             - name: SCHEMA_REGISTRY_KAFKASTORE_CLUSTER_ID
