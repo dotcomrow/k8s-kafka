@@ -385,6 +385,19 @@ spec:
       containers:
       - name: broker
         image: apache/kafka:3.9.0
+        command: ["/bin/bash","-lc"]
+        args:
+        - |
+          set -euo pipefail
+          u_esc="$(printf '%s' "$KAFKA_ADMIN_USERNAME" | sed 's/[\\"]/\\&/g')"
+          p_esc="$(printf '%s' "$KAFKA_ADMIN_PASSWORD" | sed 's/[\\"]/\\&/g')"
+          cat > /tmp/kafka_server_jaas.conf <<EOF
+          KafkaServer {
+            org.apache.kafka.common.security.scram.ScramLoginModule required username="${u_esc}" password="${p_esc}";
+          };
+          EOF
+          export KAFKA_OPTS="-Djava.security.auth.login.config=/tmp/kafka_server_jaas.conf ${KAFKA_OPTS:-}"
+          exec /etc/kafka/docker/run
         env:
         - name: GOOGLE_APPLICATION_CREDENTIALS
           value: /vault/secrets/gcp-key.json
@@ -408,9 +421,10 @@ spec:
         - { name: KAFKA_INTER_BROKER_LISTENER_NAME, value: "INTERNAL" }
         - { name: KAFKA_SASL_ENABLED_MECHANISMS, value: "SCRAM-SHA-256" }
         - { name: KAFKA_LISTENER_NAME_SASL_PLAINTEXT_SCRAM_SHA_256_SASL_JAAS_CONFIG, value: "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"$(KAFKA_ADMIN_USERNAME)\" password=\"$(KAFKA_ADMIN_PASSWORD)\";" }
+        - { name: KAFKA_OPTS, value: "-Djava.security.auth.login.config=/tmp/kafka_server_jaas.conf" }
         - { name: KAFKA_AUTHORIZER_CLASS_NAME, value: "org.apache.kafka.metadata.authorizer.StandardAuthorizer" }
         - { name: KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND, value: "true" }
-        - { name: KAFKA_SUPER_USERS, value: "User:kafka_admin" }
+        - { name: KAFKA_SUPER_USERS, value: "User:kafka_admin;User:ANONYMOUS" }
         - { name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "1@kafka-0.kafka-hs.kafka.svc.internal.lan:9093" }
         - { name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "1" }
         - { name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "1" }
@@ -488,6 +502,7 @@ spec:
 
           BOOT_INTERNAL="${KAFKA_BOOTSTRAP_INTERNAL}"
           BOOT_AUTH="kafka.kafka.svc.internal.lan:9092"
+          CLI_TIMEOUT="${KAFKA_CLI_TIMEOUT:-15s}"
           ADMIN_CFG="/tmp/kafka-admin.properties"
           cat > "$ADMIN_CFG" <<EOF
           security.protocol=SASL_PLAINTEXT
@@ -497,7 +512,7 @@ spec:
 
           BOOT="$BOOT_INTERNAL"
           CMD_CFG=()
-          if /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT_AUTH" --command-config "$ADMIN_CFG" --list >/dev/null 2>&1; then
+          if timeout "$CLI_TIMEOUT" /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT_AUTH" --command-config "$ADMIN_CFG" --list >/dev/null 2>&1; then
             BOOT="$BOOT_AUTH"
             CMD_CFG=(--command-config "$ADMIN_CFG")
             echo "Using authenticated bootstrap server ${BOOT}"
@@ -508,7 +523,7 @@ spec:
           kafka_cli() {
             local script="$1"
             shift
-            /opt/kafka/bin/"${script}" --bootstrap-server "$BOOT" "${CMD_CFG[@]}" "$@"
+            timeout "$CLI_TIMEOUT" /opt/kafka/bin/"${script}" --bootstrap-server "$BOOT" "${CMD_CFG[@]}" "$@"
           }
 
           until kafka_cli kafka-topics.sh --list >/dev/null 2>&1; do
