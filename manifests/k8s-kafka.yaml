@@ -19,6 +19,26 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "0"
 ---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kafka-security-credentials
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+type: Opaque
+stringData:
+  admin_username: "<path:secret/data/kafka-admin-username#value>"
+  admin_password: "<path:secret/data/kafka-admin-password#value>"
+  connect_username: "<path:secret/data/kafka-connect-username#value>"
+  connect_password: "<path:secret/data/kafka-connect-password#value>"
+  schema_registry_username: "<path:secret/data/kafka-schema-registry-username#value>"
+  schema_registry_password: "<path:secret/data/kafka-schema-registry-password#value>"
+  kafka_ui_username: "<path:secret/data/kafka-ui-username#value>"
+  kafka_ui_password: "<path:secret/data/kafka-ui-password#value>"
+  graphql_async_username: "<path:secret/data/graphql-kafka-async-username#value>"
+  graphql_async_password: "<path:secret/data/graphql-kafka-async-password#value>"
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -197,7 +217,7 @@ spec:
           until [ -s /vault-token/VAULT_TOKEN ]; do sleep 2; done
           export VAULT_TOKEN="$(cat /vault-token/VAULT_TOKEN)"
           while :; do PASS="$(vault kv get -field=value "secret/${PG_USER}" 2>/dev/null || true)"; [ -n "$PASS" ] && break; sleep 5; done
-          # Install PostgreSQL client to use psql
+          # Install PostgreSQL client
           apk add --no-cache postgresql-client
 
           # Export the PGPASSWORD environment variable to avoid syntax issues
@@ -248,6 +268,7 @@ spec:
           [ -s /tmp/sa.json ] && CFG="$CFG sa_json=@/tmp/sa.json"
           vault kv put secret/kafka/bq/config $CFG >/dev/null
           [ -s /tmp/sa.json ] && vault kv put secret/kafka/bq/exporter sa_json=@/tmp/sa.json >/dev/null
+
           vault policy write data-bootstrap - <<'EOP'
           path "secret/data/kafka/pgconfig"     { capabilities = ["read"] }
           path "secret/data/kafka/bq/bootstrap" { capabilities = ["read"] }
@@ -365,19 +386,29 @@ spec:
         env:
         - name: GOOGLE_APPLICATION_CREDENTIALS
           value: /vault/secrets/gcp-key.json
-        - name: KAFKA_ADVERTISED_LISTENERS
-          value: "PLAINTEXT://kafka.kafka.svc.internal.lan:9092"
-        - name: KAFKA_CONTROLLER_QUORUM_VOTERS
-          value: "1@kafka-0.kafka-hs.kafka.svc.internal.lan:9093"
-        - name: KAFKA_INTER_BROKER_LISTENER_NAME
-          value: "PLAINTEXT"
+        - name: KAFKA_ADMIN_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: kafka-security-credentials
+              key: admin_username
+        - name: KAFKA_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: kafka-security-credentials
+              key: admin_password
         - { name: CLUSTER_ID, valueFrom: { secretKeyRef: { name: kafka-cluster-id, key: CLUSTER_ID } } }
         - { name: KAFKA_NODE_ID, value: "1" }
         - { name: KAFKA_PROCESS_ROLES, value: "broker,controller" }
         - { name: KAFKA_CONTROLLER_LISTENER_NAMES, value: "CONTROLLER" }
-        - { name: KAFKA_LISTENERS, value: "PLAINTEXT://:9092,CONTROLLER://:9093" }
-        - { name: KAFKA_ADVERTISED_LISTENERS, value: "PLAINTEXT://kafka.kafka.svc.internal.lan:9092" }
-        - { name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP, value: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT" }
+        - { name: KAFKA_LISTENERS, value: "SASL_PLAINTEXT://:9092,INTERNAL://:9094,CONTROLLER://:9093" }
+        - { name: KAFKA_ADVERTISED_LISTENERS, value: "SASL_PLAINTEXT://kafka.kafka.svc.internal.lan:9092,INTERNAL://kafka-0.kafka-hs.kafka.svc.internal.lan:9094" }
+        - { name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP, value: "SASL_PLAINTEXT:SASL_PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT" }
+        - { name: KAFKA_INTER_BROKER_LISTENER_NAME, value: "INTERNAL" }
+        - { name: KAFKA_SASL_ENABLED_MECHANISMS, value: "SCRAM-SHA-256" }
+        - { name: KAFKA_LISTENER_NAME_SASL_PLAINTEXT_SCRAM_SHA_256_SASL_JAAS_CONFIG, value: "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"$(KAFKA_ADMIN_USERNAME)\" password=\"$(KAFKA_ADMIN_PASSWORD)\";" }
+        - { name: KAFKA_AUTHORIZER_CLASS_NAME, value: "org.apache.kafka.metadata.authorizer.StandardAuthorizer" }
+        - { name: KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND, value: "true" }
+        - { name: KAFKA_SUPER_USERS, value: "User:kafka_admin" }
         - { name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "1@kafka-0.kafka-hs.kafka.svc.internal.lan:9093" }
         - { name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "1" }
         - { name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "1" }
@@ -389,6 +420,7 @@ spec:
         ports:
         - { containerPort: 9092 }
         - { containerPort: 9093 }
+        - { containerPort: 9094 }
         resources:
           requests:
             cpu: "1"
@@ -401,6 +433,133 @@ spec:
           initialDelaySeconds: 10
           periodSeconds: 5
         volumeMounts: [{ name: kafka-logs, mountPath: /tmp/kraft-combined-logs }]
+---
+# ============================================================================
+# Kafka security bootstrap (wave 3) — idempotent SCRAM users
+# ============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kafka-security-bootstrap
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      annotations:
+        linkerd.io/inject: "disabled"
+    spec:
+      restartPolicy: Never
+      serviceAccountName: bq-yb-bootstrap
+      containers:
+      - name: configure-security
+        image: apache/kafka:3.9.0
+        env:
+        - { name: KAFKA_BOOTSTRAP_INTERNAL, value: "kafka-0.kafka-hs.kafka.svc.internal.lan:9094" }
+        - name: KAFKA_ADMIN_USERNAME
+          valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: admin_username } }
+        - name: KAFKA_ADMIN_PASSWORD
+          valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: admin_password } }
+        - name: KAFKA_CONNECT_USERNAME
+          valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: connect_username } }
+        - name: KAFKA_CONNECT_PASSWORD
+          valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: connect_password } }
+        - name: KAFKA_SCHEMA_REGISTRY_USERNAME
+          valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: schema_registry_username } }
+        - name: KAFKA_SCHEMA_REGISTRY_PASSWORD
+          valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: schema_registry_password } }
+        - name: KAFKA_UI_USERNAME
+          valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: kafka_ui_username } }
+        - name: KAFKA_UI_PASSWORD
+          valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: kafka_ui_password } }
+        - name: KAFKA_GRAPHQL_ASYNC_USERNAME
+          valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: graphql_async_username } }
+        - name: KAFKA_GRAPHQL_ASYNC_PASSWORD
+          valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: graphql_async_password } }
+        command: ["/bin/bash","-lc"]
+        args:
+        - |
+          set -euo pipefail
+
+          BOOT_INTERNAL="${KAFKA_BOOTSTRAP_INTERNAL}"
+          BOOT_AUTH="kafka.kafka.svc.internal.lan:9092"
+          ADMIN_CFG="/tmp/kafka-admin.properties"
+          cat > "$ADMIN_CFG" <<EOF
+          security.protocol=SASL_PLAINTEXT
+          sasl.mechanism=SCRAM-SHA-256
+          sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="${KAFKA_ADMIN_USERNAME}" password="${KAFKA_ADMIN_PASSWORD}";
+          EOF
+
+          BOOT="$BOOT_INTERNAL"
+          CMD_CFG=()
+          if /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT_AUTH" --command-config "$ADMIN_CFG" --list >/dev/null 2>&1; then
+            BOOT="$BOOT_AUTH"
+            CMD_CFG=(--command-config "$ADMIN_CFG")
+            echo "Using authenticated bootstrap server ${BOOT}"
+          else
+            echo "Admin authentication not available yet; bootstrapping via ${BOOT_INTERNAL}"
+          fi
+
+          kafka_cli() {
+            local script="$1"
+            shift
+            /opt/kafka/bin/"${script}" --bootstrap-server "$BOOT" "${CMD_CFG[@]}" "$@"
+          }
+
+          until kafka_cli kafka-topics.sh --list >/dev/null 2>&1; do
+            echo "Waiting for Kafka at ${BOOT}..."
+            sleep 5
+          done
+
+          ensure_scram_user() {
+            local user="$1"
+            local pass="$2"
+            kafka_cli kafka-configs.sh \
+              --alter \
+              --entity-type users \
+              --entity-name "$user" \
+              --add-config "SCRAM-SHA-256=[iterations=4096,password=${pass}]"
+          }
+
+          ensure_scram_user "$KAFKA_ADMIN_USERNAME" "$KAFKA_ADMIN_PASSWORD"
+          ensure_scram_user "$KAFKA_CONNECT_USERNAME" "$KAFKA_CONNECT_PASSWORD"
+          ensure_scram_user "$KAFKA_SCHEMA_REGISTRY_USERNAME" "$KAFKA_SCHEMA_REGISTRY_PASSWORD"
+          ensure_scram_user "$KAFKA_UI_USERNAME" "$KAFKA_UI_PASSWORD"
+          ensure_scram_user "$KAFKA_GRAPHQL_ASYNC_USERNAME" "$KAFKA_GRAPHQL_ASYNC_PASSWORD"
+
+          add_acl() {
+            local principal="$1"
+            shift
+            kafka_cli kafka-acls.sh \
+              --add \
+              --allow-principal "User:${principal}" \
+              "$@"
+          }
+
+          for t in _connect-configs _connect-offsets _connect-status; do
+            add_acl "$KAFKA_CONNECT_USERNAME" --topic "$t" --operation Read --operation Write --operation Describe --operation Create
+          done
+          add_acl "$KAFKA_CONNECT_USERNAME" --group "connect-cluster" --operation Read --operation Describe
+
+          for t in _schemas _schema_encoders; do
+            add_acl "$KAFKA_SCHEMA_REGISTRY_USERNAME" --topic "$t" --operation Read --operation Write --operation Describe --operation Create
+          done
+
+          for t in graphql.async.requests.v1 graphql.async.responses.v1 graphql.async.responses.dlq.v1; do
+            add_acl "$KAFKA_GRAPHQL_ASYNC_USERNAME" --topic "$t" --operation All
+          done
+          add_acl "$KAFKA_GRAPHQL_ASYNC_USERNAME" --group "graphql-async-workers" --operation Read --operation Describe
+
+          add_acl "$KAFKA_UI_USERNAME" --topic "*" --operation Read --operation Describe
+          add_acl "$KAFKA_UI_USERNAME" --group "*" --operation Read --operation Describe
+          add_acl "$KAFKA_UI_USERNAME" --cluster --operation Describe
+          add_acl "$KAFKA_ADMIN_USERNAME" --cluster --operation All
+
+          kafka_cli kafka-acls.sh --list || true
+
+          echo "Kafka SCRAM users are configured"
 ---
 # ===========================================================================
 # Schema Registry (wave 4)
@@ -415,8 +574,8 @@ data:
     # The address the socket server listens on.
     listeners=http://0.0.0.0:8081
 
-    # Updated to point to the correct Kafka bootstrap servers
-    kafkastore.bootstrap.servers=PLAINTEXT://kafka.kafka.svc.cluster.local:9092
+    # Updated to point to the secured Kafka bootstrap servers
+    kafkastore.bootstrap.servers=SASL_PLAINTEXT://kafka.kafka.svc.cluster.local:9092
 
     # The name of the topic to store schemas in
     kafkastore.topic=_schemas
@@ -465,19 +624,30 @@ spec:
             mountPath: /opt/kafka-tools
         - name: ensure-schema-topics
           image: apache/kafka:3.9.0
+          env:
+          - name: KAFKA_ADMIN_USERNAME
+            valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: admin_username } }
+          - name: KAFKA_ADMIN_PASSWORD
+            valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: admin_password } }
           command: ["/bin/bash","-lc"]
           args:
           - |
             set -eu
             BOOT=kafka.kafka.svc.cluster.local:9092
-            until /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --list >/dev/null 2>&1; do
+            CLIENT_CFG=/tmp/kafka-admin.properties
+            cat > "$CLIENT_CFG" <<EOF
+            security.protocol=SASL_PLAINTEXT
+            sasl.mechanism=SCRAM-SHA-256
+            sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="${KAFKA_ADMIN_USERNAME}" password="${KAFKA_ADMIN_PASSWORD}";
+            EOF
+            until /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --command-config "$CLIENT_CFG" --list >/dev/null 2>&1; do
               echo "Waiting for Kafka at $BOOT..."
               sleep 5
             done
             for t in _schemas _schema_encoders; do
-              /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --list | grep -qx "$t" || \
-              /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --create --topic "$t" --partitions 1 --replication-factor 1 --config cleanup.policy=compact
-              /opt/kafka/bin/kafka-configs.sh --bootstrap-server "$BOOT" --entity-type topics --entity-name "$t" --alter --add-config cleanup.policy=compact
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --command-config "$CLIENT_CFG" --list | grep -qx "$t" || \
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --command-config "$CLIENT_CFG" --create --topic "$t" --partitions 1 --replication-factor 1 --config cleanup.policy=compact
+              /opt/kafka/bin/kafka-configs.sh --bootstrap-server "$BOOT" --command-config "$CLIENT_CFG" --entity-type topics --entity-name "$t" --alter --add-config cleanup.policy=compact
             done
       containers:
         - name: schema-registry
@@ -510,6 +680,22 @@ spec:
             # Match your broker’s advertised listener
             - name: SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS
               value: "kafka.kafka.svc.internal.lan:9092"
+            - name: SCHEMA_REGISTRY_KAFKA_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-security-credentials
+                  key: schema_registry_username
+            - name: SCHEMA_REGISTRY_KAFKA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-security-credentials
+                  key: schema_registry_password
+            - name: SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL
+              value: "SASL_PLAINTEXT"
+            - name: SCHEMA_REGISTRY_KAFKASTORE_SASL_MECHANISM
+              value: "SCRAM-SHA-256"
+            - name: SCHEMA_REGISTRY_KAFKASTORE_SASL_JAAS_CONFIG
+              value: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="$(SCHEMA_REGISTRY_KAFKA_USERNAME)" password="$(SCHEMA_REGISTRY_KAFKA_PASSWORD)";'
             # Single-node RF
             - name: SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR
               value: "1"
@@ -785,19 +971,30 @@ spec:
 
       - name: create-connect-topics
         image: apache/kafka:3.9.0
+        env:
+        - name: KAFKA_ADMIN_USERNAME
+          valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: admin_username } }
+        - name: KAFKA_ADMIN_PASSWORD
+          valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: admin_password } }
         command: ["/bin/bash","-lc"]
         args:
         - |
           set -eu
           BOOT=kafka.kafka.svc.cluster.local:9092
-          until /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --list >/dev/null 2>&1; do
+          CLIENT_CFG=/tmp/kafka-admin.properties
+          cat > "$CLIENT_CFG" <<EOF
+          security.protocol=SASL_PLAINTEXT
+          sasl.mechanism=SCRAM-SHA-256
+          sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="${KAFKA_ADMIN_USERNAME}" password="${KAFKA_ADMIN_PASSWORD}";
+          EOF
+          until /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --command-config "$CLIENT_CFG" --list >/dev/null 2>&1; do
             echo "Waiting for Kafka at $BOOT..."
             sleep 5
           done
           for t in _connect-configs _connect-offsets _connect-status; do
-            /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --list | grep -qx "$t" || \
-            /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --create --topic "$t" --partitions 1 --replication-factor 1 --config cleanup.policy=compact
-            /opt/kafka/bin/kafka-configs.sh --bootstrap-server "$BOOT" --entity-type topics --entity-name "$t" --alter --add-config cleanup.policy=compact
+            /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --command-config "$CLIENT_CFG" --list | grep -qx "$t" || \
+            /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --command-config "$CLIENT_CFG" --create --topic "$t" --partitions 1 --replication-factor 1 --config cleanup.policy=compact
+            /opt/kafka/bin/kafka-configs.sh --bootstrap-server "$BOOT" --command-config "$CLIENT_CFG" --entity-type topics --entity-name "$t" --alter --add-config cleanup.policy=compact
           done
       containers:
       - name: connect
@@ -813,6 +1010,34 @@ spec:
           value: "/plugins/debezium,/plugins/wepay-kafka-connect-bigquery,/plugins/yb/debezium-postgres,/plugins/yb/yugabytedb-grpc"
         - name: CONNECT_BOOTSTRAP_SERVERS
           value: "kafka.kafka.svc.internal.lan:9092"
+        - name: KAFKA_CONNECT_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: kafka-security-credentials
+              key: connect_username
+        - name: KAFKA_CONNECT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: kafka-security-credentials
+              key: connect_password
+        - name: CONNECT_SECURITY_PROTOCOL
+          value: "SASL_PLAINTEXT"
+        - name: CONNECT_SASL_MECHANISM
+          value: "SCRAM-SHA-256"
+        - name: CONNECT_SASL_JAAS_CONFIG
+          value: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="$(KAFKA_CONNECT_USERNAME)" password="$(KAFKA_CONNECT_PASSWORD)";'
+        - name: CONNECT_PRODUCER_SECURITY_PROTOCOL
+          value: "SASL_PLAINTEXT"
+        - name: CONNECT_PRODUCER_SASL_MECHANISM
+          value: "SCRAM-SHA-256"
+        - name: CONNECT_PRODUCER_SASL_JAAS_CONFIG
+          value: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="$(KAFKA_CONNECT_USERNAME)" password="$(KAFKA_CONNECT_PASSWORD)";'
+        - name: CONNECT_CONSUMER_SECURITY_PROTOCOL
+          value: "SASL_PLAINTEXT"
+        - name: CONNECT_CONSUMER_SASL_MECHANISM
+          value: "SCRAM-SHA-256"
+        - name: CONNECT_CONSUMER_SASL_JAAS_CONFIG
+          value: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="$(KAFKA_CONNECT_USERNAME)" password="$(KAFKA_CONNECT_PASSWORD)";'
         - name: CONNECT_GROUP_ID
           value: "connect-cluster"
         - name: CONNECT_CONFIG_STORAGE_TOPIC
@@ -930,6 +1155,19 @@ spec:
         env:
         - { name: KAFKA_CLUSTERS_0_NAME, value: "local" }
         - { name: KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS, value: "kafka.kafka.svc.internal.lan:9092" }
+        - name: KAFKA_UI_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: kafka-security-credentials
+              key: kafka_ui_username
+        - name: KAFKA_UI_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: kafka-security-credentials
+              key: kafka_ui_password
+        - { name: KAFKA_CLUSTERS_0_PROPERTIES_SECURITY_PROTOCOL, value: "SASL_PLAINTEXT" }
+        - { name: KAFKA_CLUSTERS_0_PROPERTIES_SASL_MECHANISM, value: "SCRAM-SHA-256" }
+        - { name: KAFKA_CLUSTERS_0_PROPERTIES_SASL_JAAS_CONFIG, value: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="$(KAFKA_UI_USERNAME)" password="$(KAFKA_UI_PASSWORD)";' }
         - { name: KAFKA_CLUSTERS_0_SCHEMAREGISTRY, value: "http://schema-registry.kafka.svc.internal.lan:8081" }
         readinessProbe:
           httpGet: { path: /actuator/health, port: http }
