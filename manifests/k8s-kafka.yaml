@@ -114,6 +114,7 @@ metadata:
   namespace: kafka
   annotations:
     argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: Force=true,Replace=true
 spec:
   backoffLimit: 0
   template:
@@ -175,6 +176,7 @@ metadata:
   namespace: vault
   annotations:
     argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: Force=true,Replace=true
 spec:
   backoffLimit: 0
   template:
@@ -444,6 +446,7 @@ metadata:
   namespace: kafka
   annotations:
     argocd.argoproj.io/sync-wave: "3"
+    argocd.argoproj.io/sync-options: Force=true,Replace=true
 spec:
   backoffLimit: 0
   template:
