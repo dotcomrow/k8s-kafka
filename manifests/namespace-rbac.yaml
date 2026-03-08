@@ -20,6 +20,14 @@ metadata:
     argocd.argoproj.io/sync-wave: "0"
 ---
 apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kafka-security-reconciler
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+---
+apiVersion: v1
 kind: Secret
 metadata:
   name: kafka-security-credentials

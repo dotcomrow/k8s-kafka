@@ -115,4 +115,15 @@ spec:
             bound_service_account_names="${SA_NAME}" \
             bound_service_account_namespaces="${SA_NAMESPACE}" \
             policies="data-bootstrap" ttl="24h" >/dev/null
+
+          vault policy write kafka-security-reconciler - <<'EOP'
+          path "secret/metadata"                     { capabilities = ["read", "list"] }
+          path "secret/metadata/*"                   { capabilities = ["read", "list"] }
+          path "secret/data/kafka-scram-user-*"      { capabilities = ["read"] }
+          EOP
+
+          vault write auth/${AUTH_PATH}/role/kafka-security-reconciler \
+            bound_service_account_names="kafka-security-reconciler" \
+            bound_service_account_namespaces="kafka" \
+            policies="kafka-security-reconciler" ttl="24h" >/dev/null
         volumeMounts: [{ name: root-token, mountPath: /vault-token, readOnly: true }]

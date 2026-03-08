@@ -1,0 +1,350 @@
+# ============================================================================
+# Kafka security reconciler (wave 4) — dynamic SCRAM users from Vault
+# ============================================================================
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: kafka-security-reconciler
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+spec:
+  schedule: "*/1 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          annotations:
+            linkerd.io/inject: "disabled"
+        spec:
+          restartPolicy: Never
+          serviceAccountName: kafka-security-reconciler
+          volumes:
+            - name: tools
+              emptyDir: {}
+          initContainers:
+            - name: install-vault-cli
+              image: hashicorp/vault:1.15.4
+              imagePullPolicy: IfNotPresent
+              command: ["/bin/sh", "-ec"]
+              args:
+                - |
+                  cp /bin/vault /tools/vault
+                  chmod +x /tools/vault
+              volumeMounts:
+                - name: tools
+                  mountPath: /tools
+          containers:
+            - name: reconcile-security
+              image: apache/kafka:3.9.0
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: KAFKA_BOOTSTRAP_SERVERS
+                  value: "kafka.kafka.svc.internal.lan:9092"
+                - name: KAFKA_CLI_TIMEOUT
+                  value: "20s"
+                - name: KAFKA_RETRY_SECONDS
+                  value: "5"
+                - name: KAFKA_MANAGED_USER_PREFIX
+                  value: "dyn-"
+                - name: KAFKA_RECONCILE_DELETE_STALE
+                  value: "true"
+                - name: VAULT_ADDR
+                  value: "http://vault.vault.svc.cluster.local:8200"
+                - name: VAULT_AUTH_PATH
+                  value: "kubernetes"
+                - name: VAULT_ROLE
+                  value: "kafka-security-reconciler"
+                - name: VAULT_USERS_LIST_PATH
+                  value: "secret"
+                - name: VAULT_USERS_KEY_PREFIX
+                  value: "kafka-scram-user-"
+                - name: VAULT_K8S_TOKEN_FILE
+                  value: "/var/run/secrets/kubernetes.io/serviceaccount/token"
+                - name: KAFKA_ADMIN_USERNAME
+                  valueFrom:
+                    secretKeyRef:
+                      name: kafka-security-credentials
+                      key: admin_username
+                - name: KAFKA_ADMIN_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: kafka-security-credentials
+                      key: admin_password
+              command: ["/bin/bash", "-lc"]
+              args:
+                - |
+                  set -euo pipefail
+
+                  VAULT_BIN="/tools/vault"
+                  if [[ ! -x "${VAULT_BIN}" ]]; then
+                    echo "Vault CLI not found at ${VAULT_BIN}" >&2
+                    exit 1
+                  fi
+
+                  if [[ -z "${KAFKA_MANAGED_USER_PREFIX}" ]]; then
+                    echo "KAFKA_MANAGED_USER_PREFIX must not be empty" >&2
+                    exit 1
+                  fi
+
+                  if [[ -z "${VAULT_USERS_KEY_PREFIX}" ]]; then
+                    echo "VAULT_USERS_KEY_PREFIX must not be empty" >&2
+                    exit 1
+                  fi
+
+                  ADMIN_CFG="/tmp/kafka-admin.properties"
+                  cat > "${ADMIN_CFG}" <<EOF
+                  security.protocol=SASL_PLAINTEXT
+                  sasl.mechanism=SCRAM-SHA-256
+                  sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="${KAFKA_ADMIN_USERNAME}" password="${KAFKA_ADMIN_PASSWORD}";
+                  EOF
+                  CMD_CFG=(--command-config "${ADMIN_CFG}")
+
+                  kafka_cli() {
+                    local script="$1"
+                    shift
+                    timeout "${KAFKA_CLI_TIMEOUT}" /opt/kafka/bin/"${script}" \
+                      --bootstrap-server "${KAFKA_BOOTSTRAP_SERVERS}" \
+                      "${CMD_CFG[@]}" \
+                      "$@"
+                  }
+
+                  until kafka_cli kafka-topics.sh --list >/dev/null 2>&1; do
+                    echo "Waiting for Kafka auth at ${KAFKA_BOOTSTRAP_SERVERS}..."
+                    sleep "${KAFKA_RETRY_SECONDS}"
+                  done
+
+                  K8S_JWT="$(tr -d '\r\n' < "${VAULT_K8S_TOKEN_FILE}")"
+                  if [[ -z "${K8S_JWT}" ]]; then
+                    echo "Kubernetes JWT missing at ${VAULT_K8S_TOKEN_FILE}" >&2
+                    exit 1
+                  fi
+
+                  VAULT_TOKEN="$("${VAULT_BIN}" write -field=token "auth/${VAULT_AUTH_PATH}/login" role="${VAULT_ROLE}" jwt="${K8S_JWT}")"
+                  export VAULT_TOKEN
+
+                  VAULT_USERS_LIST_PATH_FOUND="true"
+                  list_vault_users() {
+                    local out key principal
+                    if out="$("${VAULT_BIN}" kv list -format=json "${VAULT_USERS_LIST_PATH}" 2>/tmp/vault_list.err)"; then
+                      while IFS= read -r key; do
+                        key="$(printf '%s' "${key}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+                        [[ -n "${key}" ]] || continue
+                        [[ "${key}" == */ ]] && continue
+                        [[ "${key}" == "${VAULT_USERS_KEY_PREFIX}"* ]] || continue
+                        principal="${key#${VAULT_USERS_KEY_PREFIX}}"
+                        [[ -n "${principal}" ]] || continue
+                        [[ "${principal}" == "${KAFKA_MANAGED_USER_PREFIX}"* ]] || continue
+                        printf '%s\n' "${principal}"
+                      done < <(printf '%s\n' "${out}" | tr -d '[]"' | tr ',' '\n')
+                      return 0
+                    fi
+                    if grep -qi "No value found" /tmp/vault_list.err; then
+                      VAULT_USERS_LIST_PATH_FOUND="false"
+                      return 0
+                    fi
+                    cat /tmp/vault_list.err >&2 || true
+                    return 1
+                  }
+
+                  vault_field_or_empty() {
+                    local path="$1"
+                    local field="$2"
+                    "${VAULT_BIN}" kv get -field="${field}" "${path}" 2>/dev/null || true
+                  }
+
+                  csv_items() {
+                    local csv="$1"
+                    printf '%s\n' "${csv}" \
+                      | tr ',' '\n' \
+                      | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+                      | sed '/^$/d'
+                  }
+
+                  add_acl() {
+                    local principal="$1"
+                    shift
+                    if ! kafka_cli kafka-acls.sh --add --allow-principal "User:${principal}" "$@" >/dev/null 2>&1; then
+                      echo "Warning: failed adding ACL for ${principal}: $*" >&2
+                    fi
+                  }
+
+                  remove_user_acls() {
+                    local principal="$1"
+                    local output line resource_type resource_name pattern_type op
+                    resource_type=""
+                    resource_name=""
+                    pattern_type=""
+                    if ! output="$(kafka_cli kafka-acls.sh --list --principal "User:${principal}" 2>/tmp/kafka_acl_list.err)"; then
+                      cat /tmp/kafka_acl_list.err >&2 || true
+                      return 0
+                    fi
+
+                    while IFS= read -r line; do
+                      if [[ "${line}" =~ ResourcePattern\(resourceType=([A-Z_]+),[[:space:]]name=([^,]+),[[:space:]]patternType=([A-Z_]+)\) ]]; then
+                        resource_type="${BASH_REMATCH[1]}"
+                        resource_name="${BASH_REMATCH[2]}"
+                        pattern_type="${BASH_REMATCH[3]}"
+                        continue
+                      fi
+                      if [[ "${line}" != *"principal=User:${principal}"* ]]; then
+                        continue
+                      fi
+                      if [[ ! "${line}" =~ operation=([A-Z_]+) ]]; then
+                        continue
+                      fi
+                      op="${BASH_REMATCH[1]}"
+
+                      args=(--remove --force --allow-principal "User:${principal}" --operation "${op}")
+                      case "${resource_type}" in
+                        TOPIC)
+                          args+=(--topic "${resource_name}")
+                          ;;
+                        GROUP)
+                          args+=(--group "${resource_name}")
+                          ;;
+                        TRANSACTIONAL_ID)
+                          args+=(--transactional-id "${resource_name}")
+                          ;;
+                        CLUSTER)
+                          args+=(--cluster)
+                          ;;
+                        *)
+                          continue
+                          ;;
+                      esac
+                      if [[ "${resource_type}" != "CLUSTER" ]]; then
+                        case "${pattern_type}" in
+                          PREFIXED) args+=(--resource-pattern-type prefixed) ;;
+                          MATCH) args+=(--resource-pattern-type match) ;;
+                        esac
+                      fi
+                      kafka_cli kafka-acls.sh "${args[@]}" >/dev/null 2>&1 || true
+                    done <<< "${output}"
+                  }
+
+                  list_kafka_managed_users() {
+                    kafka_cli kafka-configs.sh --describe --entity-type users 2>/dev/null \
+                      | awk -F"'" -v p="${KAFKA_MANAGED_USER_PREFIX}" '/user-principal/ { u=$2; if (index(u, p) == 1) print u }' \
+                      | sort -u
+                  }
+
+                  ensure_user() {
+                    local principal="$1"
+                    local secret_path password iterations pattern_type
+                    local topic_all topic_read topic_write topic_describe
+                    local group_read group_describe cluster_describe
+                    local pattern_args=()
+
+                    secret_path="${VAULT_USERS_LIST_PATH%/}/${VAULT_USERS_KEY_PREFIX}${principal}"
+                    password="$(vault_field_or_empty "${secret_path}" password | tr -d '\r\n')"
+                    if [[ -z "${password}" ]]; then
+                      echo "Skipping ${principal}: missing required field 'password' in ${secret_path}" >&2
+                      return 0
+                    fi
+
+                    iterations="$(vault_field_or_empty "${secret_path}" scram_iterations | tr -d '\r\n')"
+                    if [[ -z "${iterations}" ]]; then
+                      iterations="4096"
+                    fi
+                    if [[ ! "${iterations}" =~ ^[0-9]+$ ]]; then
+                      echo "Invalid scram_iterations for ${principal}; expected integer, got '${iterations}'" >&2
+                      return 1
+                    fi
+
+                    pattern_type="$(vault_field_or_empty "${secret_path}" resource_pattern_type | tr -d '\r\n' | tr '[:upper:]' '[:lower:]')"
+                    if [[ "${pattern_type}" == "prefixed" ]]; then
+                      pattern_args=(--resource-pattern-type prefixed)
+                    fi
+
+                    kafka_cli kafka-configs.sh \
+                      --alter \
+                      --entity-type users \
+                      --entity-name "${principal}" \
+                      --add-config "SCRAM-SHA-256=[iterations=${iterations},password=${password}]"
+
+                    topic_all="$(vault_field_or_empty "${secret_path}" topic_all)"
+                    topic_read="$(vault_field_or_empty "${secret_path}" topic_read)"
+                    topic_write="$(vault_field_or_empty "${secret_path}" topic_write)"
+                    topic_describe="$(vault_field_or_empty "${secret_path}" topic_describe)"
+                    group_read="$(vault_field_or_empty "${secret_path}" group_read)"
+                    group_describe="$(vault_field_or_empty "${secret_path}" group_describe)"
+                    cluster_describe="$(vault_field_or_empty "${secret_path}" cluster_describe | tr -d '\r\n' | tr '[:upper:]' '[:lower:]')"
+
+                    while IFS= read -r topic; do
+                      add_acl "${principal}" --topic "${topic}" "${pattern_args[@]}" --operation All
+                    done < <(csv_items "${topic_all}")
+                    while IFS= read -r topic; do
+                      add_acl "${principal}" --topic "${topic}" "${pattern_args[@]}" --operation Read
+                    done < <(csv_items "${topic_read}")
+                    while IFS= read -r topic; do
+                      add_acl "${principal}" --topic "${topic}" "${pattern_args[@]}" --operation Write
+                    done < <(csv_items "${topic_write}")
+                    while IFS= read -r topic; do
+                      add_acl "${principal}" --topic "${topic}" "${pattern_args[@]}" --operation Describe
+                    done < <(csv_items "${topic_describe}")
+
+                    while IFS= read -r group; do
+                      add_acl "${principal}" --group "${group}" "${pattern_args[@]}" --operation Read
+                    done < <(csv_items "${group_read}")
+                    while IFS= read -r group; do
+                      add_acl "${principal}" --group "${group}" "${pattern_args[@]}" --operation Describe
+                    done < <(csv_items "${group_describe}")
+
+                    if [[ "${cluster_describe}" == "true" || "${cluster_describe}" == "1" || "${cluster_describe}" == "yes" ]]; then
+                      add_acl "${principal}" --cluster --operation Describe
+                    fi
+                  }
+
+                  delete_user() {
+                    local principal="$1"
+                    echo "Deleting stale managed principal ${principal}"
+                    remove_user_acls "${principal}" || true
+                    kafka_cli kafka-configs.sh \
+                      --alter \
+                      --entity-type users \
+                      --entity-name "${principal}" \
+                      --delete-config SCRAM-SHA-256 || true
+                  }
+
+                  mapfile -t desired_users < <(list_vault_users | sort -u)
+                  mapfile -t current_managed_users < <(list_kafka_managed_users)
+
+                  for principal in "${desired_users[@]}"; do
+                    [[ -n "${principal}" ]] || continue
+                    ensure_user "${principal}"
+                  done
+
+                  if [[ "${KAFKA_RECONCILE_DELETE_STALE,,}" == "true" ]]; then
+                    if [[ "${VAULT_USERS_LIST_PATH_FOUND}" != "true" ]]; then
+                      echo "Vault users list path '${VAULT_USERS_LIST_PATH}' is missing; skipping stale-user deletion for safety"
+                    else
+                      desired_tmp="$(mktemp)"
+                      current_tmp="$(mktemp)"
+                      printf '%s\n' "${desired_users[@]}" | sed '/^$/d' | sort -u > "${desired_tmp}"
+                      printf '%s\n' "${current_managed_users[@]}" | sed '/^$/d' | sort -u > "${current_tmp}"
+                      while IFS= read -r principal; do
+                        [[ -n "${principal}" ]] || continue
+                        if ! grep -Fxq "${principal}" "${desired_tmp}"; then
+                          delete_user "${principal}"
+                        fi
+                      done < "${current_tmp}"
+                      rm -f "${desired_tmp}" "${current_tmp}"
+                    fi
+                  fi
+
+                  echo "Kafka security reconciliation complete"
+              volumeMounts:
+                - name: tools
+                  mountPath: /tools
+              resources:
+                requests:
+                  cpu: "50m"
+                  memory: "128Mi"
+                limits:
+                  cpu: "300m"
+                  memory: "256Mi"
