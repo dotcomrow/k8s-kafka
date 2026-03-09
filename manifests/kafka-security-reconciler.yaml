@@ -54,6 +54,8 @@ spec:
                   value: "3"
                 - name: KAFKA_RECONCILE_DELETE_STALE
                   value: "true"
+                - name: KAFKA_RECONCILE_REBUILD_ACLS
+                  value: "false"
                 - name: KAFKA_MANAGED_MARKER_TOPIC
                   value: "__kafka_security_reconciler_managed"
                 - name: KAFKA_DEFAULT_TOPIC_ALL
@@ -429,8 +431,11 @@ spec:
                       --entity-name "${principal}" \
                       --add-config "SCRAM-SHA-256=[iterations=${iterations},password=${password}]"
 
-                    # Rebuild ACLs from Vault-defined desired state each run.
-                    remove_user_acls "${principal}" || true
+                    # Optional destructive ACL rebuild. Disabled by default to avoid
+                    # temporary auth outages during reconcile runs.
+                    if bool_true "${KAFKA_RECONCILE_REBUILD_ACLS:-false}"; then
+                      remove_user_acls "${principal}" || true
+                    fi
 
                     topic_all="$(vault_value_or_empty "${base}-topic-all" | tr -d '\r\n')"
                     topic_read="$(vault_value_or_empty "${base}-topic-read" | tr -d '\r\n')"
