@@ -32,37 +32,38 @@ Create these Vault KVv2 paths (each with field `value`):
 ## Dynamic SCRAM User Reconciliation
 Dynamic Kafka accounts are reconciled continuously by CronJob `kafka-security-reconciler` (every minute).
 
-- Create/update user by writing Vault KVv2 secret:
-  - `secret/data/kafka-scram-user-<username>`
-- Delete user by deleting that Vault key:
+- Create/update user with two Vault KVv2 secrets (both using field `value`):
+  - `secret/data/kafka-scram-user-<username>` (Kafka principal username)
+  - `secret/data/kafka-scram-user-<username>-password` (SCRAM password)
+- Delete user by deleting both keys:
   - `vault kv delete secret/kafka-scram-user-<username>`
+  - `vault kv delete secret/kafka-scram-user-<username>-password`
 
 This uses root-level keys under `secret/data/` (no nested folder required).
-For safety, only keys with prefix `kafka-scram-user-` and usernames with prefix `dyn-` are managed by this reconciler.
+Only keys with prefix `kafka-scram-user-` are managed by this reconciler.
 
-Supported secret fields for each dynamic user:
+Optional per-user override keys (all field `value`) are supported:
 
-- `password` (required)
-- `scram_iterations` (optional, default `4096`)
-- `resource_pattern_type` (optional: `literal` or `prefixed`, default `literal`)
-- `topic_all` (optional CSV, grants topic `All`)
-- `topic_read` (optional CSV, grants topic `Read`)
-- `topic_write` (optional CSV, grants topic `Write`)
-- `topic_describe` (optional CSV, grants topic `Describe`)
-- `group_read` (optional CSV, grants group `Read`)
-- `group_describe` (optional CSV, grants group `Describe`)
-- `cluster_describe` (optional `true/false`, grants cluster `Describe`)
+- `secret/data/kafka-scram-user-<username>-scram-iterations` (default `4096`)
+- `secret/data/kafka-scram-user-<username>-resource-pattern-type` (`literal` or `prefixed`)
+- `secret/data/kafka-scram-user-<username>-topic-all` (CSV topics, grants `All`)
+- `secret/data/kafka-scram-user-<username>-topic-read` (CSV topics, grants `Read`)
+- `secret/data/kafka-scram-user-<username>-topic-write` (CSV topics, grants `Write`)
+- `secret/data/kafka-scram-user-<username>-topic-describe` (CSV topics, grants `Describe`)
+- `secret/data/kafka-scram-user-<username>-group-read` (CSV groups, grants `Read`)
+- `secret/data/kafka-scram-user-<username>-group-describe` (CSV groups, grants `Describe`)
+- `secret/data/kafka-scram-user-<username>-cluster-describe` (`true/false`)
+
+If override keys are not set, default ACLs are applied for async GraphQL flow:
+
+- topics `graphql.async.requests.v1,graphql.async.responses.v1,graphql.async.responses.dlq.v1` (`All`)
+- group `graphql-async-workers` (`Read`,`Describe`)
 
 Example:
 
 ```sh
-vault kv put secret/kafka-scram-user-dyn-analytics-worker \
-  password='replace-me' \
-  topic_read='graphql.async.requests.v1' \
-  topic_write='graphql.async.responses.v1' \
-  group_read='graphql-async-workers' \
-  group_describe='graphql-async-workers' \
-  cluster_describe='true'
+vault kv put secret/kafka-scram-user-ollama-async value='ollama-async'
+vault kv put secret/kafka-scram-user-ollama-async-password value='replace-me'
 ```
 
 ## Verify

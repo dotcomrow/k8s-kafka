@@ -118,7 +118,7 @@ spec:
 
           vault policy write kafka-security-reconciler - <<'EOP'
           path "secret/metadata"                     { capabilities = ["read", "list"] }
-          path "secret/metadata/*"                   { capabilities = ["read", "list"] }
+          path "secret/metadata/kafka-scram-user-*" { capabilities = ["read", "list"] }
           path "secret/data/kafka-scram-user-*"      { capabilities = ["read"] }
           EOP
 

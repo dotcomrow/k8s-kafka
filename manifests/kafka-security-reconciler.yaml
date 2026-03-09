@@ -49,10 +49,24 @@ spec:
                   value: "20s"
                 - name: KAFKA_RETRY_SECONDS
                   value: "5"
-                - name: KAFKA_MANAGED_USER_PREFIX
-                  value: "dyn-"
                 - name: KAFKA_RECONCILE_DELETE_STALE
                   value: "true"
+                - name: KAFKA_MANAGED_MARKER_TOPIC
+                  value: "__kafka_security_reconciler_managed"
+                - name: KAFKA_DEFAULT_TOPIC_ALL
+                  value: "graphql.async.requests.v1,graphql.async.responses.v1,graphql.async.responses.dlq.v1"
+                - name: KAFKA_DEFAULT_TOPIC_READ
+                  value: ""
+                - name: KAFKA_DEFAULT_TOPIC_WRITE
+                  value: ""
+                - name: KAFKA_DEFAULT_TOPIC_DESCRIBE
+                  value: ""
+                - name: KAFKA_DEFAULT_GROUP_READ
+                  value: "graphql-async-workers"
+                - name: KAFKA_DEFAULT_GROUP_DESCRIBE
+                  value: "graphql-async-workers"
+                - name: KAFKA_DEFAULT_CLUSTER_DESCRIBE
+                  value: "false"
                 - name: VAULT_ADDR
                   value: "http://vault.vault.svc.cluster.local:8200"
                 - name: VAULT_AUTH_PATH
@@ -86,13 +100,13 @@ spec:
                     exit 1
                   fi
 
-                  if [[ -z "${KAFKA_MANAGED_USER_PREFIX}" ]]; then
-                    echo "KAFKA_MANAGED_USER_PREFIX must not be empty" >&2
+                  if [[ -z "${VAULT_USERS_KEY_PREFIX}" ]]; then
+                    echo "VAULT_USERS_KEY_PREFIX must not be empty" >&2
                     exit 1
                   fi
 
-                  if [[ -z "${VAULT_USERS_KEY_PREFIX}" ]]; then
-                    echo "VAULT_USERS_KEY_PREFIX must not be empty" >&2
+                  if [[ -z "${KAFKA_MANAGED_MARKER_TOPIC}" ]]; then
+                    echo "KAFKA_MANAGED_MARKER_TOPIC must not be empty" >&2
                     exit 1
                   fi
 
@@ -127,34 +141,9 @@ spec:
                   VAULT_TOKEN="$("${VAULT_BIN}" write -field=token "auth/${VAULT_AUTH_PATH}/login" role="${VAULT_ROLE}" jwt="${K8S_JWT}")"
                   export VAULT_TOKEN
 
-                  VAULT_USERS_LIST_PATH_FOUND="true"
-                  list_vault_users() {
-                    local out key principal
-                    if out="$("${VAULT_BIN}" kv list -format=json "${VAULT_USERS_LIST_PATH}" 2>/tmp/vault_list.err)"; then
-                      while IFS= read -r key; do
-                        key="$(printf '%s' "${key}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-                        [[ -n "${key}" ]] || continue
-                        [[ "${key}" == */ ]] && continue
-                        [[ "${key}" == "${VAULT_USERS_KEY_PREFIX}"* ]] || continue
-                        principal="${key#${VAULT_USERS_KEY_PREFIX}}"
-                        [[ -n "${principal}" ]] || continue
-                        [[ "${principal}" == "${KAFKA_MANAGED_USER_PREFIX}"* ]] || continue
-                        printf '%s\n' "${principal}"
-                      done < <(printf '%s\n' "${out}" | tr -d '[]"' | tr ',' '\n')
-                      return 0
-                    fi
-                    if grep -qi "No value found" /tmp/vault_list.err; then
-                      VAULT_USERS_LIST_PATH_FOUND="false"
-                      return 0
-                    fi
-                    cat /tmp/vault_list.err >&2 || true
-                    return 1
-                  }
-
-                  vault_field_or_empty() {
+                  vault_value_or_empty() {
                     local path="$1"
-                    local field="$2"
-                    "${VAULT_BIN}" kv get -field="${field}" "${path}" 2>/dev/null || true
+                    "${VAULT_BIN}" kv get -field=value "${path}" 2>/dev/null || true
                   }
 
                   csv_items() {
@@ -163,6 +152,48 @@ spec:
                       | tr ',' '\n' \
                       | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
                       | sed '/^$/d'
+                  }
+
+                  VAULT_USERS_LIST_PATH_FOUND="true"
+                  list_vault_user_ids() {
+                    local out key user_id
+                    if out="$("${VAULT_BIN}" kv list -format=json "${VAULT_USERS_LIST_PATH}" 2>/tmp/vault_list.err)"; then
+                      while IFS= read -r key; do
+                        key="$(printf '%s' "${key}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+                        [[ -n "${key}" ]] || continue
+                        [[ "${key}" == */ ]] && continue
+                        [[ "${key}" == "${VAULT_USERS_KEY_PREFIX}"* ]] || continue
+
+                        user_id="${key#${VAULT_USERS_KEY_PREFIX}}"
+                        [[ -n "${user_id}" ]] || continue
+                        case "${user_id}" in
+                          *-password|*-scram-iterations|*-resource-pattern-type|*-topic-all|*-topic-read|*-topic-write|*-topic-describe|*-group-read|*-group-describe|*-cluster-describe)
+                            continue
+                            ;;
+                        esac
+                        printf '%s\n' "${user_id}"
+                      done < <(printf '%s\n' "${out}" | tr -d '[]"' | tr ',' '\n')
+                      return 0
+                    fi
+
+                    if grep -qi "No value found" /tmp/vault_list.err; then
+                      VAULT_USERS_LIST_PATH_FOUND="false"
+                      return 0
+                    fi
+                    cat /tmp/vault_list.err >&2 || true
+                    return 1
+                  }
+
+                  resolve_principal() {
+                    local user_id="$1"
+                    local base principal
+                    base="${VAULT_USERS_LIST_PATH%/}/${VAULT_USERS_KEY_PREFIX}${user_id}"
+                    principal="$(vault_value_or_empty "${base}" | tr -d '\r\n')"
+                    if [[ -z "${principal}" ]]; then
+                      echo "Skipping ${user_id}: missing required key ${base} field 'value' (Kafka username)" >&2
+                      return 1
+                    fi
+                    printf '%s\n' "${principal}"
                   }
 
                   add_acl() {
@@ -228,35 +259,42 @@ spec:
                   }
 
                   list_kafka_managed_users() {
-                    kafka_cli kafka-configs.sh --describe --entity-type users 2>/dev/null \
-                      | awk -F"'" -v p="${KAFKA_MANAGED_USER_PREFIX}" '/user-principal/ { u=$2; if (index(u, p) == 1) print u }' \
+                    local output
+                    if ! output="$(kafka_cli kafka-acls.sh --list --topic "${KAFKA_MANAGED_MARKER_TOPIC}" 2>/tmp/kafka_acl_marker_list.err)"; then
+                      cat /tmp/kafka_acl_marker_list.err >&2 || true
+                      return 1
+                    fi
+                    printf '%s\n' "${output}" \
+                      | sed -n 's/.*principal=User:\([^,)]*\).*/\1/p' \
+                      | sed '/^$/d' \
                       | sort -u
                   }
 
                   ensure_user() {
-                    local principal="$1"
-                    local secret_path password iterations pattern_type
+                    local user_id="$1"
+                    local principal="$2"
+                    local base password iterations pattern_type cluster_describe
                     local topic_all topic_read topic_write topic_describe
-                    local group_read group_describe cluster_describe
+                    local group_read group_describe
                     local pattern_args=()
 
-                    secret_path="${VAULT_USERS_LIST_PATH%/}/${VAULT_USERS_KEY_PREFIX}${principal}"
-                    password="$(vault_field_or_empty "${secret_path}" password | tr -d '\r\n')"
+                    base="${VAULT_USERS_LIST_PATH%/}/${VAULT_USERS_KEY_PREFIX}${user_id}"
+                    password="$(vault_value_or_empty "${base}-password" | tr -d '\r\n')"
                     if [[ -z "${password}" ]]; then
-                      echo "Skipping ${principal}: missing required field 'password' in ${secret_path}" >&2
+                      echo "Skipping ${user_id}: missing required key ${base}-password field 'value'" >&2
                       return 0
                     fi
 
-                    iterations="$(vault_field_or_empty "${secret_path}" scram_iterations | tr -d '\r\n')"
+                    iterations="$(vault_value_or_empty "${base}-scram-iterations" | tr -d '\r\n')"
                     if [[ -z "${iterations}" ]]; then
                       iterations="4096"
                     fi
                     if [[ ! "${iterations}" =~ ^[0-9]+$ ]]; then
-                      echo "Invalid scram_iterations for ${principal}; expected integer, got '${iterations}'" >&2
+                      echo "Invalid scram iterations for ${user_id}; expected integer, got '${iterations}'" >&2
                       return 1
                     fi
 
-                    pattern_type="$(vault_field_or_empty "${secret_path}" resource_pattern_type | tr -d '\r\n' | tr '[:upper:]' '[:lower:]')"
+                    pattern_type="$(vault_value_or_empty "${base}-resource-pattern-type" | tr -d '\r\n' | tr '[:upper:]' '[:lower:]')"
                     if [[ "${pattern_type}" == "prefixed" ]]; then
                       pattern_args=(--resource-pattern-type prefixed)
                     fi
@@ -267,13 +305,21 @@ spec:
                       --entity-name "${principal}" \
                       --add-config "SCRAM-SHA-256=[iterations=${iterations},password=${password}]"
 
-                    topic_all="$(vault_field_or_empty "${secret_path}" topic_all)"
-                    topic_read="$(vault_field_or_empty "${secret_path}" topic_read)"
-                    topic_write="$(vault_field_or_empty "${secret_path}" topic_write)"
-                    topic_describe="$(vault_field_or_empty "${secret_path}" topic_describe)"
-                    group_read="$(vault_field_or_empty "${secret_path}" group_read)"
-                    group_describe="$(vault_field_or_empty "${secret_path}" group_describe)"
-                    cluster_describe="$(vault_field_or_empty "${secret_path}" cluster_describe | tr -d '\r\n' | tr '[:upper:]' '[:lower:]')"
+                    topic_all="$(vault_value_or_empty "${base}-topic-all" | tr -d '\r\n')"
+                    topic_read="$(vault_value_or_empty "${base}-topic-read" | tr -d '\r\n')"
+                    topic_write="$(vault_value_or_empty "${base}-topic-write" | tr -d '\r\n')"
+                    topic_describe="$(vault_value_or_empty "${base}-topic-describe" | tr -d '\r\n')"
+                    group_read="$(vault_value_or_empty "${base}-group-read" | tr -d '\r\n')"
+                    group_describe="$(vault_value_or_empty "${base}-group-describe" | tr -d '\r\n')"
+                    cluster_describe="$(vault_value_or_empty "${base}-cluster-describe" | tr -d '\r\n' | tr '[:upper:]' '[:lower:]')"
+
+                    [[ -n "${topic_all}" ]] || topic_all="${KAFKA_DEFAULT_TOPIC_ALL}"
+                    [[ -n "${topic_read}" ]] || topic_read="${KAFKA_DEFAULT_TOPIC_READ}"
+                    [[ -n "${topic_write}" ]] || topic_write="${KAFKA_DEFAULT_TOPIC_WRITE}"
+                    [[ -n "${topic_describe}" ]] || topic_describe="${KAFKA_DEFAULT_TOPIC_DESCRIBE}"
+                    [[ -n "${group_read}" ]] || group_read="${KAFKA_DEFAULT_GROUP_READ}"
+                    [[ -n "${group_describe}" ]] || group_describe="${KAFKA_DEFAULT_GROUP_DESCRIBE}"
+                    [[ -n "${cluster_describe}" ]] || cluster_describe="${KAFKA_DEFAULT_CLUSTER_DESCRIBE}"
 
                     while IFS= read -r topic; do
                       add_acl "${principal}" --topic "${topic}" "${pattern_args[@]}" --operation All
@@ -298,6 +344,9 @@ spec:
                     if [[ "${cluster_describe}" == "true" || "${cluster_describe}" == "1" || "${cluster_describe}" == "yes" ]]; then
                       add_acl "${principal}" --cluster --operation Describe
                     fi
+
+                    # Marker ACL so we can detect previously managed users for stale cleanup.
+                    add_acl "${principal}" --topic "${KAFKA_MANAGED_MARKER_TOPIC}" --operation Describe
                   }
 
                   delete_user() {
@@ -311,32 +360,36 @@ spec:
                       --delete-config SCRAM-SHA-256 || true
                   }
 
-                  mapfile -t desired_users < <(list_vault_users | sort -u)
-                  mapfile -t current_managed_users < <(list_kafka_managed_users)
+                  mapfile -t desired_user_ids < <(list_vault_user_ids | sort -u)
+                  desired_principals_tmp="$(mktemp)"
 
-                  for principal in "${desired_users[@]}"; do
+                  for user_id in "${desired_user_ids[@]}"; do
+                    [[ -n "${user_id}" ]] || continue
+                    principal="$(resolve_principal "${user_id}" || true)"
                     [[ -n "${principal}" ]] || continue
-                    ensure_user "${principal}"
+                    printf '%s\n' "${principal}" >> "${desired_principals_tmp}"
+                    ensure_user "${user_id}" "${principal}"
                   done
+
+                  sort -u "${desired_principals_tmp}" -o "${desired_principals_tmp}"
 
                   if [[ "${KAFKA_RECONCILE_DELETE_STALE,,}" == "true" ]]; then
                     if [[ "${VAULT_USERS_LIST_PATH_FOUND}" != "true" ]]; then
                       echo "Vault users list path '${VAULT_USERS_LIST_PATH}' is missing; skipping stale-user deletion for safety"
                     else
-                      desired_tmp="$(mktemp)"
                       current_tmp="$(mktemp)"
-                      printf '%s\n' "${desired_users[@]}" | sed '/^$/d' | sort -u > "${desired_tmp}"
-                      printf '%s\n' "${current_managed_users[@]}" | sed '/^$/d' | sort -u > "${current_tmp}"
+                      list_kafka_managed_users > "${current_tmp}" || { rm -f "${current_tmp}" "${desired_principals_tmp}"; exit 1; }
                       while IFS= read -r principal; do
                         [[ -n "${principal}" ]] || continue
-                        if ! grep -Fxq "${principal}" "${desired_tmp}"; then
+                        if ! grep -Fxq "${principal}" "${desired_principals_tmp}"; then
                           delete_user "${principal}"
                         fi
                       done < "${current_tmp}"
-                      rm -f "${desired_tmp}" "${current_tmp}"
+                      rm -f "${current_tmp}"
                     fi
                   fi
 
+                  rm -f "${desired_principals_tmp}"
                   echo "Kafka security reconciliation complete"
               volumeMounts:
                 - name: tools
