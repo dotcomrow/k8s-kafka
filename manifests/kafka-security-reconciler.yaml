@@ -10,7 +10,7 @@ metadata:
     argocd.argoproj.io/sync-wave: "4"
 spec:
   schedule: "*/1 * * * *"
-  concurrencyPolicy: Replace
+  concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 2
   failedJobsHistoryLimit: 3
   jobTemplate:
@@ -47,11 +47,11 @@ spec:
                 - name: KAFKA_BOOTSTRAP_SERVERS
                   value: "kafka.kafka.svc.internal.lan:9092"
                 - name: KAFKA_CLI_TIMEOUT
-                  value: "20s"
+                  value: "75s"
                 - name: KAFKA_RETRY_SECONDS
                   value: "5"
                 - name: KAFKA_AUTH_MAX_RETRIES
-                  value: "8"
+                  value: "3"
                 - name: KAFKA_RECONCILE_DELETE_STALE
                   value: "true"
                 - name: KAFKA_MANAGED_MARKER_TOPIC
@@ -184,7 +184,14 @@ spec:
                   vault_updated_epoch_or_zero() {
                     local path="$1"
                     local updated_at
-                    updated_at="$("${VAULT_BIN}" kv metadata get -field=updated_time "${path}" 2>/dev/null || true)"
+                    # "kv metadata get" in Vault 1.15 does not support -field, so parse JSON output directly.
+                    updated_at="$(
+                      "${VAULT_BIN}" kv metadata get -format=json "${path}" 2>/dev/null \
+                        | tr -d '\n' \
+                        | sed -n 's/.*"updated_time":[[:space:]]*"\([^"]*\)".*/\1/p' \
+                        | head -n1 \
+                        || true
+                    )"
                     updated_at="$(printf '%s' "${updated_at}" | tr -d '\r\n')"
                     if [[ -z "${updated_at}" ]]; then
                       echo "0"

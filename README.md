@@ -30,12 +30,13 @@ Create these Vault KVv2 paths (each with field `value`):
 - `secret/data/graphql-kafka-async-password`
 
 ## Dynamic SCRAM User Reconciliation
-Dynamic Kafka accounts are reconciled continuously by CronJob `kafka-security-reconciler` (every minute).
+Dynamic Kafka accounts are reconciled continuously by CronJob `kafka-security-reconciler` (every minute, non-overlapping runs via `concurrencyPolicy: Forbid`).
 
 Safety behavior for eventual Vault consistency:
 
 - Reconciler only applies a user when both username and password keys exist and both `value` fields are non-empty.
 - `VAULT_MIN_SECRET_AGE_SECONDS` (default `120`) delays apply until secrets are stable for at least that age.
+- Kafka admin CLI calls use `KAFKA_CLI_TIMEOUT=75s` with `KAFKA_AUTH_MAX_RETRIES=3` to tolerate slower broker responses without indefinite retries.
 - If `VAULT_SKIP_PLACEHOLDER_VALUES=true`, placeholder values are ignored using `VAULT_PLACEHOLDER_VALUES` CSV.
 - While any user is in a transitional/invalid state, stale-user deletion is skipped for safety.
 - On each successful reconcile, SCRAM password is re-applied from Vault so password rotations converge automatically.
