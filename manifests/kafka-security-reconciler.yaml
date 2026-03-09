@@ -10,12 +10,13 @@ metadata:
     argocd.argoproj.io/sync-wave: "4"
 spec:
   schedule: "*/1 * * * *"
-  concurrencyPolicy: Forbid
+  concurrencyPolicy: Replace
   successfulJobsHistoryLimit: 2
   failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
       backoffLimit: 0
+      activeDeadlineSeconds: 300
       template:
         metadata:
           annotations:
@@ -49,6 +50,8 @@ spec:
                   value: "20s"
                 - name: KAFKA_RETRY_SECONDS
                   value: "5"
+                - name: KAFKA_AUTH_MAX_RETRIES
+                  value: "8"
                 - name: KAFKA_RECONCILE_DELETE_STALE
                   value: "true"
                 - name: KAFKA_MANAGED_MARKER_TOPIC
@@ -133,8 +136,20 @@ spec:
                       "$@"
                   }
 
+                  auth_max_retries="${KAFKA_AUTH_MAX_RETRIES:-8}"
+                  if [[ ! "${auth_max_retries}" =~ ^[0-9]+$ || "${auth_max_retries}" -lt 1 ]]; then
+                    echo "Invalid KAFKA_AUTH_MAX_RETRIES='${auth_max_retries}', defaulting to 8" >&2
+                    auth_max_retries="8"
+                  fi
+                  auth_attempt=0
                   until kafka_cli kafka-topics.sh --list >/dev/null 2>&1; do
+                    auth_attempt=$((auth_attempt + 1))
                     echo "Waiting for Kafka auth at ${KAFKA_BOOTSTRAP_SERVERS}..."
+                    if (( auth_attempt >= auth_max_retries )); then
+                      echo "Kafka auth check failed after ${auth_attempt} attempts; failing this run so next schedule can retry from a fresh pod" >&2
+                      kafka_cli kafka-topics.sh --list || true
+                      exit 1
+                    fi
                     sleep "${KAFKA_RETRY_SECONDS}"
                   done
 
