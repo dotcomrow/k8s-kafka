@@ -120,6 +120,7 @@ spec:
             add_acl "$KAFKA_GRAPHQL_ASYNC_USERNAME" --topic "$t" --operation All
           done
           add_acl "$KAFKA_GRAPHQL_ASYNC_USERNAME" --group "graphql-async-workers" --operation Read --operation Describe
+          add_acl "$KAFKA_GRAPHQL_ASYNC_USERNAME" --group "graphql-async-response-writer" --operation Read --operation Describe
 
           add_acl "$KAFKA_UI_USERNAME" --topic "*" --operation Read --operation Describe
           add_acl "$KAFKA_UI_USERNAME" --group "*" --operation Read --operation Describe
