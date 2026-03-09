@@ -32,6 +32,14 @@ Create these Vault KVv2 paths (each with field `value`):
 ## Dynamic SCRAM User Reconciliation
 Dynamic Kafka accounts are reconciled continuously by CronJob `kafka-security-reconciler` (every minute).
 
+Safety behavior for eventual Vault consistency:
+
+- Reconciler only applies a user when both username and password keys exist and both `value` fields are non-empty.
+- `VAULT_MIN_SECRET_AGE_SECONDS` (default `120`) delays apply until secrets are stable for at least that age.
+- If `VAULT_SKIP_PLACEHOLDER_VALUES=true`, placeholder values are ignored using `VAULT_PLACEHOLDER_VALUES` CSV.
+- While any user is in a transitional/invalid state, stale-user deletion is skipped for safety.
+- On each successful reconcile, SCRAM password is re-applied from Vault so password rotations converge automatically.
+
 - Create/update user with two Vault KVv2 secrets (both using field `value`):
   - `secret/data/kafka-scram-user-<username>` (Kafka principal username)
   - `secret/data/kafka-scram-user-<username>-password` (SCRAM password)

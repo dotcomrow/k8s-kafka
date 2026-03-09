@@ -77,6 +77,12 @@ spec:
                   value: "secret"
                 - name: VAULT_USERS_KEY_PREFIX
                   value: "kafka-scram-user-"
+                - name: VAULT_MIN_SECRET_AGE_SECONDS
+                  value: "120"
+                - name: VAULT_SKIP_PLACEHOLDER_VALUES
+                  value: "true"
+                - name: VAULT_PLACEHOLDER_VALUES
+                  value: "placeholder,__placeholder__,replace-me,changeme,pending,syncing"
                 - name: VAULT_K8S_TOKEN_FILE
                   value: "/var/run/secrets/kubernetes.io/serviceaccount/token"
                 - name: KAFKA_ADMIN_USERNAME
@@ -154,7 +160,81 @@ spec:
                       | sed '/^$/d'
                   }
 
+                  bool_true() {
+                    local val
+                    val="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+                    [[ "${val}" == "true" || "${val}" == "1" || "${val}" == "yes" ]]
+                  }
+
+                  vault_updated_epoch_or_zero() {
+                    local path="$1"
+                    local updated_at
+                    updated_at="$("${VAULT_BIN}" kv metadata get -field=updated_time "${path}" 2>/dev/null || true)"
+                    updated_at="$(printf '%s' "${updated_at}" | tr -d '\r\n')"
+                    if [[ -z "${updated_at}" ]]; then
+                      echo "0"
+                      return 0
+                    fi
+                    date -u -d "${updated_at}" +%s 2>/dev/null || echo "0"
+                  }
+
+                  vault_secret_age_ok() {
+                    local path="$1"
+                    local log_key="$2"
+                    local min_age now updated_epoch age
+
+                    min_age="${VAULT_MIN_SECRET_AGE_SECONDS:-0}"
+                    if [[ ! "${min_age}" =~ ^[0-9]+$ ]]; then
+                      echo "Invalid VAULT_MIN_SECRET_AGE_SECONDS='${min_age}', defaulting to 0" >&2
+                      min_age="0"
+                    fi
+                    if (( min_age <= 0 )); then
+                      return 0
+                    fi
+
+                    updated_epoch="$(vault_updated_epoch_or_zero "${path}")"
+                    if [[ "${updated_epoch}" -eq 0 ]]; then
+                      echo "Skipping ${log_key}: unable to read updated_time for ${path}" >&2
+                      return 1
+                    fi
+
+                    now="$(date -u +%s)"
+                    age=$(( now - updated_epoch ))
+                    if (( age < 0 )); then
+                      age=0
+                    fi
+                    if (( age < min_age )); then
+                      echo "Skipping ${log_key}: ${path} updated ${age}s ago (< ${min_age}s minimum age)" >&2
+                      return 1
+                    fi
+                    return 0
+                  }
+
+                  is_placeholder_value() {
+                    local raw="$1"
+                    local normalized candidate candidates_csv
+                    [[ -n "${raw}" ]] || return 1
+
+                    if ! bool_true "${VAULT_SKIP_PLACEHOLDER_VALUES:-false}"; then
+                      return 1
+                    fi
+
+                    normalized="$(printf '%s' "${raw}" | tr '[:upper:]' '[:lower:]' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+                    [[ -n "${normalized}" ]] || return 1
+
+                    candidates_csv="${VAULT_PLACEHOLDER_VALUES:-placeholder,__placeholder__,replace-me,changeme,pending,syncing}"
+                    while IFS= read -r candidate; do
+                      candidate="$(printf '%s' "${candidate}" | tr '[:upper:]' '[:lower:]' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+                      [[ -n "${candidate}" ]] || continue
+                      if [[ "${normalized}" == "${candidate}" ]]; then
+                        return 0
+                      fi
+                    done < <(csv_items "${candidates_csv}")
+                    return 1
+                  }
+
                   VAULT_USERS_LIST_PATH_FOUND="true"
+                  SAFE_TO_DELETE_STALE="true"
                   list_vault_user_ids() {
                     local out key user_id
                     if out="$("${VAULT_BIN}" kv list -format=json "${VAULT_USERS_LIST_PATH}" 2>/tmp/vault_list.err)"; then
@@ -191,6 +271,16 @@ spec:
                     principal="$(vault_value_or_empty "${base}" | tr -d '\r\n')"
                     if [[ -z "${principal}" ]]; then
                       echo "Skipping ${user_id}: missing required key ${base} field 'value' (Kafka username)" >&2
+                      SAFE_TO_DELETE_STALE="false"
+                      return 1
+                    fi
+                    if is_placeholder_value "${principal}"; then
+                      echo "Skipping ${user_id}: username value in ${base} matches placeholder guard list" >&2
+                      SAFE_TO_DELETE_STALE="false"
+                      return 1
+                    fi
+                    if ! vault_secret_age_ok "${base}" "${user_id}"; then
+                      SAFE_TO_DELETE_STALE="false"
                       return 1
                     fi
                     printf '%s\n' "${principal}"
@@ -282,6 +372,16 @@ spec:
                     password="$(vault_value_or_empty "${base}-password" | tr -d '\r\n')"
                     if [[ -z "${password}" ]]; then
                       echo "Skipping ${user_id}: missing required key ${base}-password field 'value'" >&2
+                      SAFE_TO_DELETE_STALE="false"
+                      return 0
+                    fi
+                    if is_placeholder_value "${password}"; then
+                      echo "Skipping ${user_id}: password value in ${base}-password matches placeholder guard list" >&2
+                      SAFE_TO_DELETE_STALE="false"
+                      return 0
+                    fi
+                    if ! vault_secret_age_ok "${base}-password" "${user_id}"; then
+                      SAFE_TO_DELETE_STALE="false"
                       return 0
                     fi
 
@@ -291,7 +391,8 @@ spec:
                     fi
                     if [[ ! "${iterations}" =~ ^[0-9]+$ ]]; then
                       echo "Invalid scram iterations for ${user_id}; expected integer, got '${iterations}'" >&2
-                      return 1
+                      SAFE_TO_DELETE_STALE="false"
+                      return 0
                     fi
 
                     pattern_type="$(vault_value_or_empty "${base}-resource-pattern-type" | tr -d '\r\n' | tr '[:upper:]' '[:lower:]')"
@@ -299,11 +400,15 @@ spec:
                       pattern_args=(--resource-pattern-type prefixed)
                     fi
 
+                    # Always set SCRAM to the latest stable Vault value to converge password updates.
                     kafka_cli kafka-configs.sh \
                       --alter \
                       --entity-type users \
                       --entity-name "${principal}" \
                       --add-config "SCRAM-SHA-256=[iterations=${iterations},password=${password}]"
+
+                    # Rebuild ACLs from Vault-defined desired state each run.
+                    remove_user_acls "${principal}" || true
 
                     topic_all="$(vault_value_or_empty "${base}-topic-all" | tr -d '\r\n')"
                     topic_read="$(vault_value_or_empty "${base}-topic-read" | tr -d '\r\n')"
@@ -376,6 +481,8 @@ spec:
                   if [[ "${KAFKA_RECONCILE_DELETE_STALE,,}" == "true" ]]; then
                     if [[ "${VAULT_USERS_LIST_PATH_FOUND}" != "true" ]]; then
                       echo "Vault users list path '${VAULT_USERS_LIST_PATH}' is missing; skipping stale-user deletion for safety"
+                    elif [[ "${SAFE_TO_DELETE_STALE}" != "true" ]]; then
+                      echo "Detected transitional or invalid Vault user secrets; skipping stale-user deletion for safety"
                     else
                       current_tmp="$(mktemp)"
                       list_kafka_managed_users > "${current_tmp}" || { rm -f "${current_tmp}" "${desired_principals_tmp}"; exit 1; }
