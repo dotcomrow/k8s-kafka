@@ -52,6 +52,8 @@ spec:
                   value: "5"
                 - name: KAFKA_AUTH_MAX_RETRIES
                   value: "3"
+                - name: KAFKA_COMMAND_MAX_RETRIES
+                  value: "3"
                 - name: KAFKA_RECONCILE_DELETE_STALE
                   value: "true"
                 - name: KAFKA_RECONCILE_REBUILD_ACLS
@@ -136,6 +138,30 @@ spec:
                       --bootstrap-server "${KAFKA_BOOTSTRAP_SERVERS}" \
                       "${CMD_CFG[@]}" \
                       "$@"
+                  }
+
+                  kafka_cli_retry() {
+                    local max_retries attempt rc script
+                    script="$1"
+                    max_retries="${KAFKA_COMMAND_MAX_RETRIES:-3}"
+                    if [[ ! "${max_retries}" =~ ^[0-9]+$ || "${max_retries}" -lt 1 ]]; then
+                      echo "Invalid KAFKA_COMMAND_MAX_RETRIES='${max_retries}', defaulting to 3" >&2
+                      max_retries="3"
+                    fi
+
+                    attempt=0
+                    while true; do
+                      attempt=$((attempt + 1))
+                      if kafka_cli "$@"; then
+                        return 0
+                      fi
+                      rc=$?
+                      if (( attempt >= max_retries )); then
+                        return "${rc}"
+                      fi
+                      echo "Kafka CLI command '${script}' failed (attempt ${attempt}/${max_retries}); retrying in ${KAFKA_RETRY_SECONDS}s..." >&2
+                      sleep "${KAFKA_RETRY_SECONDS}"
+                    done
                   }
 
                   auth_max_retries="${KAFKA_AUTH_MAX_RETRIES:-8}"
@@ -425,11 +451,15 @@ spec:
                     fi
 
                     # Always set SCRAM to the latest stable Vault value to converge password updates.
-                    kafka_cli kafka-configs.sh \
+                    if ! kafka_cli_retry kafka-configs.sh \
                       --alter \
                       --entity-type users \
                       --entity-name "${principal}" \
-                      --add-config "SCRAM-SHA-256=[iterations=${iterations},password=${password}]"
+                      --add-config "SCRAM-SHA-256=[iterations=${iterations},password=${password}]"; then
+                      echo "Warning: failed updating SCRAM for ${principal}; leaving current state unchanged and retrying on next run" >&2
+                      SAFE_TO_DELETE_STALE="false"
+                      return 0
+                    fi
 
                     # Optional destructive ACL rebuild. Disabled by default to avoid
                     # temporary auth outages during reconcile runs.
