@@ -38,6 +38,7 @@ Safety behavior for eventual Vault consistency:
 - `VAULT_MIN_SECRET_AGE_SECONDS` (default `120`) delays apply until secrets are stable for at least that age.
 - Kafka admin CLI calls use `KAFKA_CLI_TIMEOUT=75s` with `KAFKA_AUTH_MAX_RETRIES=3` to tolerate slower broker responses without indefinite retries.
 - Critical Kafka config updates retry transient failures via `KAFKA_COMMAND_MAX_RETRIES=3` (e.g., brief DNS resolution blips).
+- Kafka bootstrap uses service IP env (`KAFKA_SERVICE_HOST:KAFKA_SERVICE_PORT`) by default (`KAFKA_USE_SERVICE_IP_BOOTSTRAP=true`) to avoid DNS-only failure modes.
 - Reconcile job hard timeout is `activeDeadlineSeconds=900` to avoid false failures during slower broker/Vault periods.
 - If `VAULT_SKIP_PLACEHOLDER_VALUES=true`, placeholder values are ignored using `VAULT_PLACEHOLDER_VALUES` CSV.
 - While any user is in a transitional/invalid state, stale-user deletion is skipped for safety.

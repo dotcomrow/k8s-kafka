@@ -46,6 +46,8 @@ spec:
               env:
                 - name: KAFKA_BOOTSTRAP_SERVERS
                   value: "kafka.kafka.svc.internal.lan:9092"
+                - name: KAFKA_USE_SERVICE_IP_BOOTSTRAP
+                  value: "true"
                 - name: KAFKA_CLI_TIMEOUT
                   value: "75s"
                 - name: KAFKA_RETRY_SECONDS
@@ -131,11 +133,19 @@ spec:
                   EOF
                   CMD_CFG=(--command-config "${ADMIN_CFG}")
 
+                  BOOTSTRAP_SERVER="${KAFKA_BOOTSTRAP_SERVERS}"
+                  use_service_ip="$(printf '%s' "${KAFKA_USE_SERVICE_IP_BOOTSTRAP:-true}" | tr '[:upper:]' '[:lower:]')"
+                  if [[ ( "${use_service_ip}" == "true" || "${use_service_ip}" == "1" || "${use_service_ip}" == "yes" ) \
+                        && -n "${KAFKA_SERVICE_HOST:-}" \
+                        && -n "${KAFKA_SERVICE_PORT:-}" ]]; then
+                    BOOTSTRAP_SERVER="${KAFKA_SERVICE_HOST}:${KAFKA_SERVICE_PORT}"
+                  fi
+
                   kafka_cli() {
                     local script="$1"
                     shift
                     timeout "${KAFKA_CLI_TIMEOUT}" /opt/kafka/bin/"${script}" \
-                      --bootstrap-server "${KAFKA_BOOTSTRAP_SERVERS}" \
+                      --bootstrap-server "${BOOTSTRAP_SERVER}" \
                       "${CMD_CFG[@]}" \
                       "$@"
                   }
@@ -172,7 +182,7 @@ spec:
                   auth_attempt=0
                   until kafka_cli kafka-topics.sh --list >/dev/null 2>&1; do
                     auth_attempt=$((auth_attempt + 1))
-                    echo "Waiting for Kafka auth at ${KAFKA_BOOTSTRAP_SERVERS}..."
+                    echo "Waiting for Kafka auth at ${BOOTSTRAP_SERVER}..."
                     if (( auth_attempt >= auth_max_retries )); then
                       echo "Kafka auth check failed after ${auth_attempt} attempts; failing this run so next schedule can retry from a fresh pod" >&2
                       kafka_cli kafka-topics.sh --list || true
