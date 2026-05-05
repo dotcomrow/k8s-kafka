@@ -60,6 +60,7 @@ metadata:
     teleport.dev/name: "nifi-gui"
     teleport.dev/description: "Apache NiFi UI"
     teleport.dev/protocol: "https"
+    teleport.dev/insecure-skip-verify: "true"
     teleport.dev/public_addr: "nifi-gui.teleport.app.suncoast.systems"
     teleport.dev/labels: "environment=production,service=nifi"
   labels:
