@@ -43,6 +43,18 @@ spec:
           valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: graphql_async_username } }
         - name: KAFKA_GRAPHQL_ASYNC_PASSWORD
           valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: graphql_async_password } }
+        - name: KAFKA_NIFI_USERNAME
+          valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: nifi_username } }
+        - name: KAFKA_NIFI_PASSWORD
+          valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: nifi_password } }
+        - name: KAFKA_FLINK_USERNAME
+          valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: flink_username } }
+        - name: KAFKA_FLINK_PASSWORD
+          valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: flink_password } }
+        - name: KAFKA_CAMEL_USERNAME
+          valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: camel_username } }
+        - name: KAFKA_CAMEL_PASSWORD
+          valueFrom: { secretKeyRef: { name: kafka-security-credentials, key: camel_password } }
         command: ["/bin/bash","-lc"]
         args:
         - |
@@ -94,6 +106,9 @@ spec:
           ensure_scram_user "$KAFKA_SCHEMA_REGISTRY_USERNAME" "$KAFKA_SCHEMA_REGISTRY_PASSWORD"
           ensure_scram_user "$KAFKA_UI_USERNAME" "$KAFKA_UI_PASSWORD"
           ensure_scram_user "$KAFKA_GRAPHQL_ASYNC_USERNAME" "$KAFKA_GRAPHQL_ASYNC_PASSWORD"
+          ensure_scram_user "$KAFKA_NIFI_USERNAME" "$KAFKA_NIFI_PASSWORD"
+          ensure_scram_user "$KAFKA_FLINK_USERNAME" "$KAFKA_FLINK_PASSWORD"
+          ensure_scram_user "$KAFKA_CAMEL_USERNAME" "$KAFKA_CAMEL_PASSWORD"
 
           add_acl() {
             local principal="$1"
@@ -121,6 +136,18 @@ spec:
           done
           add_acl "$KAFKA_GRAPHQL_ASYNC_USERNAME" --group "graphql-async-workers" --operation Read --operation Describe
           add_acl "$KAFKA_GRAPHQL_ASYNC_USERNAME" --group "graphql-async-response-writer" --operation Read --operation Describe
+
+          add_acl "$KAFKA_NIFI_USERNAME" --topic "batch." --resource-pattern-type prefixed --operation Read --operation Write --operation Describe --operation Create
+          add_acl "$KAFKA_NIFI_USERNAME" --group "*" --operation Read --operation Describe
+          add_acl "$KAFKA_NIFI_USERNAME" --cluster --operation Describe
+
+          add_acl "$KAFKA_FLINK_USERNAME" --topic "batch." --resource-pattern-type prefixed --operation Read --operation Write --operation Describe --operation Create
+          add_acl "$KAFKA_FLINK_USERNAME" --group "*" --operation Read --operation Describe
+          add_acl "$KAFKA_FLINK_USERNAME" --cluster --operation Describe
+
+          add_acl "$KAFKA_CAMEL_USERNAME" --topic "batch." --resource-pattern-type prefixed --operation Read --operation Write --operation Describe --operation Create
+          add_acl "$KAFKA_CAMEL_USERNAME" --group "*" --operation Read --operation Describe
+          add_acl "$KAFKA_CAMEL_USERNAME" --cluster --operation Describe
 
           add_acl "$KAFKA_UI_USERNAME" --topic "*" --operation Read --operation Describe
           add_acl "$KAFKA_UI_USERNAME" --group "*" --operation Read --operation Describe

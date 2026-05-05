@@ -46,6 +46,12 @@ stringData:
   kafka_ui_password: "<path:secret/data/kafka-ui-password#value>"
   graphql_async_username: "<path:secret/data/graphql-kafka-async-username#value>"
   graphql_async_password: "<path:secret/data/graphql-kafka-async-password#value>"
+  nifi_username: "<path:secret/data/kafka-nifi-username#value>"
+  nifi_password: "<path:secret/data/kafka-nifi-password#value>"
+  flink_username: "<path:secret/data/kafka-flink-username#value>"
+  flink_password: "<path:secret/data/kafka-flink-password#value>"
+  camel_username: "<path:secret/data/kafka-camel-username#value>"
+  camel_password: "<path:secret/data/kafka-camel-password#value>"
 ---
 # apiVersion: rbac.authorization.k8s.io/v1
 # kind: Role

@@ -1,0 +1,655 @@
+# ============================================================================
+# Batch processing platform (waves 47-48)
+# - Apache NiFi: flow orchestration and schedule-driven ingestion
+# - Apache Flink: distributed batch compute cluster
+# ============================================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: batch-kafka-config
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "47"
+data:
+  bootstrap_servers: "kafka.kafka.svc.internal.lan:9092"
+  security_protocol: "SASL_PLAINTEXT"
+  sasl_mechanism: "SCRAM-SHA-256"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: batch-ui-keycloak-proxy-secrets
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "47"
+type: Opaque
+stringData:
+  oidc_issuer_url: "<path:secret/data/k8s-kafka-keycloak-oidc-issuer-url#value>"
+  nifi_oidc_client_id: "<path:secret/data/keycloak-client-id-nifi-gui#value>"
+  nifi_oidc_client_secret: "<path:secret/data/keycloak-client-secret-nifi-gui#value>"
+  nifi_keystore_password: "<path:secret/data/k8s-kafka-nifi-keystore-password#value>"
+  flink_client_id: "<path:secret/data/keycloak-client-id-flink-gui-proxy#value>"
+  flink_client_secret: "<path:secret/data/keycloak-client-secret-flink-gui-proxy#value>"
+  flink_cookie_secret: "<path:secret/data/k8s-kafka-flink-gui-keycloak-cookiesecret#value>"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nifi-hs
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "47"
+spec:
+  clusterIP: None
+  selector:
+    app: nifi
+  ports:
+    - name: https
+      port: 8443
+      targetPort: https
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nifi
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "47"
+    teleport.dev/name: "nifi-gui"
+    teleport.dev/description: "Apache NiFi UI"
+    teleport.dev/protocol: "https"
+    teleport.dev/public_addr: "nifi-gui.teleport.app.suncoast.systems"
+    teleport.dev/labels: "environment=production,service=nifi"
+  labels:
+    teleport.dev/enroll: "true"
+    app.kubernetes.io/name: nifi-gui
+    app.kubernetes.io/component: batch
+    teleport.dev/app: "nifi-gui"
+spec:
+  type: ClusterIP
+  selector:
+    app: nifi
+  ports:
+    - name: https
+      port: 8443
+      targetPort: https
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: nifi
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "47"
+spec:
+  serviceName: nifi-hs
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nifi
+  volumeClaimTemplates:
+    - metadata:
+        name: nifi-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 40Gi
+  template:
+    metadata:
+      labels:
+        app: nifi
+      annotations:
+        linkerd.io/inject: "disabled"
+    spec:
+      terminationGracePeriodSeconds: 60
+      initContainers:
+        - name: init-nifi-data
+          image: apache/nifi:2.7.1
+          command: ["/bin/bash", "-lc"]
+          securityContext:
+            runAsUser: 0
+          env:
+            - name: NIFI_KEYSTORE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: batch-ui-keycloak-proxy-secrets
+                  key: nifi_keystore_password
+          args:
+            - |
+              set -euo pipefail
+              for d in conf flowfile_repository content_repository provenance_repository database_repository state logs; do
+                mkdir -p "/data/${d}"
+              done
+              if [ ! -f /data/conf/nifi.properties ]; then
+                cp -a /opt/nifi/nifi-current/conf/. /data/conf/
+              fi
+
+              if [ ! -f /data/conf/keystore.p12 ] || [ ! -f /data/conf/truststore.p12 ]; then
+                keytool -genkeypair \
+                  -alias nifi-key \
+                  -keyalg RSA \
+                  -keysize 2048 \
+                  -validity 3650 \
+                  -dname "CN=nifi.kafka.svc.cluster.local, OU=Platform, O=Suncoast, L=NA, ST=NA, C=US" \
+                  -ext "SAN=dns:nifi.kafka.svc.cluster.local,dns:nifi-0.nifi-hs.kafka.svc.cluster.local,dns:nifi" \
+                  -keystore /data/conf/keystore.p12 \
+                  -storetype PKCS12 \
+                  -storepass "${NIFI_KEYSTORE_PASSWORD}" \
+                  -keypass "${NIFI_KEYSTORE_PASSWORD}"
+
+                keytool -exportcert \
+                  -alias nifi-key \
+                  -keystore /data/conf/keystore.p12 \
+                  -storetype PKCS12 \
+                  -storepass "${NIFI_KEYSTORE_PASSWORD}" \
+                  -rfc \
+                  -file /tmp/nifi-cert.pem
+
+                keytool -importcert \
+                  -alias nifi-ca \
+                  -file /tmp/nifi-cert.pem \
+                  -keystore /data/conf/truststore.p12 \
+                  -storetype PKCS12 \
+                  -storepass "${NIFI_KEYSTORE_PASSWORD}" \
+                  -noprompt
+              fi
+
+              chown -R 1000:1000 /data
+          volumeMounts:
+            - name: nifi-data
+              mountPath: /data
+      containers:
+        - name: nifi
+          image: apache/nifi:2.7.1
+          ports:
+            - name: https
+              containerPort: 8443
+          env:
+            - name: AUTH
+              value: "oidc"
+            - name: KEYSTORE_PATH
+              value: "/opt/nifi/nifi-current/conf/keystore.p12"
+            - name: KEYSTORE_TYPE
+              value: "PKCS12"
+            - name: KEYSTORE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: batch-ui-keycloak-proxy-secrets
+                  key: nifi_keystore_password
+            - name: TRUSTSTORE_PATH
+              value: "/opt/nifi/nifi-current/conf/truststore.p12"
+            - name: TRUSTSTORE_TYPE
+              value: "PKCS12"
+            - name: TRUSTSTORE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: batch-ui-keycloak-proxy-secrets
+                  key: nifi_keystore_password
+            - name: INITIAL_ADMIN_GROUP
+              value: "platform_batch_ui_user"
+            - name: NIFI_SECURITY_USER_OIDC_DISCOVERY_URL
+              valueFrom:
+                secretKeyRef:
+                  name: batch-ui-keycloak-proxy-secrets
+                  key: oidc_issuer_url
+            - name: NIFI_SECURITY_USER_OIDC_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: batch-ui-keycloak-proxy-secrets
+                  key: nifi_oidc_client_id
+            - name: NIFI_SECURITY_USER_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: batch-ui-keycloak-proxy-secrets
+                  key: nifi_oidc_client_secret
+            - name: NIFI_SECURITY_USER_OIDC_ADDITIONAL_SCOPES
+              value: "openid,profile,email,groups"
+            - name: NIFI_SECURITY_USER_OIDC_CLAIM_IDENTIFYING_USER
+              value: "preferred_username"
+            - name: NIFI_SECURITY_USER_OIDC_FALLBACK_CLAIMS_IDENTIFYING_USER
+              value: "email,sub"
+            - name: NIFI_SECURITY_USER_OIDC_CLAIM_GROUPS
+              value: "groups"
+            - name: NIFI_SECURITY_USER_OIDC_TRUSTSTORE_STRATEGY
+              value: "JDK"
+            - name: NIFI_WEB_HTTPS_PORT
+              value: "8443"
+            - name: NIFI_WEB_PROXY_HOST
+              value: "nifi-gui.teleport.app.suncoast.systems"
+            - name: NIFI_CLUSTER_IS_NODE
+              value: "false"
+            - name: NIFI_JVM_HEAP_INIT
+              value: "2g"
+            - name: NIFI_JVM_HEAP_MAX
+              value: "2g"
+            - name: BATCH_KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-kafka-config
+                  key: bootstrap_servers
+            - name: BATCH_KAFKA_SECURITY_PROTOCOL
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-kafka-config
+                  key: security_protocol
+            - name: BATCH_KAFKA_SASL_MECHANISM
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-kafka-config
+                  key: sasl_mechanism
+            - name: BATCH_KAFKA_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-security-credentials
+                  key: nifi_username
+            - name: BATCH_KAFKA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-security-credentials
+                  key: nifi_password
+          volumeMounts:
+            - name: nifi-data
+              mountPath: /opt/nifi/nifi-current/conf
+              subPath: conf
+            - name: nifi-data
+              mountPath: /opt/nifi/nifi-current/flowfile_repository
+              subPath: flowfile_repository
+            - name: nifi-data
+              mountPath: /opt/nifi/nifi-current/content_repository
+              subPath: content_repository
+            - name: nifi-data
+              mountPath: /opt/nifi/nifi-current/provenance_repository
+              subPath: provenance_repository
+            - name: nifi-data
+              mountPath: /opt/nifi/nifi-current/database_repository
+              subPath: database_repository
+            - name: nifi-data
+              mountPath: /opt/nifi/nifi-current/state
+              subPath: state
+            - name: nifi-data
+              mountPath: /opt/nifi/nifi-current/logs
+              subPath: logs
+          startupProbe:
+            httpGet:
+              scheme: HTTPS
+              path: /nifi
+              port: https
+            initialDelaySeconds: 45
+            periodSeconds: 15
+            failureThreshold: 40
+          readinessProbe:
+            httpGet:
+              scheme: HTTPS
+              path: /nifi
+              port: https
+            initialDelaySeconds: 45
+            periodSeconds: 10
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              scheme: HTTPS
+              path: /nifi
+              port: https
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+      securityContext:
+        fsGroup: 1000
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: flink-config
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "48"
+data:
+  config.yaml: |+
+    jobmanager.rpc.address: flink-jobmanager
+    taskmanager.numberOfTaskSlots: 2
+    blob.server.port: 6124
+    jobmanager.rpc.port: 6123
+    taskmanager.rpc.port: 6122
+    jobmanager.memory.process.size: 1536m
+    taskmanager.memory.process.size: 2048m
+    parallelism.default: 2
+    execution.runtime-mode: BATCH
+    restart-strategy.type: fixed-delay
+    restart-strategy.fixed-delay.attempts: 3
+    restart-strategy.fixed-delay.delay: 10 s
+  log4j-console.properties: |+
+    rootLogger.level = INFO
+    rootLogger.appenderRef.console.ref = ConsoleAppender
+    rootLogger.appenderRef.rolling.ref = RollingFileAppender
+    logger.pekko.name = org.apache.pekko
+    logger.pekko.level = INFO
+    logger.kafka.name = org.apache.kafka
+    logger.kafka.level = INFO
+    appender.console.name = ConsoleAppender
+    appender.console.type = CONSOLE
+    appender.console.layout.type = PatternLayout
+    appender.console.layout.pattern = %d{yyyy-MM-dd HH:mm:ss,SSS} %-5p %-60c %x - %m%n
+    appender.rolling.name = RollingFileAppender
+    appender.rolling.type = RollingFile
+    appender.rolling.append = false
+    appender.rolling.fileName = ${sys:log.file}
+    appender.rolling.filePattern = ${sys:log.file}.%i
+    appender.rolling.layout.type = PatternLayout
+    appender.rolling.layout.pattern = %d{yyyy-MM-dd HH:mm:ss,SSS} %-5p %-60c %x - %m%n
+    appender.rolling.policies.type = Policies
+    appender.rolling.policies.size.type = SizeBasedTriggeringPolicy
+    appender.rolling.policies.size.size = 100MB
+    appender.rolling.strategy.type = DefaultRolloverStrategy
+    appender.rolling.strategy.max = 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flink-jobmanager
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "48"
+spec:
+  type: ClusterIP
+  selector:
+    app: flink
+    component: jobmanager
+  ports:
+    - name: rpc
+      port: 6123
+      targetPort: rpc
+    - name: blob-server
+      port: 6124
+      targetPort: blob-server
+    - name: webui
+      port: 8081
+      targetPort: webui
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flink-jobmanager
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "48"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flink
+      component: jobmanager
+  template:
+    metadata:
+      labels:
+        app: flink
+        component: jobmanager
+      annotations:
+        linkerd.io/inject: "disabled"
+    spec:
+      containers:
+        - name: jobmanager
+          image: flink:1.20.3-scala_2.12-java17
+          args: ["jobmanager"]
+          ports:
+            - name: rpc
+              containerPort: 6123
+            - name: blob-server
+              containerPort: 6124
+            - name: webui
+              containerPort: 8081
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-kafka-config
+                  key: bootstrap_servers
+            - name: KAFKA_SECURITY_PROTOCOL
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-kafka-config
+                  key: security_protocol
+            - name: KAFKA_SASL_MECHANISM
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-kafka-config
+                  key: sasl_mechanism
+            - name: KAFKA_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-security-credentials
+                  key: flink_username
+            - name: KAFKA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-security-credentials
+                  key: flink_password
+          volumeMounts:
+            - name: flink-config-volume
+              mountPath: /opt/flink/conf
+          livenessProbe:
+            tcpSocket:
+              port: rpc
+            initialDelaySeconds: 30
+            periodSeconds: 60
+          readinessProbe:
+            tcpSocket:
+              port: rpc
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "1"
+              memory: "2Gi"
+          securityContext:
+            runAsUser: 9999
+      volumes:
+        - name: flink-config-volume
+          configMap:
+            name: flink-config
+            items:
+              - key: config.yaml
+                path: config.yaml
+              - key: log4j-console.properties
+                path: log4j-console.properties
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flink-oauth2-proxy
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "48"
+    teleport.dev/name: "flink-gui"
+    teleport.dev/description: "Apache Flink UI"
+    teleport.dev/protocol: "http"
+    teleport.dev/public_addr: "flink-gui.teleport.app.suncoast.systems"
+    teleport.dev/labels: "environment=production,service=flink"
+  labels:
+    teleport.dev/enroll: "true"
+    app.kubernetes.io/name: flink-gui
+    app.kubernetes.io/component: batch
+    teleport.dev/app: "flink-gui"
+spec:
+  ports:
+    - name: http
+      port: 4180
+      targetPort: http
+  selector:
+    app: flink-oauth2-proxy
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flink-oauth2-proxy
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "48"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flink-oauth2-proxy
+  template:
+    metadata:
+      labels:
+        app: flink-oauth2-proxy
+      annotations:
+        linkerd.io/inject: "disabled"
+    spec:
+      containers:
+        - name: proxy
+          image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
+          ports:
+            - containerPort: 4180
+              name: http
+          args:
+            - --provider=keycloak-oidc
+            - --http-address=0.0.0.0:4180
+            - --upstream=http://flink-jobmanager.kafka.svc.cluster.local:8081/
+            - --redirect-url=https://flink-gui.teleport.app.suncoast.systems/oauth2/callback
+            - --code-challenge-method=S256
+            - --cookie-secure=true
+            - --cookie-samesite=lax
+            - --cookie-refresh=1h
+            - --cookie-expire=8h
+            - --email-domain=*
+            - --set-authorization-header=true
+            - --pass-authorization-header=true
+            - --pass-access-token=true
+            - --skip-provider-button=true
+            - --allowed-role=platform_batch_ui_user
+          env:
+            - name: OAUTH2_PROXY_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: batch-ui-keycloak-proxy-secrets
+                  key: flink_client_id
+            - name: OAUTH2_PROXY_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: batch-ui-keycloak-proxy-secrets
+                  key: flink_client_secret
+            - name: OAUTH2_PROXY_COOKIE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: batch-ui-keycloak-proxy-secrets
+                  key: flink_cookie_secret
+            - name: OAUTH2_PROXY_OIDC_ISSUER_URL
+              valueFrom:
+                secretKeyRef:
+                  name: batch-ui-keycloak-proxy-secrets
+                  key: oidc_issuer_url
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flink-taskmanager
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "48"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: flink
+      component: taskmanager
+  template:
+    metadata:
+      labels:
+        app: flink
+        component: taskmanager
+      annotations:
+        linkerd.io/inject: "disabled"
+    spec:
+      containers:
+        - name: taskmanager
+          image: flink:1.20.3-scala_2.12-java17
+          args: ["taskmanager"]
+          ports:
+            - name: rpc
+              containerPort: 6122
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-kafka-config
+                  key: bootstrap_servers
+            - name: KAFKA_SECURITY_PROTOCOL
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-kafka-config
+                  key: security_protocol
+            - name: KAFKA_SASL_MECHANISM
+              valueFrom:
+                configMapKeyRef:
+                  name: batch-kafka-config
+                  key: sasl_mechanism
+            - name: KAFKA_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-security-credentials
+                  key: flink_username
+            - name: KAFKA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-security-credentials
+                  key: flink_password
+          volumeMounts:
+            - name: flink-config-volume
+              mountPath: /opt/flink/conf
+          livenessProbe:
+            tcpSocket:
+              port: rpc
+            initialDelaySeconds: 30
+            periodSeconds: 60
+          readinessProbe:
+            tcpSocket:
+              port: rpc
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "2"
+              memory: "3Gi"
+          securityContext:
+            runAsUser: 9999
+      volumes:
+        - name: flink-config-volume
+          configMap:
+            name: flink-config
+            items:
+              - key: config.yaml
+                path: config.yaml
+              - key: log4j-console.properties
+                path: log4j-console.properties

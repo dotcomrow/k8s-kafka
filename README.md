@@ -28,6 +28,52 @@ Create these Vault KVv2 paths (each with field `value`):
 - `secret/data/kafka-ui-password`
 - `secret/data/graphql-kafka-async-username`
 - `secret/data/graphql-kafka-async-password`
+- `secret/data/kafka-nifi-username`
+- `secret/data/kafka-nifi-password`
+- `secret/data/kafka-flink-username`
+- `secret/data/kafka-flink-password`
+- `secret/data/kafka-camel-username`
+- `secret/data/kafka-camel-password`
+- `secret/data/k8s-kafka-keycloak-oidc-issuer-url`
+- `secret/data/keycloak-client-id-kafka-gui-proxy`
+- `secret/data/keycloak-client-secret-kafka-gui-proxy`
+- `secret/data/k8s-kafka-kafka-gui-keycloak-cookiesecret`
+- `secret/data/keycloak-client-id-nifi-gui`
+- `secret/data/keycloak-client-secret-nifi-gui`
+- `secret/data/k8s-kafka-nifi-keystore-password`
+- `secret/data/keycloak-client-id-flink-gui-proxy`
+- `secret/data/keycloak-client-secret-flink-gui-proxy`
+- `secret/data/k8s-kafka-flink-gui-keycloak-cookiesecret`
+
+## Batch Processing Platform
+`manifests/batch-processing-platform.yaml` adds a baseline batch platform in the existing `kafka` namespace:
+
+- Apache NiFi (`StatefulSet`) for scheduled ingestion/orchestration
+- Apache Flink session cluster (`flink-jobmanager` + `flink-taskmanager`) for distributed batch compute
+- Shared Kafka connection config (`batch-kafka-config`) and SCRAM credentials for NiFi/Flink
+
+Kafka bootstrap also provisions ACLs for:
+
+- `kafka-nifi-*` principal for `batch.*` topics
+- `kafka-flink-*` principal for `batch.*` topics
+- `kafka-camel-*` principal for `batch.*` topics (for Camel routes/connectors you run in Kafka Connect or separate runtimes)
+
+Account model:
+
+- `kafka-*` credentials are robot/service principals for workload-to-Kafka auth
+- human UI access uses Keycloak only:
+  - Kafka UI and Flink UI use Keycloak-gated `oauth2-proxy`
+  - NiFi UI uses native NiFi OIDC with Keycloak
+
+Keycloak authorization:
+
+- create realm role `platform_batch_ui_user` (or update manifests to your preferred role name)
+- assign that role to users allowed into Kafka/NiFi/Flink UIs
+- each UI has its own Keycloak OIDC client credentials secret paths listed above
+- configure Keycloak mappers so users receive the `groups` claim containing `platform_batch_ui_user` for NiFi policy group matching
+
+NiFi 2.x is HTTPS-only and OIDC-enabled; UI runs on `https://nifi-gui.teleport.app.suncoast.systems/nifi`.
+Use Keycloak client redirect URI: `https://nifi-gui.teleport.app.suncoast.systems/nifi-api/access/oidc/callback/consumer`.
 
 ## Dynamic SCRAM User Reconciliation
 Dynamic Kafka accounts are reconciled continuously by CronJob `kafka-security-reconciler` (every minute, non-overlapping runs via `concurrencyPolicy: Forbid`).
@@ -84,4 +130,7 @@ kubectl -n kafka logs job/kafka-security-bootstrap --tail=200
 kubectl -n kafka get jobs -l cronjob-name=kafka-security-reconciler --sort-by=.metadata.creationTimestamp
 kubectl -n kafka logs job/$(kubectl -n kafka get jobs -l cronjob-name=kafka-security-reconciler -o jsonpath='{.items[-1:].metadata.name}') --tail=200
 kubectl -n kafka exec kafka-0 -- /opt/kafka/bin/kafka-configs.sh --bootstrap-server kafka-0.kafka-hs.kafka.svc.internal.lan:9094 --describe --entity-type users
+kubectl -n kafka get pods -l app=nifi
+kubectl -n kafka get pods -l app=flink
+kubectl -n kafka get svc oauth2-proxy nifi flink-oauth2-proxy
 ```

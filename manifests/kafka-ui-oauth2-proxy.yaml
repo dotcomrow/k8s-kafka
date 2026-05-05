@@ -81,9 +81,10 @@ metadata:
   namespace: kafka
 type: Opaque
 stringData:
-  client_id: "<path:secret/data/k8s-kafka-kafka-gui-oauth-clientid#value>"
-  client_secret: "<path:secret/data/k8s-kafka-kafka-gui-oauth-clientsecret#value>"
-  cookie_secret: "<path:secret/data/k8s-kafka-kafka-gui-oauth-cookiesecret#value>"
+  client_id: "<path:secret/data/keycloak-client-id-kafka-gui-proxy#value>"
+  client_secret: "<path:secret/data/keycloak-client-secret-kafka-gui-proxy#value>"
+  cookie_secret: "<path:secret/data/k8s-kafka-kafka-gui-keycloak-cookiesecret#value>"
+  oidc_issuer_url: "<path:secret/data/k8s-kafka-keycloak-oidc-issuer-url#value>"
 ---
 apiVersion: v1
 kind: Service
@@ -95,7 +96,7 @@ metadata:
     teleport.dev/name: "kafka-gui"
     teleport.dev/description: "Kafka GUI"
     teleport.dev/protocol: "http"
-    teleport.dev/public_addr: "kafka-gui.app.suncoast.systems"
+    teleport.dev/public_addr: "kafka-gui.teleport.app.suncoast.systems"
     teleport.dev/labels: "environment=production,service=kafka"
   labels:
     teleport.dev/enroll: "true"
@@ -134,10 +135,11 @@ spec:
             cpu: "200m"
             memory: "256Mi"
         args:
-          - --provider=github
+          - --provider=keycloak-oidc
           - --http-address=0.0.0.0:4180
           - --upstream=http://kafka-ui.kafka.svc.cluster.local:8080/
           - --redirect-url=https://kafka-gui.teleport.app.suncoast.systems/oauth2/callback
+          - --code-challenge-method=S256
           - --cookie-secure=true
           - --cookie-samesite=lax
           - --cookie-refresh=1h
@@ -147,7 +149,7 @@ spec:
           - --pass-authorization-header=true
           - --pass-access-token=true
           - --skip-provider-button=true
-          - --allowed-group=dotcomrow:kafka_gui_users
+          - --allowed-role=platform_batch_ui_user
         env:
         - name: OAUTH2_PROXY_CLIENT_ID
           valueFrom: { secretKeyRef: { name: oauth2-proxy-secrets, key: client_id } }
@@ -155,8 +157,9 @@ spec:
           valueFrom: { secretKeyRef: { name: oauth2-proxy-secrets, key: client_secret } }
         - name: OAUTH2_PROXY_COOKIE_SECRET
           valueFrom: { secretKeyRef: { name: oauth2-proxy-secrets, key: cookie_secret } }
+        - name: OAUTH2_PROXY_OIDC_ISSUER_URL
+          valueFrom: { secretKeyRef: { name: oauth2-proxy-secrets, key: oidc_issuer_url } }
         readinessProbe:
           httpGet: { path: /ping, port: http }
           initialDelaySeconds: 5
           periodSeconds: 5
-
