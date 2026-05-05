@@ -35,6 +35,7 @@ Create these Vault KVv2 paths (each with field `value`):
 - `secret/data/kafka-camel-username`
 - `secret/data/kafka-camel-password`
 - `secret/data/k8s-kafka-keycloak-oidc-issuer-url`
+- `secret/data/k8s-kafka-keycloak-oidc-discovery-url`
 - `secret/data/keycloak-client-id-kafka-gui-proxy`
 - `secret/data/keycloak-client-secret-kafka-gui-proxy`
 - `secret/data/k8s-kafka-kafka-gui-keycloak-cookiesecret`

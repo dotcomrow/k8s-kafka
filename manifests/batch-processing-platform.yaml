@@ -26,6 +26,7 @@ metadata:
 type: Opaque
 stringData:
   oidc_issuer_url: "<path:secret/data/k8s-kafka-keycloak-oidc-issuer-url#value>"
+  oidc_discovery_url: "<path:secret/data/k8s-kafka-keycloak-oidc-discovery-url#value>"
   nifi_oidc_client_id: "<path:secret/data/keycloak-client-id-nifi-gui#value>"
   nifi_oidc_client_secret: "<path:secret/data/keycloak-client-secret-nifi-gui#value>"
   nifi_keystore_password: "<path:secret/data/k8s-kafka-nifi-keystore-password#value>"
@@ -80,6 +81,8 @@ kind: StatefulSet
 metadata:
   name: nifi
   namespace: kafka
+  labels:
+    platform.suncoast.systems/vpa-exclude: "true"
   annotations:
     argocd.argoproj.io/sync-wave: "47"
 spec:
@@ -126,20 +129,49 @@ spec:
                 cp -a /opt/nifi/nifi-current/conf/. /data/conf/
               fi
 
+              KEYTOOL_BIN="$(command -v keytool || true)"
+              if [ -z "${KEYTOOL_BIN}" ]; then
+                KEYTOOL_BIN="$(find /usr/lib/jvm -type f -name keytool 2>/dev/null | head -n1 || true)"
+              fi
+              if [ -z "${KEYTOOL_BIN}" ]; then
+                echo "ERROR: keytool not found in init container"
+                exit 1
+              fi
+
+              REGENERATE_KEYSTORES="false"
+              REQUIRED_CERT_DNS="nifi-gui.teleport.app.suncoast.systems"
               if [ ! -f /data/conf/keystore.p12 ] || [ ! -f /data/conf/truststore.p12 ]; then
-                keytool -genkeypair \
+                REGENERATE_KEYSTORES="true"
+              elif ! "${KEYTOOL_BIN}" -list \
+                -keystore /data/conf/keystore.p12 \
+                -storetype PKCS12 \
+                -storepass "${NIFI_KEYSTORE_PASSWORD}" >/dev/null 2>&1; then
+                echo "Existing NiFi keystore is unreadable with current password; regenerating"
+                REGENERATE_KEYSTORES="true"
+              elif ! "${KEYTOOL_BIN}" -list -v \
+                -alias nifi-key \
+                -keystore /data/conf/keystore.p12 \
+                -storetype PKCS12 \
+                -storepass "${NIFI_KEYSTORE_PASSWORD}" 2>/dev/null | grep -Fq "DNSName: ${REQUIRED_CERT_DNS}"; then
+                echo "Existing NiFi certificate missing SAN ${REQUIRED_CERT_DNS}; regenerating"
+                REGENERATE_KEYSTORES="true"
+              fi
+
+              if [ "${REGENERATE_KEYSTORES}" = "true" ]; then
+                rm -f /data/conf/keystore.p12 /data/conf/truststore.p12 /tmp/nifi-cert.pem
+                "${KEYTOOL_BIN}" -genkeypair \
                   -alias nifi-key \
                   -keyalg RSA \
                   -keysize 2048 \
                   -validity 3650 \
                   -dname "CN=nifi.kafka.svc.cluster.local, OU=Platform, O=Suncoast, L=NA, ST=NA, C=US" \
-                  -ext "SAN=dns:nifi.kafka.svc.cluster.local,dns:nifi-0.nifi-hs.kafka.svc.cluster.local,dns:nifi" \
+                  -ext "SAN=dns:nifi.kafka.svc.cluster.local,dns:nifi-0.nifi-hs.kafka.svc.cluster.local,dns:nifi,dns:nifi-gui.teleport.app.suncoast.systems" \
                   -keystore /data/conf/keystore.p12 \
                   -storetype PKCS12 \
                   -storepass "${NIFI_KEYSTORE_PASSWORD}" \
                   -keypass "${NIFI_KEYSTORE_PASSWORD}"
 
-                keytool -exportcert \
+                "${KEYTOOL_BIN}" -exportcert \
                   -alias nifi-key \
                   -keystore /data/conf/keystore.p12 \
                   -storetype PKCS12 \
@@ -147,7 +179,7 @@ spec:
                   -rfc \
                   -file /tmp/nifi-cert.pem
 
-                keytool -importcert \
+                "${KEYTOOL_BIN}" -importcert \
                   -alias nifi-ca \
                   -file /tmp/nifi-cert.pem \
                   -keystore /data/conf/truststore.p12 \
@@ -193,7 +225,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: batch-ui-keycloak-proxy-secrets
-                  key: oidc_issuer_url
+                  key: oidc_discovery_url
             - name: NIFI_SECURITY_USER_OIDC_CLIENT_ID
               valueFrom:
                 secretKeyRef:
@@ -272,25 +304,19 @@ spec:
               mountPath: /opt/nifi/nifi-current/logs
               subPath: logs
           startupProbe:
-            httpGet:
-              scheme: HTTPS
-              path: /nifi
+            tcpSocket:
               port: https
             initialDelaySeconds: 45
             periodSeconds: 15
             failureThreshold: 40
           readinessProbe:
-            httpGet:
-              scheme: HTTPS
-              path: /nifi
+            tcpSocket:
               port: https
             initialDelaySeconds: 45
             periodSeconds: 10
             failureThreshold: 10
           livenessProbe:
-            httpGet:
-              scheme: HTTPS
-              path: /nifi
+            tcpSocket:
               port: https
             initialDelaySeconds: 120
             periodSeconds: 30
