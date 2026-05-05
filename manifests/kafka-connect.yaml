@@ -36,6 +36,8 @@ kind: Deployment
 metadata:
   name: kafka-connect
   namespace: kafka
+  labels:
+    platform.suncoast.systems/vpa-exclude: "true"
   annotations:
     argocd.argoproj.io/sync-wave: "4"
 spec:
@@ -295,9 +297,6 @@ spec:
           value: "env"
         - name: CONNECT_CONFIG_PROVIDERS_ENV_CLASS
           value: "org.apache.kafka.common.config.provider.EnvVarConfigProvider"
-        # optional:
-        - name: CONNECT_REST_ADVERTISED_HOST_NAME
-          value: "kafka-connect.kafka.svc.internal.lan"
         - name: YB_MASTER_ADDRESSES
           value: "yb-master-0.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-1.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-2.yb-master-service.yugabyte.svc.cluster.local:7100"
         - { name: CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR, value: "1" }
@@ -323,17 +322,19 @@ spec:
           initialDelaySeconds: 60
           periodSeconds: 5
           failureThreshold: 6
+          timeoutSeconds: 5
         livenessProbe:
           httpGet: { path: /, port: 8083 }
           initialDelaySeconds: 180
           periodSeconds: 10
           failureThreshold: 6
+          timeoutSeconds: 5
         startupProbe:
           httpGet: { path: /connectors, port: 8083 }
           initialDelaySeconds: 60
           periodSeconds: 10
           failureThreshold: 30
+          timeoutSeconds: 5
         volumeMounts:
         - { name: plugins, mountPath: /plugins }
         - { name: log4j,  mountPath: /kafka/etc }
-
