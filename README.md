@@ -74,7 +74,10 @@ Keycloak authorization:
 - configure Keycloak mappers so users receive the `groups` claim containing `platform_batch_ui_user` for NiFi policy group matching
 
 NiFi 2.x is HTTPS-only and OIDC-enabled; UI runs on `https://nifi-gui.teleport.app.suncoast.systems/nifi`.
-Use Keycloak client redirect URI: `https://nifi-gui.teleport.app.suncoast.systems/nifi-api/access/oidc/callback/consumer`.
+Allow these Keycloak redirect URIs for NiFi:
+- `https://nifi-gui.teleport.app.suncoast.systems/nifi-api/access/oidc/callback`
+- `https://nifi-gui.teleport.app.suncoast.systems:443/nifi-api/access/oidc/callback`
+- `https://nifi-gui.teleport.app.suncoast.systems/nifi-api/access/oidc/callback/consumer` (compatibility)
 
 ## Dynamic SCRAM User Reconciliation
 Dynamic Kafka accounts are reconciled continuously by CronJob `kafka-security-reconciler` (every minute, non-overlapping runs via `concurrencyPolicy: Forbid`).
