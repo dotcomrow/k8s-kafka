@@ -555,7 +555,6 @@ spec:
             - --cookie-samesite=lax
             - --cookie-refresh=1h
             - --cookie-expire=8h
-            - --session-cookie-minimal=true
             - --email-domain=*
             - --pass-host-header=false
             - --skip-provider-button=true
