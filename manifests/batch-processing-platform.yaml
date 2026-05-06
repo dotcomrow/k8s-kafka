@@ -120,6 +120,10 @@ spec:
                 secretKeyRef:
                   name: batch-ui-keycloak-proxy-secrets
                   key: nifi_keystore_password
+            - name: NIFI_ADMIN_GROUP_NAME
+              value: "platform_batch_internal_ui_user"
+            - name: NIFI_LEGACY_ADMIN_GROUP_NAMES
+              value: "platform_batch_ui_user"
           args:
             - |
               set -euo pipefail
@@ -129,6 +133,28 @@ spec:
               if [ ! -f /data/conf/nifi.properties ]; then
                 cp -a /opt/nifi/nifi-current/conf/. /data/conf/
               fi
+
+              TARGET_ADMIN_GROUP="${NIFI_ADMIN_GROUP_NAME:-platform_batch_internal_ui_user}"
+              LEGACY_ADMIN_GROUPS="${NIFI_LEGACY_ADMIN_GROUP_NAMES:-platform_batch_ui_user}"
+
+              migrate_group_name() {
+                local file="$1"
+                [ -f "${file}" ] || return 0
+                local updated="false"
+                for legacy_group in ${LEGACY_ADMIN_GROUPS}; do
+                  if grep -Fq "${legacy_group}" "${file}"; then
+                    sed -i "s/${legacy_group}/${TARGET_ADMIN_GROUP}/g" "${file}"
+                    echo "Updated NiFi group in ${file}: ${legacy_group} -> ${TARGET_ADMIN_GROUP}"
+                    updated="true"
+                  fi
+                done
+                if [ "${updated}" = "false" ]; then
+                  echo "No legacy NiFi group names found in ${file}"
+                fi
+              }
+
+              migrate_group_name /data/conf/users.xml
+              migrate_group_name /data/conf/authorizers.xml
 
               KEYTOOL_BIN="$(command -v keytool || true)"
               if [ -z "${KEYTOOL_BIN}" ]; then
