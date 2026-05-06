@@ -548,16 +548,16 @@ spec:
             - --provider=keycloak-oidc
             - --http-address=0.0.0.0:4180
             - --upstream=http://flink-jobmanager.kafka.svc.cluster.local:8081/
+            - --upstream-timeout=120s
             - --redirect-url=https://flink-gui.teleport.app.suncoast.systems/oauth2/callback
             - --code-challenge-method=S256
             - --cookie-secure=true
             - --cookie-samesite=lax
             - --cookie-refresh=1h
             - --cookie-expire=8h
+            - --session-cookie-minimal=true
             - --email-domain=*
-            - --set-authorization-header=true
-            - --pass-authorization-header=true
-            - --pass-access-token=true
+            - --pass-host-header=false
             - --skip-provider-button=true
             - --allowed-role=platform_batch_ui_user
           env:
