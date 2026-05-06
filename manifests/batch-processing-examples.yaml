@@ -29,7 +29,7 @@ data:
   kafka-batch-reference.md: |-
     # NiFi to Kafka Example Flow (Reference)
 
-    This file is mounted at `/opt/nifi/nifi-current/conf/kafka-batch-reference.md`
+    This file is mounted at `/opt/nifi/nifi-current/conf/examples/kafka-batch-reference.md`
     in the NiFi pod and shows a minimal end-to-end example.
 
     ## Goal

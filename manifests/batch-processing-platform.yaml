@@ -287,8 +287,7 @@ spec:
               mountPath: /opt/nifi/nifi-current/conf
               subPath: conf
             - name: nifi-example-reference
-              mountPath: /opt/nifi/nifi-current/conf/kafka-batch-reference.md
-              subPath: kafka-batch-reference.md
+              mountPath: /opt/nifi/nifi-current/conf/examples
               readOnly: true
             - name: nifi-data
               mountPath: /opt/nifi/nifi-current/flowfile_repository
@@ -342,6 +341,7 @@ spec:
         - name: nifi-example-reference
           configMap:
             name: nifi-kafka-example-reference
+            optional: true
 ---
 apiVersion: v1
 kind: ConfigMap
