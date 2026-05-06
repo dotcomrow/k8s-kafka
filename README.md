@@ -34,8 +34,8 @@ Create these Vault KVv2 paths (each with field `value`):
 - `secret/data/kafka-flink-password`
 - `secret/data/kafka-camel-username`
 - `secret/data/kafka-camel-password`
-- `secret/data/k8s-kafka-keycloak-oidc-issuer-url`
-- `secret/data/k8s-kafka-keycloak-oidc-discovery-url`
+- `secret/data/k8s-kafka-keycloak-internal-oidc-issuer-url`
+- `secret/data/k8s-kafka-keycloak-internal-oidc-discovery-url`
 - `secret/data/keycloak-client-id-kafka-gui-proxy`
 - `secret/data/keycloak-client-secret-kafka-gui-proxy`
 - `secret/data/k8s-kafka-kafka-gui-keycloak-cookiesecret`
@@ -68,16 +68,52 @@ Account model:
 
 Keycloak authorization:
 
-- create realm role `platform_batch_ui_user` (or update manifests to your preferred role name)
-- assign that role to users allowed into Kafka/NiFi/Flink UIs
+- Kafka UI, NiFi, and Flink are internal apps and should authenticate against the `internal` realm
+- create internal realm role `platform_batch_internal_ui_user`
+- assign `platform_batch_internal_ui_user` to users/groups that should access Kafka UI / NiFi / Flink
+- configure Keycloak mappers so users receive the `groups` claim containing `platform_batch_internal_ui_user` for NiFi policy group matching
 - each UI has its own Keycloak OIDC client credentials secret paths listed above
-- configure Keycloak mappers so users receive the `groups` claim containing `platform_batch_ui_user` for NiFi policy group matching
 
 NiFi 2.x is HTTPS-only and OIDC-enabled; UI runs on `https://nifi-gui.teleport.app.suncoast.systems/nifi`.
 Allow these Keycloak redirect URIs for NiFi:
 - `https://nifi-gui.teleport.app.suncoast.systems/nifi-api/access/oidc/callback`
 - `https://nifi-gui.teleport.app.suncoast.systems:443/nifi-api/access/oidc/callback`
 - `https://nifi-gui.teleport.app.suncoast.systems/nifi-api/access/oidc/callback/consumer` (compatibility)
+
+## Batch Examples
+`manifests/batch-processing-examples.yaml` adds deployable reference examples that tie NiFi, Kafka, and Flink together:
+
+- `batch-example-kafka-topics` job creates:
+  - `batch.example.nifi.raw.v1`
+  - `batch.example.flink.enriched.v1`
+- `batch-example-kafka-seed-input` job writes seed records to the NiFi input topic using the `kafka-nifi-*` service principal.
+- `batch-example-flink-submit` job submits a Flink SQL pipeline:
+  - source: `batch.example.nifi.raw.v1`
+  - sink: `batch.example.flink.enriched.v1`
+  - auth: SCRAM over `SASL_PLAINTEXT` using `kafka-flink-*` credentials.
+
+NiFi reference flow documentation is deployed as ConfigMap `nifi-kafka-example-reference` and mounted into the NiFi pod at:
+
+- `/opt/nifi/nifi-current/conf/kafka-batch-reference.md`
+
+This gives a ready reference for building a NiFi flow:
+
+- `GenerateFlowFile -> UpdateAttribute -> PublishKafka_2_6` to the input topic
+- optional `ConsumeKafka_2_6 -> LogAttribute` from Flink output topic
+
+## Kafka Connectivity Model
+Both NiFi and Flink use the same shared Kafka config and their own per-workload credentials:
+
+- shared endpoint/mechanism:
+  - `BATCH_KAFKA_BOOTSTRAP_SERVERS` / `KAFKA_BOOTSTRAP_SERVERS` = `kafka.kafka.svc.internal.lan:9092`
+  - `BATCH_KAFKA_SECURITY_PROTOCOL` / `KAFKA_SECURITY_PROTOCOL` = `SASL_PLAINTEXT`
+  - `BATCH_KAFKA_SASL_MECHANISM` / `KAFKA_SASL_MECHANISM` = `SCRAM-SHA-256`
+- NiFi principal:
+  - username/password from `kafka-security-credentials` keys `nifi_username` / `nifi_password`
+- Flink principal:
+  - username/password from `kafka-security-credentials` keys `flink_username` / `flink_password`
+- ACL scope:
+  - bootstrap grants both principals access to `batch.*` topics.
 
 ## Dynamic SCRAM User Reconciliation
 Dynamic Kafka accounts are reconciled continuously by CronJob `kafka-security-reconciler` (every minute, non-overlapping runs via `concurrencyPolicy: Forbid`).
@@ -137,4 +173,6 @@ kubectl -n kafka exec kafka-0 -- /opt/kafka/bin/kafka-configs.sh --bootstrap-ser
 kubectl -n kafka get pods -l app=nifi
 kubectl -n kafka get pods -l app=flink
 kubectl -n kafka get svc oauth2-proxy nifi flink-oauth2-proxy
+kubectl -n kafka get jobs | grep batch-example
+kubectl -n kafka logs job/batch-example-flink-submit --tail=200
 ```

@@ -25,8 +25,8 @@ metadata:
     argocd.argoproj.io/sync-wave: "47"
 type: Opaque
 stringData:
-  oidc_issuer_url: "<path:secret/data/k8s-kafka-keycloak-oidc-issuer-url#value>"
-  oidc_discovery_url: "<path:secret/data/k8s-kafka-keycloak-oidc-discovery-url#value>"
+  internal_oidc_issuer_url: "<path:secret/data/k8s-kafka-keycloak-internal-oidc-issuer-url#value>"
+  internal_oidc_discovery_url: "<path:secret/data/k8s-kafka-keycloak-internal-oidc-discovery-url#value>"
   nifi_oidc_client_id: "<path:secret/data/keycloak-client-id-nifi-gui#value>"
   nifi_oidc_client_secret: "<path:secret/data/keycloak-client-secret-nifi-gui#value>"
   nifi_keystore_password: "<path:secret/data/k8s-kafka-nifi-keystore-password#value>"
@@ -221,12 +221,12 @@ spec:
                   name: batch-ui-keycloak-proxy-secrets
                   key: nifi_keystore_password
             - name: INITIAL_ADMIN_GROUP
-              value: "platform_batch_ui_user"
+              value: "platform_batch_internal_ui_user"
             - name: NIFI_SECURITY_USER_OIDC_DISCOVERY_URL
               valueFrom:
                 secretKeyRef:
                   name: batch-ui-keycloak-proxy-secrets
-                  key: oidc_discovery_url
+                  key: internal_oidc_discovery_url
             - name: NIFI_SECURITY_USER_OIDC_CLIENT_ID
               valueFrom:
                 secretKeyRef:
@@ -286,6 +286,10 @@ spec:
             - name: nifi-data
               mountPath: /opt/nifi/nifi-current/conf
               subPath: conf
+            - name: nifi-example-reference
+              mountPath: /opt/nifi/nifi-current/conf/kafka-batch-reference.md
+              subPath: kafka-batch-reference.md
+              readOnly: true
             - name: nifi-data
               mountPath: /opt/nifi/nifi-current/flowfile_repository
               subPath: flowfile_repository
@@ -334,6 +338,10 @@ spec:
             runAsGroup: 1000
       securityContext:
         fsGroup: 1000
+      volumes:
+        - name: nifi-example-reference
+          configMap:
+            name: nifi-kafka-example-reference
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -563,7 +571,7 @@ spec:
             - --email-domain=*
             - --pass-host-header=false
             - --skip-provider-button=true
-            - --allowed-role=platform_batch_ui_user
+            - --allowed-role=platform_batch_internal_ui_user
           env:
             - name: OAUTH2_PROXY_CLIENT_ID
               valueFrom:
@@ -584,7 +592,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: batch-ui-keycloak-proxy-secrets
-                  key: oidc_issuer_url
+                  key: internal_oidc_issuer_url
           readinessProbe:
             httpGet:
               path: /ping

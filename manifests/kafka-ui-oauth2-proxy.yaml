@@ -84,7 +84,7 @@ stringData:
   client_id: "<path:secret/data/keycloak-client-id-kafka-gui-proxy#value>"
   client_secret: "<path:secret/data/keycloak-client-secret-kafka-gui-proxy#value>"
   cookie_secret: "<path:secret/data/k8s-kafka-kafka-gui-keycloak-cookiesecret#value>"
-  oidc_issuer_url: "<path:secret/data/k8s-kafka-keycloak-oidc-issuer-url#value>"
+  internal_oidc_issuer_url: "<path:secret/data/k8s-kafka-keycloak-internal-oidc-issuer-url#value>"
 ---
 apiVersion: v1
 kind: Service
@@ -149,7 +149,7 @@ spec:
           - --pass-authorization-header=true
           - --pass-access-token=true
           - --skip-provider-button=true
-          - --allowed-role=platform_batch_ui_user
+          - --allowed-role=platform_batch_internal_ui_user
         env:
         - name: OAUTH2_PROXY_CLIENT_ID
           valueFrom: { secretKeyRef: { name: oauth2-proxy-secrets, key: client_id } }
@@ -158,7 +158,7 @@ spec:
         - name: OAUTH2_PROXY_COOKIE_SECRET
           valueFrom: { secretKeyRef: { name: oauth2-proxy-secrets, key: cookie_secret } }
         - name: OAUTH2_PROXY_OIDC_ISSUER_URL
-          valueFrom: { secretKeyRef: { name: oauth2-proxy-secrets, key: oidc_issuer_url } }
+          valueFrom: { secretKeyRef: { name: oauth2-proxy-secrets, key: internal_oidc_issuer_url } }
         readinessProbe:
           httpGet: { path: /ping, port: http }
           initialDelaySeconds: 5
