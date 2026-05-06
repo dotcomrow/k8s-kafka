@@ -538,6 +538,10 @@ spec:
       annotations:
         linkerd.io/inject: "disabled"
     spec:
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "1"
       containers:
         - name: proxy
           image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
@@ -547,7 +551,7 @@ spec:
           args:
             - --provider=keycloak-oidc
             - --http-address=0.0.0.0:4180
-            - --upstream=http://flink-jobmanager.kafka.svc.cluster.local:8081/
+            - --upstream=http://flink-jobmanager.kafka.svc.cluster.local.:8081/
             - --upstream-timeout=120s
             - --redirect-url=https://flink-gui.teleport.app.suncoast.systems/oauth2/callback
             - --code-challenge-method=S256
