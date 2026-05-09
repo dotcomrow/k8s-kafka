@@ -141,13 +141,12 @@ spec:
           - --redirect-url=https://kafka-gui.teleport.app.suncoast.systems/oauth2/callback
           - --code-challenge-method=S256
           - --cookie-secure=true
+          - --cookie-name=_oauth2_proxy_kafka_gui
           - --cookie-samesite=lax
           - --cookie-refresh=1h
           - --cookie-expire=8h
+          - --session-cookie-minimal=true
           - --email-domain=*
-          - --set-authorization-header=true
-          - --pass-authorization-header=true
-          - --pass-access-token=true
           - --skip-provider-button=true
           - --allowed-role=platform_batch_internal_ui_user
         env:
