@@ -117,6 +117,8 @@ metadata:
   namespace: kafka
   annotations:
     argocd.argoproj.io/sync-wave: "46"
+  labels:
+    platform.suncoast.systems/vpa-exclude: "true"
 spec:
   replicas: 1
   selector: { matchLabels: { app: oauth2-proxy } }

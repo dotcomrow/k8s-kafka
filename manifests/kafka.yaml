@@ -37,6 +37,8 @@ metadata:
   namespace: kafka
   annotations:
     argocd.argoproj.io/sync-wave: "3"
+  labels:
+    platform.suncoast.systems/vpa-exclude: "true"
 spec:
   serviceName: kafka-hs
   replicas: 1

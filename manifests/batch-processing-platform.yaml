@@ -383,6 +383,7 @@ spec:
   flinkVersion: v1_20
   serviceAccount: flink
   flinkConfiguration:
+    kubernetes.jobmanager.labels: "platform.suncoast.systems/vpa-exclude:true"
     taskmanager.numberOfTaskSlots: "2"
     blob.server.port: "6124"
     jobmanager.rpc.port: "6123"
@@ -556,6 +557,8 @@ metadata:
   namespace: kafka
   annotations:
     argocd.argoproj.io/sync-wave: "48"
+  labels:
+    platform.suncoast.systems/vpa-exclude: "true"
 spec:
   replicas: 1
   selector:

@@ -32,6 +32,7 @@ metadata:
   namespace: kafka
   labels:
     app: schema-registry
+    platform.suncoast.systems/vpa-exclude: "true"
   annotations:
     argocd.argoproj.io/sync-wave: "49"
 spec:
