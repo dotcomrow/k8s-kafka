@@ -31,18 +31,20 @@ metadata:
   name: "flinkbluegreendeployments.flink.apache.org"
 spec:
   group: "flink.apache.org"
+  conversion:
+    strategy: None
   names:
     kind: "FlinkBlueGreenDeployment"
     plural: "flinkbluegreendeployments"
     shortNames:
     - "flinkbgdep"
     singular: "flinkbluegreendeployment"
+    listKind: "FlinkBlueGreenDeploymentList"
   scope: "Namespaced"
   versions:
   - additionalPrinterColumns:
     - jsonPath: ".status.jobStatus.state"
       name: "Job Status"
-      priority: 0
       type: "string"
     name: "v1beta1"
     schema:
@@ -11001,25 +11003,26 @@ metadata:
   name: flinkdeployments.flink.apache.org
 spec:
   group: flink.apache.org
+  conversion:
+    strategy: None
   names:
     kind: FlinkDeployment
     plural: flinkdeployments
     shortNames:
     - flinkdep
     singular: flinkdeployment
+    listKind: FlinkDeploymentList
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
     - description: Last observed state of the job.
       jsonPath: .status.jobStatus.state
       name: Job Status
-      priority: 0
       type: string
     - description: "Lifecycle state of the Flink resource (including being rolled\
         \ back, failed etc.)."
       jsonPath: .status.lifecycleState
       name: Lifecycle State
-      priority: 0
       type: string
     name: v1beta1
     schema:
@@ -21905,29 +21908,29 @@ metadata:
   name: flinkstatesnapshots.flink.apache.org
 spec:
   group: flink.apache.org
+  conversion:
+    strategy: None
   names:
     kind: FlinkStateSnapshot
     plural: flinkstatesnapshots
     shortNames:
     - flinksnp
     singular: flinkstatesnapshot
+    listKind: FlinkStateSnapshotList
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
     - description: Final path of the snapshot.
       jsonPath: .status.path
       name: Path
-      priority: 0
       type: string
     - description: Timestamp when the snapshot was last created/failed.
       jsonPath: .status.resultTimestamp
       name: Result Timestamp
-      priority: 0
       type: string
     - description: Current state of the snapshot.
       jsonPath: .status.state
       name: Snapshot State
-      priority: 0
       type: string
     name: v1beta1
     schema:
@@ -22022,25 +22025,26 @@ metadata:
   name: flinksessionjobs.flink.apache.org
 spec:
   group: flink.apache.org
+  conversion:
+    strategy: None
   names:
     kind: FlinkSessionJob
     plural: flinksessionjobs
     shortNames:
     - sessionjob
     singular: flinksessionjob
+    listKind: FlinkSessionJobList
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
     - description: Last observed state of the job.
       jsonPath: .status.jobStatus.state
       name: Job Status
-      priority: 0
       type: string
     - description: "Lifecycle state of the Flink resource (including being rolled\
         \ back, failed etc.)."
       jsonPath: .status.lifecycleState
       name: Lifecycle State
-      priority: 0
       type: string
     name: v1beta1
     schema:
