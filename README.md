@@ -53,6 +53,9 @@ Create these Vault KVv2 paths (each with field `value`):
 - Apache Flink session cluster (`FlinkDeployment` managed by the Flink Kubernetes Operator) for distributed batch compute
 - Shared Kafka connection config (`batch-kafka-config`) and SCRAM credentials for NiFi/Flink
 
+`manifests/nifi-kubernetes-operator.yaml` installs NiFiKop (CRDs + operator) so NiFi flows can be managed declaratively via Kubernetes custom resources.
+Current default watch scope is `kafka` namespace only (safe with existing Argo project boundaries).
+
 Kafka bootstrap also provisions ACLs for:
 
 - `kafka-nifi-*` principal for `batch.*` topics
@@ -88,6 +91,23 @@ Reference dataflow workloads are managed outside this platform repo.
 
 `k8s-kafka` provides the runtime platform (Kafka, NiFi, Flink, security).  
 Pipeline/job manifests should be deployed via the dataflow app-of-apps layer.
+
+## Declarative NiFi Flows
+NiFi flow lifecycle is handled with NiFiKop resources in the dataflow workload repo:
+
+- `NifiCluster` (external cluster reference to existing NiFi runtime)
+- `NifiRegistryClient`
+- `NifiParameterContext`
+- `NifiDataflow`
+
+The starter CR templates are stored in `dataflow-example-app/templates/nifi-declarative-flow-crs.yaml`.
+
+Important:
+
+- NiFiKop external-cluster mode requires non-interactive NiFi API auth (`basic` or `tls`) for automation.
+- if you use `basic`, provide `username`, `password`, and `ca.crt` in the referenced Kubernetes secret.
+- `bucketId` and `flowId` in `NifiDataflow` come from the versioned flow metadata (`bucket.yml` / flow definition metadata).
+- to manage CRs in `dataflow` namespace, update operator watch namespaces and Argo project destination allow-lists accordingly.
 
 ## Kafka Connectivity Model
 Both NiFi and Flink use the same shared Kafka config and their own per-workload credentials:
