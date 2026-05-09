@@ -50,7 +50,7 @@ Create these Vault KVv2 paths (each with field `value`):
 `manifests/batch-processing-platform.yaml` adds a baseline batch platform in the existing `kafka` namespace:
 
 - Apache NiFi (`StatefulSet`) for scheduled ingestion/orchestration
-- Apache Flink session cluster (`flink-jobmanager` + `flink-taskmanager`) for distributed batch compute
+- Apache Flink session cluster (`FlinkDeployment` managed by the Flink Kubernetes Operator) for distributed batch compute
 - Shared Kafka connection config (`batch-kafka-config`) and SCRAM credentials for NiFi/Flink
 
 Kafka bootstrap also provisions ACLs for:
