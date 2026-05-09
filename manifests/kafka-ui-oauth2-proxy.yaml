@@ -43,6 +43,8 @@ spec:
             cpu: "250m"
             memory: "512Mi"
         env:
+        - { name: SERVER_MAX_HTTP_REQUEST_HEADER_SIZE, value: "64KB" }
+        - { name: SERVER_MAX_HTTP_HEADER_SIZE, value: "64KB" }
         - { name: KAFKA_CLUSTERS_0_NAME, value: "local" }
         - { name: KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS, value: "kafka.kafka.svc.internal.lan:9092" }
         - name: KAFKA_UI_USERNAME
