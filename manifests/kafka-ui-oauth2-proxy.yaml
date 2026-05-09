@@ -143,7 +143,6 @@ spec:
           - --cookie-secure=true
           - --cookie-name=_oauth2_proxy_kafka_gui
           - --cookie-samesite=lax
-          - --cookie-refresh=1h
           - --cookie-expire=8h
           - --session-cookie-minimal=true
           - --email-domain=*
