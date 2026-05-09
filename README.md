@@ -81,25 +81,13 @@ Allow these Keycloak redirect URIs for NiFi:
 - `https://nifi-gui.teleport.app.suncoast.systems/nifi-api/access/oidc/callback/consumer` (compatibility)
 
 ## Batch Examples
-`manifests/batch-processing-examples.yaml` adds deployable reference examples that tie NiFi, Kafka, and Flink together:
+Reference dataflow workloads are managed outside this platform repo.
 
-- `batch-example-kafka-topics` job creates:
-  - `batch.example.nifi.raw.v1`
-  - `batch.example.flink.enriched.v1`
-- `batch-example-kafka-seed-input` job writes seed records to the NiFi input topic using the `kafka-nifi-*` service principal.
-- `batch-example-flink-submit` job submits a Flink SQL pipeline:
-  - source: `batch.example.nifi.raw.v1`
-  - sink: `batch.example.flink.enriched.v1`
-  - auth: SCRAM over `SASL_PLAINTEXT` using `kafka-flink-*` credentials.
+- app-of-apps repo: `https://github.com/dotcomrow/dataflow-apps`
+- example workload repo: `https://github.com/dotcomrow/dataflow-example-app`
 
-NiFi reference flow documentation is deployed as ConfigMap `nifi-kafka-example-reference` and mounted into the NiFi pod at:
-
-- `/opt/nifi/nifi-current/conf/kafka-batch-reference.md`
-
-This gives a ready reference for building a NiFi flow:
-
-- `GenerateFlowFile -> UpdateAttribute -> PublishKafka_2_6` to the input topic
-- optional `ConsumeKafka_2_6 -> LogAttribute` from Flink output topic
+`k8s-kafka` provides the runtime platform (Kafka, NiFi, Flink, security).  
+Pipeline/job manifests should be deployed via the dataflow app-of-apps layer.
 
 ## Kafka Connectivity Model
 Both NiFi and Flink use the same shared Kafka config and their own per-workload credentials:
