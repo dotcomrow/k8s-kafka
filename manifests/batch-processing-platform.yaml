@@ -285,6 +285,27 @@ spec:
                   -noprompt
               fi
 
+              # Force deterministic single-node cluster mode so NiFiKop external-cluster
+              # resources can reconcile declaratively against /nifi-api/controller/cluster.
+              set_nifi_property() {
+                local key="$1"
+                local value="$2"
+                local file="/data/conf/nifi.properties"
+                if grep -q "^${key}=" "${file}"; then
+                  sed -i "s|^${key}=.*$|${key}=${value}|" "${file}"
+                else
+                  echo "${key}=${value}" >> "${file}"
+                fi
+              }
+
+              set_nifi_property "nifi.cluster.is.node" "true"
+              set_nifi_property "nifi.cluster.node.address" "nifi-0.nifi-hs.kafka.svc.cluster.local"
+              set_nifi_property "nifi.cluster.node.protocol.port" "11443"
+              set_nifi_property "nifi.cluster.protocol.is.secure" "true"
+              set_nifi_property "nifi.zookeeper.connect.string" "127.0.0.1:2181"
+              set_nifi_property "nifi.zookeeper.root.node" "/nifi-kafka"
+              set_nifi_property "nifi.state.management.embedded.zookeeper.start" "true"
+
               chown -R 1000:1000 /data
           volumeMounts:
             - name: nifi-data
@@ -295,6 +316,8 @@ spec:
           ports:
             - name: https
               containerPort: 8443
+            - name: cluster-protocol
+              containerPort: 11443
           env:
             - name: AUTH
               value: "oidc"
@@ -348,7 +371,15 @@ spec:
             - name: NIFI_WEB_PROXY_HOST
               value: "nifi-gui.teleport.app.suncoast.systems"
             - name: NIFI_CLUSTER_IS_NODE
-              value: "false"
+              value: "true"
+            - name: NIFI_CLUSTER_ADDRESS
+              value: "nifi-0.nifi-hs.kafka.svc.cluster.local"
+            - name: NIFI_CLUSTER_NODE_PROTOCOL_PORT
+              value: "11443"
+            - name: NIFI_ZK_CONNECT_STRING
+              value: "127.0.0.1:2181"
+            - name: NIFI_ZK_ROOT_NODE
+              value: "/nifi-kafka"
             - name: NIFI_JVM_HEAP_INIT
               value: "2g"
             - name: NIFI_JVM_HEAP_MAX
