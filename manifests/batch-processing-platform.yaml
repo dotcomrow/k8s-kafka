@@ -124,6 +124,8 @@ spec:
               value: "platform_batch_internal_ui_user"
             - name: NIFI_LEGACY_ADMIN_GROUP_NAMES
               value: "platform_batch_ui_user"
+            - name: NIFI_OPERATOR_CERT_IDENTITY
+              value: "CN=nifi.kafka.svc.cluster.local, OU=Platform, O=Suncoast, L=NA, ST=NA, C=US"
           args:
             - |
               set -euo pipefail
@@ -155,6 +157,43 @@ spec:
 
               migrate_group_name /data/conf/users.xml
               migrate_group_name /data/conf/authorizers.xml
+
+              CERT_ADMIN_IDENTITY="${NIFI_OPERATOR_CERT_IDENTITY:-}"
+              if [ -n "${CERT_ADMIN_IDENTITY}" ]; then
+                update_xml_property() {
+                  local file="$1"
+                  local property="$2"
+                  local value="$3"
+                  [ -f "${file}" ] || return 0
+                  local escaped_value=""
+                  escaped_value="$(printf '%s' "${value}" | sed 's/[\/&]/\\&/g')"
+                  sed -i "s#<property name=\"${property}\">.*</property>#<property name=\"${property}\">${escaped_value}</property>#g" "${file}"
+                }
+
+                update_xml_property /data/conf/authorizers.xml "Initial User Identity 1" "${CERT_ADMIN_IDENTITY}"
+                update_xml_property /data/conf/authorizers.xml "Initial Admin Identity" "${CERT_ADMIN_IDENTITY}"
+
+                cert_user_hash="$(printf '%s' "${CERT_ADMIN_IDENTITY}" | md5sum | awk '{print $1}')"
+                CERT_USER_ID="${cert_user_hash:0:8}-${cert_user_hash:8:4}-${cert_user_hash:12:4}-${cert_user_hash:16:4}-${cert_user_hash:20:12}"
+
+                if [ -f /data/conf/users.xml ] && ! grep -Fq "identity=\"${CERT_ADMIN_IDENTITY}\"" /data/conf/users.xml; then
+                  if grep -Fq "<users>" /data/conf/users.xml; then
+                    sed -i "/<users>/a\\    <user identifier=\"${CERT_USER_ID}\" identity=\"${CERT_ADMIN_IDENTITY}\"/>" /data/conf/users.xml
+                  else
+                    sed -i "s#<tenants>#<tenants>\\n  <users>\\n    <user identifier=\"${CERT_USER_ID}\" identity=\"${CERT_ADMIN_IDENTITY}\"/>\\n  </users>#g" /data/conf/users.xml
+                  fi
+                  echo "Seeded NiFi user identity for operator certificate: ${CERT_ADMIN_IDENTITY}"
+                fi
+
+                if [ -f /data/conf/authorizations.xml ] && ! grep -Fq "identifier=\"${CERT_USER_ID}\"" /data/conf/authorizations.xml; then
+                  awk -v uid="${CERT_USER_ID}" '
+                    /<\/policy>/ { print "      <user identifier=\"" uid "\"/>" }
+                    { print }
+                  ' /data/conf/authorizations.xml > /tmp/authorizations.xml
+                  mv /tmp/authorizations.xml /data/conf/authorizations.xml
+                  echo "Granted operator certificate identity to existing NiFi policies"
+                fi
+              fi
 
               KEYTOOL_BIN="$(command -v keytool || true)"
               if [ -z "${KEYTOOL_BIN}" ]; then
