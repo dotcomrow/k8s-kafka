@@ -227,16 +227,18 @@ spec:
                   echo "Granted operator certificate identity to existing NiFi policies"
                 fi
 
-                ensure_proxy_policy() {
+                ensure_policy() {
                   local auth_file="/data/conf/authorizations.xml"
                   local users_file="/data/conf/users.xml"
                   local action="$1"
+                  local resource="$2"
                   local group_id=""
                   local policy_id=""
+                  local policy_tmp=""
                   [ -f "${auth_file}" ] || return 0
                   [ -f "${users_file}" ] || return 0
                   [ -n "${CERT_USER_ID:-}" ] || return 0
-                  if grep -Eq "<policy[^>]*action=\"${action}\"[^>]*resource=\"/proxy\"" "${auth_file}"; then
+                  if grep -Eq "<policy[^>]*action=\"${action}\"[^>]*resource=\"${resource}\"" "${auth_file}"; then
                     return 0
                   fi
 
@@ -246,30 +248,50 @@ spec:
                     policy_id="$(date +%s)-${RANDOM}"
                   fi
 
+                  policy_tmp="/tmp/nifi-policy-${action}-$(printf '%s' "${resource}" | tr '/:' '__').xml"
+
                   {
-                    printf '    <policy action="%s" identifier="%s" resource="/proxy">\n' "${action}" "${policy_id}"
+                    printf '    <policy action="%s" identifier="%s" resource="%s">\n' "${action}" "${policy_id}" "${resource}"
                     if [ -n "${group_id}" ]; then
                       printf '      <group identifier="%s"/>\n' "${group_id}"
                     fi
                     printf '      <user identifier="%s"/>\n' "${CERT_USER_ID}"
                     printf '    </policy>\n'
-                  } > /tmp/nifi-proxy-policy.xml
+                  } > "${policy_tmp}"
 
                   awk '
                     /<\/policies>/ {
-                      while ((getline line < "/tmp/nifi-proxy-policy.xml") > 0) {
+                      while ((getline line < policy_tmp) > 0) {
                         print line
                       }
-                      close("/tmp/nifi-proxy-policy.xml")
+                      close(policy_tmp)
                     }
                     { print }
-                  ' "${auth_file}" > /tmp/authorizations.xml
+                  ' policy_tmp="${policy_tmp}" "${auth_file}" > /tmp/authorizations.xml
                   mv /tmp/authorizations.xml "${auth_file}"
-                  echo "Added NiFi proxy policy action=${action} for node identity"
+                  echo "Added NiFi policy action=${action} resource=${resource} for operator identity"
                 }
 
-                ensure_proxy_policy "W"
-                ensure_proxy_policy "R"
+                # Global policies needed for operator-managed API actions.
+                ensure_policy "R" "/flow"
+                ensure_policy "R" "/controller"
+                ensure_policy "W" "/controller"
+                ensure_policy "R" "/tenants"
+                ensure_policy "W" "/tenants"
+                ensure_policy "R" "/policies"
+                ensure_policy "W" "/policies"
+                ensure_policy "R" "/proxy"
+                ensure_policy "W" "/proxy"
+                ensure_policy "W" "/restricted-components"
+
+                # Component-level root process group policies used by NiFiKop dataflow reconcile.
+                ensure_policy "R" "/process-groups/root"
+                ensure_policy "W" "/process-groups/root"
+                ensure_policy "R" "/data/process-groups/root"
+                ensure_policy "W" "/data/process-groups/root"
+                ensure_policy "W" "/operation/process-groups/root"
+                ensure_policy "R" "/policies/process-groups/root"
+                ensure_policy "W" "/policies/process-groups/root"
               fi
 
               KEYTOOL_BIN="$(command -v keytool || true)"
