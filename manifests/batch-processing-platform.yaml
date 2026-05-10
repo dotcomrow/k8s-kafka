@@ -43,6 +43,7 @@ metadata:
     argocd.argoproj.io/sync-wave: "47"
 spec:
   clusterIP: None
+  publishNotReadyAddresses: true
   selector:
     app: nifi
   ports:
