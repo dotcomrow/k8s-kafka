@@ -4,7 +4,8 @@
 #   --set createCustomResource=true \
 #   --set webhook.enabled=false \
 #   --set certManager.enabled=false \
-#   --set 'namespaces[0]=kafka'
+#   --set 'namespaces[0]=kafka' \
+#   --set 'namespaces[1]=dataflow'
 #
 # Keep this manifest in Git so ArgoCD can install CRDs/operator without live Helm access.
 #
@@ -14072,6 +14073,179 @@ rules:
       - create
       - patch
 ---
+# Additional namespace-scoped RBAC so NiFiKop can reconcile declarative NiFi CRs
+# in the dataflow workload namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app: nifikop
+    chart: nifikop-1.17.0
+    heritage: Helm
+    release: nifikop
+  annotations:
+    argocd.argoproj.io/sync-wave: "46"
+  name: nifikop
+  namespace: dataflow
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+      - services
+      - services/finalizers
+      - endpoints
+      - persistentvolumeclaims
+      - events
+      - configmaps
+      - secrets
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+      - daemonsets
+      - replicasets
+      - statefulsets
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - monitoring.coreos.com
+    resources:
+      - servicemonitors
+    verbs:
+      - get
+      - create
+  - apiGroups:
+      - apps
+    resourceNames:
+      - nifikop
+    resources:
+      - deployments/finalizers
+    verbs:
+      - update
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+  - apiGroups:
+      - apps
+    resources:
+      - replicasets
+      - deployments
+    verbs:
+      - get
+  - apiGroups:
+      - nifi.konpyutaika.com
+    resources:
+      - "nifiusers"
+      - "nifiusergroups"
+      - "nificlusters"
+      - "nifidataflows"
+      - "nifiregistryclients"
+      - "nifiparametercontexts"
+      - "nifinodegroupautoscalers"
+      - "nificonnections"
+      - "nifiresources"
+      - "nifiusers/finalizers"
+      - "nificlusters/finalizers"
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+      - deletecollection
+  - apiGroups:
+      - autoscaling
+    resources:
+      - horizontalpodautoscalers
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - cert-manager.io
+    resources:
+      - issuers
+      - certificates
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - nifi.konpyutaika.com
+    resources:
+      - nifiusers/status
+      - nifiusergroups/status
+      - nificlusters/status
+      - nifidataflows/status
+      - nifiregistryclients/status
+      - nifiparametercontexts/status
+      - nifinodegroupautoscalers/status
+      - nificonnections/status
+      - nifiresources/status
+    verbs:
+      - get
+      - update
+      - patch
+  - apiGroups:
+      - policy
+    resources:
+      - poddisruptionbudgets
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+---
 # Source: nifikop/templates/leader_election_role_binding.yaml
 kind: RoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
@@ -14107,6 +14281,28 @@ metadata:
     argocd.argoproj.io/sync-wave: "46"
   name: nifikop
   namespace: kafka
+subjects:
+  - kind: ServiceAccount
+    name: nifikop
+    namespace: kafka
+roleRef:
+  kind: Role
+  name: nifikop
+  apiGroup: rbac.authorization.k8s.io
+---
+# Bind nifikop ServiceAccount (in kafka) to dataflow namespace Role.
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  labels:
+    app: nifikop
+    chart: nifikop-1.17.0
+    heritage: Helm
+    release: nifikop
+  annotations:
+    argocd.argoproj.io/sync-wave: "46"
+  name: nifikop
+  namespace: dataflow
 subjects:
   - kind: ServiceAccount
     name: nifikop
@@ -14170,7 +14366,7 @@ spec:
             allowPrivilegeEscalation: false
           env:
             - name: WATCH_NAMESPACE
-              value: kafka
+              value: kafka,dataflow
             - name: POD_NAME
               valueFrom:
                 fieldRef:
