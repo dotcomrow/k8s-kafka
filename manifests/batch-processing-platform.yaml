@@ -316,7 +316,7 @@ spec:
           ports:
             - name: https
               containerPort: 8443
-            - name: cluster-protocol
+            - name: cluster-proto
               containerPort: 11443
           env:
             - name: AUTH
