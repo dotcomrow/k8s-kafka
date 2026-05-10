@@ -236,7 +236,7 @@ spec:
               fi
 
               REGENERATE_KEYSTORES="false"
-              REQUIRED_CERT_DNS="nifi-gui.teleport.app.suncoast.systems"
+              REQUIRED_CERT_DNS_LIST="nifi-gui.teleport.app.suncoast.systems nifi-0 nifi-0.nifi-hs.kafka.svc.cluster.local"
               if [ ! -f /data/conf/keystore.p12 ] || [ ! -f /data/conf/truststore.p12 ]; then
                 REGENERATE_KEYSTORES="true"
               elif ! "${KEYTOOL_BIN}" -list \
@@ -245,13 +245,19 @@ spec:
                 -storepass "${NIFI_KEYSTORE_PASSWORD}" >/dev/null 2>&1; then
                 echo "Existing NiFi keystore is unreadable with current password; regenerating"
                 REGENERATE_KEYSTORES="true"
-              elif ! "${KEYTOOL_BIN}" -list -v \
-                -alias nifi-key \
-                -keystore /data/conf/keystore.p12 \
-                -storetype PKCS12 \
-                -storepass "${NIFI_KEYSTORE_PASSWORD}" 2>/dev/null | grep -Fq "DNSName: ${REQUIRED_CERT_DNS}"; then
-                echo "Existing NiFi certificate missing SAN ${REQUIRED_CERT_DNS}; regenerating"
-                REGENERATE_KEYSTORES="true"
+              else
+                CERT_DUMP="$("${KEYTOOL_BIN}" -list -v \
+                  -alias nifi-key \
+                  -keystore /data/conf/keystore.p12 \
+                  -storetype PKCS12 \
+                  -storepass "${NIFI_KEYSTORE_PASSWORD}" 2>/dev/null || true)"
+                for required_dns in ${REQUIRED_CERT_DNS_LIST}; do
+                  if ! printf '%s\n' "${CERT_DUMP}" | grep -Fq "DNSName: ${required_dns}"; then
+                    echo "Existing NiFi certificate missing SAN ${required_dns}; regenerating"
+                    REGENERATE_KEYSTORES="true"
+                    break
+                  fi
+                done
               fi
 
               if [ "${REGENERATE_KEYSTORES}" = "true" ]; then
@@ -262,7 +268,7 @@ spec:
                   -keysize 2048 \
                   -validity 3650 \
                   -dname "CN=nifi.kafka.svc.cluster.local, OU=Platform, O=Suncoast, L=NA, ST=NA, C=US" \
-                  -ext "SAN=dns:nifi.kafka.svc.cluster.local,dns:nifi-0.nifi-hs.kafka.svc.cluster.local,dns:nifi,dns:nifi-gui.teleport.app.suncoast.systems" \
+                  -ext "SAN=dns:nifi.kafka.svc.cluster.local,dns:nifi-0,dns:nifi-0.nifi-hs.kafka.svc.cluster.local,dns:nifi,dns:nifi-gui.teleport.app.suncoast.systems" \
                   -keystore /data/conf/keystore.p12 \
                   -storetype PKCS12 \
                   -storepass "${NIFI_KEYSTORE_PASSWORD}" \
@@ -386,6 +392,8 @@ spec:
               value: "JDK"
             - name: NIFI_WEB_HTTPS_PORT
               value: "8443"
+            - name: NIFI_WEB_HTTPS_HOST
+              value: "nifi-0.nifi-hs.kafka.svc.cluster.local"
             - name: NIFI_WEB_PROXY_HOST
               value: "nifi-gui.teleport.app.suncoast.systems"
             - name: NIFI_CLUSTER_IS_NODE
