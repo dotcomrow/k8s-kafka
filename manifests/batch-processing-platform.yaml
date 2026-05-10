@@ -226,6 +226,50 @@ spec:
                   mv /tmp/authorizations.xml /data/conf/authorizations.xml
                   echo "Granted operator certificate identity to existing NiFi policies"
                 fi
+
+                ensure_proxy_policy() {
+                  local auth_file="/data/conf/authorizations.xml"
+                  local users_file="/data/conf/users.xml"
+                  local action="$1"
+                  local group_id=""
+                  local policy_id=""
+                  [ -f "${auth_file}" ] || return 0
+                  [ -f "${users_file}" ] || return 0
+                  [ -n "${CERT_USER_ID:-}" ] || return 0
+                  if grep -Eq "<policy[^>]*action=\"${action}\"[^>]*resource=\"/proxy\"" "${auth_file}"; then
+                    return 0
+                  fi
+
+                  group_id="$(sed -n "s/.*<group identifier=\"\\([^\"]*\\)\" name=\"${TARGET_ADMIN_GROUP}\"\\/>.*/\\1/p" "${users_file}" | head -n1 || true)"
+                  policy_id="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || true)"
+                  if [ -z "${policy_id}" ]; then
+                    policy_id="$(date +%s)-${RANDOM}"
+                  fi
+
+                  {
+                    printf '    <policy action="%s" identifier="%s" resource="/proxy">\n' "${action}" "${policy_id}"
+                    if [ -n "${group_id}" ]; then
+                      printf '      <group identifier="%s"/>\n' "${group_id}"
+                    fi
+                    printf '      <user identifier="%s"/>\n' "${CERT_USER_ID}"
+                    printf '    </policy>\n'
+                  } > /tmp/nifi-proxy-policy.xml
+
+                  awk '
+                    /<\/policies>/ {
+                      while ((getline line < "/tmp/nifi-proxy-policy.xml") > 0) {
+                        print line
+                      }
+                      close("/tmp/nifi-proxy-policy.xml")
+                    }
+                    { print }
+                  ' "${auth_file}" > /tmp/authorizations.xml
+                  mv /tmp/authorizations.xml "${auth_file}"
+                  echo "Added NiFi proxy policy action=${action} for node identity"
+                }
+
+                ensure_proxy_policy "W"
+                ensure_proxy_policy "R"
               fi
 
               KEYTOOL_BIN="$(command -v keytool || true)"
@@ -313,6 +357,8 @@ spec:
               set_nifi_property "nifi.zookeeper.connect.string" "nifi-0.nifi-hs.kafka.svc.cluster.local:2181"
               set_nifi_property "nifi.zookeeper.root.node" "/nifi-kafka"
               set_nifi_property "nifi.state.management.embedded.zookeeper.start" "true"
+              set_nifi_property "nifi.cluster.flow.election.max.wait.time" "30 sec"
+              set_nifi_property "nifi.cluster.flow.election.max.candidates" "1"
 
               set_zk_property() {
                 local key="$1"
@@ -469,8 +515,13 @@ spec:
             periodSeconds: 15
             failureThreshold: 40
           readinessProbe:
-            tcpSocket:
-              port: https
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - |
+                  code="$(curl -k -sS -o /dev/null -w '%{http_code}' "https://${NIFI_WEB_HTTPS_HOST}:8443/nifi-api/flow/status" || true)"
+                  [ "${code}" = "200" ] || [ "${code}" = "401" ] || [ "${code}" = "403" ]
             initialDelaySeconds: 45
             periodSeconds: 10
             failureThreshold: 10
