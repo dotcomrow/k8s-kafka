@@ -176,14 +176,45 @@ spec:
                 cert_user_hash="$(printf '%s' "${CERT_ADMIN_IDENTITY}" | md5sum | awk '{print $1}')"
                 CERT_USER_ID="${cert_user_hash:0:8}-${cert_user_hash:8:4}-${cert_user_hash:12:4}-${cert_user_hash:16:4}-${cert_user_hash:20:12}"
 
+                normalize_users_xml_layout() {
+                  local file="$1"
+                  [ -f "${file}" ] || return 0
+                  local users_line=""
+                  local groups_line=""
+                  users_line="$(grep -n "<users>" "${file}" | head -n1 | cut -d: -f1 || true)"
+                  groups_line="$(grep -n "<groups>" "${file}" | head -n1 | cut -d: -f1 || true)"
+                  if [ -n "${users_line}" ] && [ -n "${groups_line}" ] && [ "${users_line}" -lt "${groups_line}" ]; then
+                    local xml_decl=""
+                    xml_decl="$(sed -n '1{/^<?xml /p;}' "${file}")"
+                    sed -n '/<groups>/,/<\/groups>/p' "${file}" > /tmp/nifi-groups.xml
+                    sed -n '/<users>/,/<\/users>/p' "${file}" > /tmp/nifi-users.xml
+                    {
+                      if [ -n "${xml_decl}" ]; then
+                        printf '%s\n' "${xml_decl}"
+                      fi
+                      printf '<tenants>\n'
+                      cat /tmp/nifi-groups.xml
+                      cat /tmp/nifi-users.xml
+                      printf '</tenants>\n'
+                    } > /tmp/nifi-users-normalized.xml
+                    mv /tmp/nifi-users-normalized.xml "${file}"
+                    echo "Normalized NiFi users.xml order: groups before users"
+                  fi
+                }
+
                 if [ -f /data/conf/users.xml ] && ! grep -Fq "identity=\"${CERT_ADMIN_IDENTITY}\"" /data/conf/users.xml; then
                   if grep -Fq "<users>" /data/conf/users.xml; then
                     sed -i "/<users>/a\\    <user identifier=\"${CERT_USER_ID}\" identity=\"${CERT_ADMIN_IDENTITY}\"/>" /data/conf/users.xml
+                  elif grep -Fq "</groups>" /data/conf/users.xml; then
+                    sed -i "/<\/groups>/a\\  <users>\\n    <user identifier=\"${CERT_USER_ID}\" identity=\"${CERT_ADMIN_IDENTITY}\"/>\\n  </users>" /data/conf/users.xml
                   else
-                    sed -i "s#<tenants>#<tenants>\\n  <users>\\n    <user identifier=\"${CERT_USER_ID}\" identity=\"${CERT_ADMIN_IDENTITY}\"/>\\n  </users>#g" /data/conf/users.xml
+                    sed -i "/<\/tenants>/i\\  <users>\\n    <user identifier=\"${CERT_USER_ID}\" identity=\"${CERT_ADMIN_IDENTITY}\"/>\\n  </users>" /data/conf/users.xml
                   fi
+                  normalize_users_xml_layout /data/conf/users.xml
                   echo "Seeded NiFi user identity for operator certificate: ${CERT_ADMIN_IDENTITY}"
                 fi
+
+                normalize_users_xml_layout /data/conf/users.xml
 
                 if [ -f /data/conf/authorizations.xml ] && ! grep -Fq "identifier=\"${CERT_USER_ID}\"" /data/conf/authorizations.xml; then
                   awk -v uid="${CERT_USER_ID}" '
