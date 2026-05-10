@@ -173,6 +173,7 @@ spec:
 
                 update_xml_property /data/conf/authorizers.xml "Initial User Identity 1" "${CERT_ADMIN_IDENTITY}"
                 update_xml_property /data/conf/authorizers.xml "Initial Admin Identity" "${CERT_ADMIN_IDENTITY}"
+                update_xml_property /data/conf/authorizers.xml "Node Identity 1" "${CERT_ADMIN_IDENTITY}"
 
                 cert_user_hash="$(printf '%s' "${CERT_ADMIN_IDENTITY}" | md5sum | awk '{print $1}')"
                 CERT_USER_ID="${cert_user_hash:0:8}-${cert_user_hash:8:4}-${cert_user_hash:12:4}-${cert_user_hash:16:4}-${cert_user_hash:20:12}"
