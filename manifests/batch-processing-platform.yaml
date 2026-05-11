@@ -831,7 +831,9 @@ spec:
             - --cookie-refresh=1h
             - --cookie-expire=8h
             - --session-store-type=redis
-            - --redis-connection-url=redis://redis-0.redis-headless.redis.svc.cluster.local:6379/0
+            - --redis-use-sentinel=true
+            - --redis-sentinel-master-name=mymaster
+            - --redis-sentinel-connection-urls=redis://redis-sentinel.redis.svc.cluster.local:26379
             - --email-domain=*
             - --pass-host-header=false
             - --skip-provider-button=true
