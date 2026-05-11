@@ -285,13 +285,30 @@ spec:
                 ensure_policy "W" "/restricted-components"
 
                 # Component-level root process group policies used by NiFiKop dataflow reconcile.
-                ensure_policy "R" "/process-groups/root"
-                ensure_policy "W" "/process-groups/root"
-                ensure_policy "R" "/data/process-groups/root"
-                ensure_policy "W" "/data/process-groups/root"
-                ensure_policy "W" "/operation/process-groups/root"
-                ensure_policy "R" "/policies/process-groups/root"
-                ensure_policy "W" "/policies/process-groups/root"
+                # NiFi may authorize root process-group operations against "root", "identifier",
+                # or "instanceIdentifier" depending on endpoint/runtime context.
+                root_pg_resources="root"
+                if [ -f /data/conf/flow.json.gz ]; then
+                  flow_json_flat="$(gzip -dc /data/conf/flow.json.gz 2>/dev/null | tr -d '\n' || true)"
+                  root_pg_identifier="$(printf '%s' "${flow_json_flat}" | sed -n 's/.*"rootGroup":{"identifier":"\([^"]*\)".*/\1/p' | head -n1 || true)"
+                  root_pg_instance_identifier="$(printf '%s' "${flow_json_flat}" | sed -n 's/.*"rootGroup":{"identifier":"[^"]*","instanceIdentifier":"\([^"]*\)".*/\1/p' | head -n1 || true)"
+                  if [ -n "${root_pg_identifier}" ] && ! printf '%s\n' "${root_pg_resources}" | tr ' ' '\n' | grep -Fxq "${root_pg_identifier}"; then
+                    root_pg_resources="${root_pg_resources} ${root_pg_identifier}"
+                  fi
+                  if [ -n "${root_pg_instance_identifier}" ] && ! printf '%s\n' "${root_pg_resources}" | tr ' ' '\n' | grep -Fxq "${root_pg_instance_identifier}"; then
+                    root_pg_resources="${root_pg_resources} ${root_pg_instance_identifier}"
+                  fi
+                fi
+                echo "NiFi root process-group policy resources: ${root_pg_resources}"
+                for root_pg in ${root_pg_resources}; do
+                  ensure_policy "R" "/process-groups/${root_pg}"
+                  ensure_policy "W" "/process-groups/${root_pg}"
+                  ensure_policy "R" "/data/process-groups/${root_pg}"
+                  ensure_policy "W" "/data/process-groups/${root_pg}"
+                  ensure_policy "W" "/operation/process-groups/${root_pg}"
+                  ensure_policy "R" "/policies/process-groups/${root_pg}"
+                  ensure_policy "W" "/policies/process-groups/${root_pg}"
+                done
               fi
 
               KEYTOOL_BIN="$(command -v keytool || true)"
@@ -542,7 +559,9 @@ spec:
                 - /bin/sh
                 - -ec
                 - |
-                  code="$(curl -k -sS -o /dev/null -w '%{http_code}' "https://${NIFI_WEB_HTTPS_HOST}:8443/nifi-api/flow/status" || true)"
+                  # Keep pod unready until processor metadata endpoint is responsive; this
+                  # avoids early UI extension-type popup errors during startup.
+                  code="$(curl -k -sS -o /dev/null -w '%{http_code}' "https://${NIFI_WEB_HTTPS_HOST}:8443/nifi-api/flow/processor-types" || true)"
                   [ "${code}" = "200" ] || [ "${code}" = "401" ] || [ "${code}" = "403" ]
             initialDelaySeconds: 45
             periodSeconds: 10
