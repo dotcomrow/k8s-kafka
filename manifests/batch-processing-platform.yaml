@@ -393,11 +393,14 @@ spec:
               set_nifi_property "nifi.cluster.node.address" "nifi-0.nifi-hs.kafka.svc.cluster.local"
               set_nifi_property "nifi.cluster.node.protocol.port" "11443"
               set_nifi_property "nifi.cluster.protocol.is.secure" "true"
+              set_nifi_property "nifi.cluster.node.connection.timeout" "30 sec"
+              set_nifi_property "nifi.cluster.node.read.timeout" "60 sec"
               set_nifi_property "nifi.zookeeper.connect.string" "nifi-0.nifi-hs.kafka.svc.cluster.local:2181"
               set_nifi_property "nifi.zookeeper.root.node" "/nifi-kafka"
               set_nifi_property "nifi.state.management.embedded.zookeeper.start" "true"
               set_nifi_property "nifi.cluster.flow.election.max.wait.time" "30 sec"
               set_nifi_property "nifi.cluster.flow.election.max.candidates" "1"
+              set_nifi_property "nifi.web.request.timeout" "120 secs"
 
               set_zk_property() {
                 local key="$1"
@@ -489,10 +492,20 @@ spec:
               value: "nifi-0.nifi-hs.kafka.svc.cluster.local"
             - name: NIFI_CLUSTER_NODE_PROTOCOL_PORT
               value: "11443"
+            - name: NIFI_CLUSTER_NODE_CONNECTION_TIMEOUT
+              value: "30 sec"
+            - name: NIFI_CLUSTER_NODE_READ_TIMEOUT
+              value: "60 sec"
+            - name: NIFI_CLUSTER_FLOW_ELECTION_MAX_WAIT_TIME
+              value: "30 sec"
+            - name: NIFI_CLUSTER_FLOW_ELECTION_MAX_CANDIDATES
+              value: "1"
             - name: NIFI_ZK_CONNECT_STRING
               value: "nifi-0.nifi-hs.kafka.svc.cluster.local:2181"
             - name: NIFI_ZK_ROOT_NODE
               value: "/nifi-kafka"
+            - name: NIFI_WEB_REQUEST_TIMEOUT
+              value: "120 secs"
             - name: NIFI_JVM_HEAP_INIT
               value: "2g"
             - name: NIFI_JVM_HEAP_MAX
@@ -564,6 +577,7 @@ spec:
                   code="$(curl -k -sS -o /dev/null -w '%{http_code}' "https://${NIFI_WEB_HTTPS_HOST}:8443/nifi-api/flow/processor-types" || true)"
                   [ "${code}" = "200" ] || [ "${code}" = "401" ] || [ "${code}" = "403" ]
             initialDelaySeconds: 45
+            timeoutSeconds: 5
             periodSeconds: 10
             failureThreshold: 10
           livenessProbe:
