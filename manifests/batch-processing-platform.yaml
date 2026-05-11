@@ -33,6 +33,7 @@ stringData:
   flink_client_id: "<path:secret/data/keycloak-client-id-flink-gui-proxy#value>"
   flink_client_secret: "<path:secret/data/keycloak-client-secret-flink-gui-proxy#value>"
   flink_cookie_secret: "<path:secret/data/k8s-kafka-flink-gui-keycloak-cookiesecret#value>"
+  redis_password: "<path:secret/data/redis#password>"
 ---
 apiVersion: v1
 kind: Service
@@ -825,9 +826,13 @@ spec:
             - --redirect-url=https://flink-gui.teleport.app.suncoast.systems/oauth2/callback
             - --code-challenge-method=S256
             - --cookie-secure=true
+            - --cookie-name=_oauth2_proxy_flink_gui
             - --cookie-samesite=lax
             - --cookie-refresh=1h
             - --cookie-expire=8h
+            - --session-cookie-minimal=true
+            - --session-store-type=redis
+            - --redis-connection-url=redis://redis-0.redis-headless.redis.svc.cluster.local:6379/0
             - --email-domain=*
             - --pass-host-header=false
             - --skip-provider-button=true
@@ -853,6 +858,11 @@ spec:
                 secretKeyRef:
                   name: batch-ui-keycloak-proxy-secrets
                   key: internal_oidc_issuer_url
+            - name: OAUTH2_PROXY_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: batch-ui-keycloak-proxy-secrets
+                  key: redis_password
           readinessProbe:
             httpGet:
               path: /ping
