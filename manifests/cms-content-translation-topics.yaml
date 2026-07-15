@@ -1,0 +1,85 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cms-content-translation-topics
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "42"
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+    argocd.argoproj.io/sync-options: Replace=true
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cms-content-translation-topics
+      annotations:
+        linkerd.io/inject: "disabled"
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: topic-bootstrap
+          image: apache/kafka:3.9.0
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "kafka.kafka.svc.internal.lan:9092"
+            - name: KAFKA_SECURITY_PROTOCOL
+              value: "SASL_PLAINTEXT"
+            - name: KAFKA_SASL_MECHANISM
+              value: "SCRAM-SHA-256"
+            - name: KAFKA_ADMIN_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-security-credentials
+                  key: admin_username
+            - name: KAFKA_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-security-credentials
+                  key: admin_password
+            - name: CMS_TRANSLATION_REQUEST_TOPIC
+              value: "batch.cms.content.translation.requests.v1"
+            - name: CMS_TRANSLATION_DLQ_TOPIC
+              value: "batch.cms.content.translation.requests.dlq.v1"
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+
+              CLIENT_CFG="/tmp/kafka-admin.properties"
+              cat > "${CLIENT_CFG}" <<EOF_KAFKA
+              security.protocol=${KAFKA_SECURITY_PROTOCOL}
+              sasl.mechanism=${KAFKA_SASL_MECHANISM}
+              sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="${KAFKA_ADMIN_USERNAME}" password="${KAFKA_ADMIN_PASSWORD}";
+              EOF_KAFKA
+
+              until /opt/kafka/bin/kafka-topics.sh \
+                --bootstrap-server "${KAFKA_BOOTSTRAP_SERVERS}" \
+                --command-config "${CLIENT_CFG}" \
+                --list >/dev/null 2>&1; do
+                sleep 5
+              done
+
+              ensure_topic() {
+                local topic="$1"
+                if /opt/kafka/bin/kafka-topics.sh \
+                  --bootstrap-server "${KAFKA_BOOTSTRAP_SERVERS}" \
+                  --command-config "${CLIENT_CFG}" \
+                  --list | grep -qx "${topic}"; then
+                  echo "Topic already exists: ${topic}"
+                  return
+                fi
+                /opt/kafka/bin/kafka-topics.sh \
+                  --bootstrap-server "${KAFKA_BOOTSTRAP_SERVERS}" \
+                  --command-config "${CLIENT_CFG}" \
+                  --create \
+                  --topic "${topic}" \
+                  --partitions 3 \
+                  --replication-factor 1
+              }
+
+              ensure_topic "${CMS_TRANSLATION_REQUEST_TOPIC}"
+              ensure_topic "${CMS_TRANSLATION_DLQ_TOPIC}"
+              echo "CMS content translation topics are ready."

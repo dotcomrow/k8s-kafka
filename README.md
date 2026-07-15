@@ -172,6 +172,17 @@ vault kv put secret/kafka-scram-user-ollama-async value='ollama-async'
 vault kv put secret/kafka-scram-user-ollama-async-password value='replace-me'
 ```
 
+CMS content translation producer:
+
+```sh
+vault kv put secret/kafka-scram-user-cms-content-resolver value='cms-content-resolver'
+vault kv put secret/kafka-scram-user-cms-content-resolver-password value='replace-me'
+vault kv put secret/kafka-scram-user-cms-content-resolver-topic-write value='batch.cms.content.translation.requests.v1'
+vault kv put secret/kafka-scram-user-cms-content-resolver-topic-describe value='batch.cms.content.translation.requests.v1'
+```
+
+NiFi already has prefixed `batch.*` ACLs from bootstrap, so it can consume `batch.cms.content.translation.requests.v1` and write `batch.cms.content.translation.requests.dlq.v1`.
+
 ## Verify
 ```sh
 kubectl -n kafka logs job/kafka-security-bootstrap --tail=200
