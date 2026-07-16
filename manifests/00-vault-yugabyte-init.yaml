@@ -126,4 +126,30 @@ spec:
             bound_service_account_names="kafka-security-reconciler" \
             bound_service_account_namespaces="kafka" \
             policies="kafka-security-reconciler" ttl="24h" >/dev/null
+
+          ensure_vault_value() {
+            path="$1"
+            desired="$2"
+            current="$(vault kv get -field=value "$path" 2>/dev/null || true)"
+            if [ "$current" != "$desired" ]; then
+              vault kv put "$path" value="$desired" >/dev/null
+            fi
+          }
+
+          ensure_vault_generated_value() {
+            path="$1"
+            current="$(vault kv get -field=value "$path" 2>/dev/null || true)"
+            normalized="$(printf '%s' "$current" | tr '[:upper:]' '[:lower:]')"
+            case "$normalized" in
+              ""|"placeholder"|"__placeholder__"|"replace-me"|"changeme"|"pending"|"syncing")
+                generated="$(tr -dc 'A-Za-z0-9_+=.-' </dev/urandom | head -c 48)"
+                vault kv put "$path" value="$generated" >/dev/null
+                ;;
+            esac
+          }
+
+          ensure_vault_value secret/kafka-scram-user-cms-content-resolver "cms-content-resolver"
+          ensure_vault_generated_value secret/kafka-scram-user-cms-content-resolver-password
+          ensure_vault_value secret/kafka-scram-user-cms-content-resolver-topic-write "batch.cms.content.translation.requests.v1"
+          ensure_vault_value secret/kafka-scram-user-cms-content-resolver-topic-describe "batch.cms.content.translation.requests.v1"
         volumeMounts: [{ name: root-token, mountPath: /vault-token, readOnly: true }]

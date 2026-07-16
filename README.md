@@ -124,7 +124,7 @@ Both NiFi and Flink use the same shared Kafka config and their own per-workload 
   - bootstrap grants both principals access to `batch.*` topics.
 
 ## Dynamic SCRAM User Reconciliation
-Dynamic Kafka accounts are reconciled continuously by CronJob `kafka-security-reconciler` (every minute, non-overlapping runs via `concurrencyPolicy: Forbid`).
+Dynamic Kafka accounts are reconciled continuously by CronJob `kafka-security-reconciler` (every five minutes, non-overlapping runs via `concurrencyPolicy: Forbid`).
 
 Safety behavior for eventual Vault consistency:
 
@@ -174,12 +174,7 @@ vault kv put secret/kafka-scram-user-ollama-async-password value='replace-me'
 
 CMS content translation producer:
 
-```sh
-vault kv put secret/kafka-scram-user-cms-content-resolver value='cms-content-resolver'
-vault kv put secret/kafka-scram-user-cms-content-resolver-password value='replace-me'
-vault kv put secret/kafka-scram-user-cms-content-resolver-topic-write value='batch.cms.content.translation.requests.v1'
-vault kv put secret/kafka-scram-user-cms-content-resolver-topic-describe value='batch.cms.content.translation.requests.v1'
-```
+`yb-kafka-vault-config` seeds `cms-content-resolver` idempotently in Vault, including a generated password when missing and write/describe ACL metadata for `batch.cms.content.translation.requests.v1`.
 
 NiFi already has prefixed `batch.*` ACLs from bootstrap, so it can consume `batch.cms.content.translation.requests.v1` and write `batch.cms.content.translation.requests.dlq.v1`.
 
