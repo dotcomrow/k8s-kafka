@@ -526,9 +526,9 @@ spec:
               value: "30 sec"
             - name: NIFI_CLUSTER_NODE_READ_TIMEOUT
               value: "60 sec"
-            - name: NIFI_CLUSTER_FLOW_ELECTION_MAX_WAIT_TIME
+            - name: NIFI_ELECTION_MAX_WAIT
               value: "30 sec"
-            - name: NIFI_CLUSTER_FLOW_ELECTION_MAX_CANDIDATES
+            - name: NIFI_ELECTION_MAX_CANDIDATES
               value: "1"
             - name: NIFI_ZK_CONNECT_STRING
               value: "nifi-0.nifi-hs.kafka.svc.cluster.local:2181"
