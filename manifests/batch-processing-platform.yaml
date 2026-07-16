@@ -240,6 +240,35 @@ spec:
                   [ -f "${users_file}" ] || return 0
                   [ -n "${CERT_USER_ID:-}" ] || return 0
                   if grep -Eq "<policy[^>]*action=\"${action}\"[^>]*resource=\"${resource}\"" "${auth_file}"; then
+                    policy_has_user="$(awk -v action="${action}" -v resource="${resource}" -v uid="${CERT_USER_ID}" '
+                      index($0, "<policy") && index($0, "action=\"" action "\"") && index($0, "resource=\"" resource "\"") {
+                        in_policy = 1
+                        found_user = 0
+                      }
+                      in_policy && index($0, "<user identifier=\"" uid "\"/>") {
+                        found_user = 1
+                      }
+                      in_policy && index($0, "</policy>") {
+                        print found_user ? "yes" : "no"
+                        exit
+                      }
+                    ' "${auth_file}")"
+                    if [ "${policy_has_user}" = "yes" ]; then
+                      return 0
+                    fi
+
+                    awk -v action="${action}" -v resource="${resource}" -v uid="${CERT_USER_ID}" '
+                      index($0, "<policy") && index($0, "action=\"" action "\"") && index($0, "resource=\"" resource "\"") {
+                        in_policy = 1
+                      }
+                      in_policy && index($0, "</policy>") {
+                        print "      <user identifier=\"" uid "\"/>"
+                        in_policy = 0
+                      }
+                      { print }
+                    ' "${auth_file}" > /tmp/authorizations.xml
+                    mv /tmp/authorizations.xml "${auth_file}"
+                    echo "Granted operator certificate identity to existing NiFi policy action=${action} resource=${resource}"
                     return 0
                   fi
 
