@@ -650,7 +650,10 @@ spec:
   flinkVersion: v1_20
   serviceAccount: flink
   flinkConfiguration:
+    # Exclude Flink-managed pods from Goldilocks/VPA. Flink derives JVM memory
+    # from these process-size settings, so VPA shrinking pod limits can break startup.
     kubernetes.jobmanager.labels: "platform.suncoast.systems/vpa-exclude:true"
+    kubernetes.taskmanager.labels: "platform.suncoast.systems/vpa-exclude:true"
     taskmanager.numberOfTaskSlots: "2"
     blob.server.port: "6124"
     jobmanager.rpc.port: "6123"
