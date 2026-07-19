@@ -644,7 +644,7 @@ metadata:
     argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
 spec:
   image: flink:1.20.3-scala_2.12-java17
-  mode: native
+  mode: standalone
   flinkVersion: v1_20
   serviceAccount: flink
   flinkConfiguration:
