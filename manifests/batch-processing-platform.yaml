@@ -644,7 +644,9 @@ metadata:
     argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
 spec:
   image: flink:1.20.3-scala_2.12-java17
-  mode: standalone
+  # Native mode keeps idle resource use low: the JobManager stays up, and Flink
+  # creates TaskManager pods only when jobs request slots.
+  mode: native
   flinkVersion: v1_20
   serviceAccount: flink
   flinkConfiguration:
@@ -742,7 +744,8 @@ spec:
               runAsUser: 9999
               runAsGroup: 9999
   taskManager:
-    replicas: 2
+    # In native mode, TaskManager replicas are intentionally not preallocated.
+    # The resource sizing below applies to TaskManagers created for submitted jobs.
     resource:
       cpu: 1
       memory: "2048m"

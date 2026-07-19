@@ -50,8 +50,10 @@ Create these Vault KVv2 paths (each with field `value`):
 `manifests/batch-processing-platform.yaml` adds a baseline batch platform in the existing `kafka` namespace:
 
 - Apache NiFi (`StatefulSet`) for scheduled ingestion/orchestration
-- Apache Flink session cluster (`FlinkDeployment` managed by the Flink Kubernetes Operator) for distributed batch compute
+- Apache Flink native session cluster (`FlinkDeployment` managed by the Flink Kubernetes Operator) for distributed batch compute
 - Shared Kafka connection config (`batch-kafka-config`) and SCRAM credentials for NiFi/Flink
+
+Flink runs in native mode to keep idle resource use low. When no jobs are running, the Flink UI can legitimately show zero TaskManagers and `Available Task Slots: 0`; TaskManager pods are allocated dynamically when submitted jobs need slots.
 
 `manifests/nifi-kubernetes-operator.yaml` installs NiFiKop (CRDs + operator) so NiFi flows can be managed declaratively via Kubernetes custom resources.
 Current default watch scope is `kafka` namespace only (safe with existing Argo project boundaries).
@@ -186,7 +188,6 @@ kubectl -n kafka logs job/$(kubectl -n kafka get jobs -l cronjob-name=kafka-secu
 kubectl -n kafka exec kafka-0 -- /opt/kafka/bin/kafka-configs.sh --bootstrap-server kafka-0.kafka-hs.kafka.svc.internal.lan:9094 --describe --entity-type users
 kubectl -n kafka get pods -l app=nifi
 kubectl -n kafka get pods -l app=flink
+kubectl -n kafka exec deploy/flink -- wget -qO- http://localhost:8081/overview
 kubectl -n kafka get svc oauth2-proxy nifi flink-oauth2-proxy
-kubectl -n kafka get jobs | grep batch-example
-kubectl -n kafka logs job/batch-example-flink-submit --tail=200
 ```
