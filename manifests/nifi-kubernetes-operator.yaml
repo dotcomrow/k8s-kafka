@@ -14389,11 +14389,4 @@ spec:
               port: 8081
             initialDelaySeconds: 5
             periodSeconds: 10
-          resources:
-            limits:
-              cpu: 1
-              memory: 512Mi
-            requests:
-              cpu: 10m
-              memory: 64Mi
       terminationGracePeriodSeconds: 10

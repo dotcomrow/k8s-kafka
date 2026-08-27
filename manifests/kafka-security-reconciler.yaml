@@ -17,6 +17,7 @@ spec:
     spec:
       backoffLimit: 0
       activeDeadlineSeconds: 900
+      ttlSecondsAfterFinished: 300
       template:
         metadata:
           annotations:
