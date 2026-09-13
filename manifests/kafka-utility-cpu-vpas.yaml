@@ -1,0 +1,147 @@
+# CPU-only manual VPAs for Kafka utility workloads.
+# These preserve explicit memory/limit profiles while allowing CPU requests to learn down.
+---
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: kafka-connect-cpu
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "50"
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: kafka-connect
+  updatePolicy:
+    updateMode: "InPlaceOrRecreate"
+    minReplicas: 1
+  resourcePolicy:
+    containerPolicies:
+      - containerName: linkerd-proxy
+        mode: "Off"
+      - containerName: vault-agent
+        mode: "Off"
+      - containerName: connect
+        controlledResources: ["cpu"]
+        controlledValues: "RequestsOnly"
+        minAllowed:
+          cpu: "25m"
+        maxAllowed:
+          cpu: "1"
+---
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: schema-registry-cpu
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "50"
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: schema-registry
+  updatePolicy:
+    updateMode: "InPlaceOrRecreate"
+    minReplicas: 1
+  resourcePolicy:
+    containerPolicies:
+      - containerName: linkerd-proxy
+        mode: "Off"
+      - containerName: vault-agent
+        mode: "Off"
+      - containerName: schema-registry
+        controlledResources: ["cpu"]
+        controlledValues: "RequestsOnly"
+        minAllowed:
+          cpu: "25m"
+        maxAllowed:
+          cpu: "500m"
+---
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: kafka-ui-cpu
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "50"
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: kafka-ui
+  updatePolicy:
+    updateMode: "InPlaceOrRecreate"
+    minReplicas: 1
+  resourcePolicy:
+    containerPolicies:
+      - containerName: linkerd-proxy
+        mode: "Off"
+      - containerName: vault-agent
+        mode: "Off"
+      - containerName: ui
+        controlledResources: ["cpu"]
+        controlledValues: "RequestsOnly"
+        minAllowed:
+          cpu: "25m"
+        maxAllowed:
+          cpu: "250m"
+---
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: kafka-oauth2-proxy-cpu
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "50"
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: oauth2-proxy
+  updatePolicy:
+    updateMode: "InPlaceOrRecreate"
+    minReplicas: 1
+  resourcePolicy:
+    containerPolicies:
+      - containerName: linkerd-proxy
+        mode: "Off"
+      - containerName: vault-agent
+        mode: "Off"
+      - containerName: proxy
+        controlledResources: ["cpu"]
+        controlledValues: "RequestsOnly"
+        minAllowed:
+          cpu: "25m"
+        maxAllowed:
+          cpu: "200m"
+---
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: flink-oauth2-proxy-cpu
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "50"
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: flink-oauth2-proxy
+  updatePolicy:
+    updateMode: "InPlaceOrRecreate"
+    minReplicas: 1
+  resourcePolicy:
+    containerPolicies:
+      - containerName: linkerd-proxy
+        mode: "Off"
+      - containerName: vault-agent
+        mode: "Off"
+      - containerName: proxy
+        controlledResources: ["cpu"]
+        controlledValues: "RequestsOnly"
+        minAllowed:
+          cpu: "25m"
+        maxAllowed:
+          cpu: "250m"
