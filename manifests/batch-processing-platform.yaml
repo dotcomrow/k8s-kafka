@@ -17,6 +17,14 @@ data:
   sasl_mechanism: "SCRAM-SHA-256"
 ---
 apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nifi
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "47"
+---
+apiVersion: v1
 kind: Secret
 metadata:
   name: batch-ui-keycloak-proxy-secrets
@@ -107,8 +115,17 @@ spec:
       labels:
         app: nifi
       annotations:
-        linkerd.io/inject: "disabled"
+        linkerd.io/inject: "enabled"
+        # Keep NiFi's existing inbound HTTPS, cluster, and embedded ZooKeeper
+        # traffic outside the mesh. The sidecar is required for authenticated
+        # outbound calls such as the CMS translation service.
+        config.linkerd.io/skip-inbound-ports: "2181,2888,3888,8443,11443"
+        # Preserve existing direct paths for OIDC/external HTTPS, Kafka, and
+        # NiFi's own cluster/ZooKeeper traffic. Service calls on 8080 remain
+        # meshed and carry the dedicated NiFi service-account identity.
+        config.linkerd.io/skip-outbound-ports: "443,2181,2888,3888,8443,9092,11443"
     spec:
+      serviceAccountName: nifi
       terminationGracePeriodSeconds: 60
       initContainers:
         - name: init-nifi-data
