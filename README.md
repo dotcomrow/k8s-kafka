@@ -136,6 +136,7 @@ Safety behavior for eventual Vault consistency:
 - Critical Kafka config updates retry transient failures via `KAFKA_COMMAND_MAX_RETRIES=3` (e.g., brief DNS resolution blips).
 - Kafka bootstrap uses service IP env (`KAFKA_SERVICE_HOST:KAFKA_SERVICE_PORT`) by default (`KAFKA_USE_SERVICE_IP_BOOTSTRAP=true`) to avoid DNS-only failure modes.
 - Reconcile job hard timeout is `activeDeadlineSeconds=900` to avoid false failures during slower broker/Vault periods.
+- The pod keeps a `50m` CPU request but may burst to one CPU so the startup-heavy Kafka Java admin CLIs complete quickly rather than remaining throttled until the job deadline.
 - If `VAULT_SKIP_PLACEHOLDER_VALUES=true`, placeholder values are ignored using `VAULT_PLACEHOLDER_VALUES` CSV.
 - While any user is in a transitional/invalid state, stale-user deletion is skipped for safety.
 - On each successful reconcile, SCRAM password is re-applied from Vault so password rotations converge automatically.

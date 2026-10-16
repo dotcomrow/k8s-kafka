@@ -540,8 +540,10 @@ spec:
                     [[ -n "${user_id}" ]] || continue
                     principal="$(resolve_principal "${user_id}" || true)"
                     [[ -n "${principal}" ]] || continue
+                    echo "Reconciling Kafka security for ${user_id}"
                     printf '%s\n' "${principal}" >> "${desired_principals_tmp}"
                     ensure_user "${user_id}" "${principal}"
+                    echo "Finished Kafka security for ${user_id}"
                   done
 
                   sort -u "${desired_principals_tmp}" -o "${desired_principals_tmp}"
@@ -574,5 +576,8 @@ spec:
                   cpu: "50m"
                   memory: "128Mi"
                 limits:
-                  cpu: "300m"
+                  # Kafka's Java admin CLIs are startup-heavy. Allow a short
+                  # burst so a full reconcile finishes before the hard
+                  # deadline instead of remaining CPU-throttled for 15m.
+                  cpu: "1"
                   memory: "256Mi"
