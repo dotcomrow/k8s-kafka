@@ -624,8 +624,8 @@ spec:
                   code="$(curl -k -sS -o /dev/null -w '%{http_code}' "https://${NIFI_WEB_HTTPS_HOST}:8443/nifi-api/flow/processor-types" || true)"
                   [ "${code}" = "200" ] || [ "${code}" = "401" ] || [ "${code}" = "403" ]
             initialDelaySeconds: 45
-            timeoutSeconds: 5
-            periodSeconds: 10
+            timeoutSeconds: 10
+            periodSeconds: 30
             failureThreshold: 10
           livenessProbe:
             tcpSocket:

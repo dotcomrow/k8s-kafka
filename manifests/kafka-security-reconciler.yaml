@@ -9,7 +9,10 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: "4"
 spec:
-  schedule: "*/5 * * * *"
+  # A full reconcile starts several Kafka JVM admin tools and normally takes
+  # about five minutes. Thirty-minute convergence keeps drift bounded without
+  # keeping roughly one CPU core busy continuously.
+  schedule: "*/30 * * * *"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 2
   failedJobsHistoryLimit: 3
