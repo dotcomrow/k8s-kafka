@@ -89,7 +89,6 @@ Allow these Keycloak redirect URIs for NiFi:
 Reference dataflow workloads are managed outside this platform repo.
 
 - app-of-apps repo: `https://github.com/dotcomrow/dataflow-apps`
-- example workload repo: `https://github.com/dotcomrow/dataflow-example-app`
 
 `k8s-kafka` provides the runtime platform (Kafka, NiFi, Flink, security).  
 Pipeline/job manifests should be deployed via the dataflow app-of-apps layer.
@@ -101,8 +100,6 @@ NiFi flow lifecycle is handled with NiFiKop resources in the dataflow workload r
 - `NifiRegistryClient`
 - `NifiParameterContext`
 - `NifiDataflow`
-
-The starter CR templates are stored in `dataflow-example-app/templates/nifi-declarative-flow-crs.yaml`.
 
 Important:
 
