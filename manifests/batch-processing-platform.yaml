@@ -55,6 +55,17 @@ stringData:
   PLATFORM_DEPLOY_SERVICE_TOKEN: "<path:secret/data/platform-deploy-service#token>"
 ---
 apiVersion: v1
+kind: Secret
+metadata:
+  name: nifi-platform-notification-runtime-secrets
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "47"
+type: Opaque
+stringData:
+  PLATFORM_NOTIFICATION_SERVICE_TOKEN: "<path:secret/data/platform-notification-service#token>"
+---
+apiVersion: v1
 kind: Service
 metadata:
   name: nifi-hs
@@ -367,6 +378,22 @@ spec:
                   ensure_policy "R" "/policies/process-groups/${root_pg}"
                   ensure_policy "W" "/policies/process-groups/${root_pg}"
                 done
+
+                # The OIDC group is intentionally read-only. Git-backed
+                # NifiDataflow resources and the operator certificate are the
+                # only supported writers. Remove the UI group from every
+                # write policy while retaining its read-policy assignments.
+                ui_group_id="$(sed -n "s/.*<group identifier=\"\([^\"]*\)\" name=\"${TARGET_ADMIN_GROUP}\"\/>.*/\1/p" /data/conf/users.xml | head -n1 || true)"
+                if [ -n "${ui_group_id}" ] && [ -f /data/conf/authorizations.xml ]; then
+                  awk -v gid="${ui_group_id}" '
+                    /<policy / { in_write_policy = index($0, "action=\"W\"") > 0 }
+                    in_write_policy && index($0, "<group identifier=\"" gid "\"/>") { next }
+                    { print }
+                    /<\/policy>/ { in_write_policy = 0 }
+                  ' /data/conf/authorizations.xml > /tmp/authorizations.xml
+                  mv /tmp/authorizations.xml /data/conf/authorizations.xml
+                  echo "Enforced read-only NiFi GUI group: ${TARGET_ADMIN_GROUP}"
+                fi
               fi
 
               KEYTOOL_BIN="$(command -v keytool || true)"
@@ -598,6 +625,11 @@ spec:
                 secretKeyRef:
                   name: nifi-platform-deploy-runtime-secrets
                   key: PLATFORM_DEPLOY_SERVICE_TOKEN
+            - name: PLATFORM_NOTIFICATION_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: nifi-platform-notification-runtime-secrets
+                  key: PLATFORM_NOTIFICATION_SERVICE_TOKEN
           volumeMounts:
             - name: nifi-data
               mountPath: /opt/nifi/nifi-current/conf
