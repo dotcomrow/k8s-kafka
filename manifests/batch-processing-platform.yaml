@@ -44,6 +44,17 @@ stringData:
   redis_password: "<path:secret/data/redis#password>"
 ---
 apiVersion: v1
+kind: Secret
+metadata:
+  name: nifi-platform-deploy-runtime-secrets
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "47"
+type: Opaque
+stringData:
+  PLATFORM_DEPLOY_SERVICE_TOKEN: "<path:secret/data/platform-deploy-service#token>"
+---
+apiVersion: v1
 kind: Service
 metadata:
   name: nifi-hs
@@ -582,6 +593,11 @@ spec:
                 secretKeyRef:
                   name: kafka-security-credentials
                   key: nifi_password
+            - name: PLATFORM_DEPLOY_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: nifi-platform-deploy-runtime-secrets
+                  key: PLATFORM_DEPLOY_SERVICE_TOKEN
           volumeMounts:
             - name: nifi-data
               mountPath: /opt/nifi/nifi-current/conf
