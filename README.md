@@ -165,6 +165,11 @@ If override keys are not set, default ACLs are applied for async GraphQL flow:
 - topics `graphql.async.requests.v1,graphql.async.responses.v1,graphql.async.responses.dlq.v1` (`All`)
 - group `graphql-async-workers` (`Read`,`Describe`)
 
+The platform also reconciles the built-in GraphQL test worker ACL independently
+of dynamic-user defaults:
+
+- group `graphql-operation-test-worker-v1` (`Read`,`Describe`)
+
 Example:
 
 ```sh

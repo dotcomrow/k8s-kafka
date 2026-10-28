@@ -80,6 +80,13 @@ spec:
                   value: "graphql-async-workers"
                 - name: KAFKA_DEFAULT_CLUSTER_DESCRIBE
                   value: "false"
+                - name: KAFKA_GRAPHQL_OPERATION_TEST_GROUP
+                  value: "graphql-operation-test-worker-v1"
+                - name: KAFKA_GRAPHQL_ASYNC_USERNAME
+                  valueFrom:
+                    secretKeyRef:
+                      name: kafka-security-credentials
+                      key: graphql_async_username
                 - name: VAULT_ADDR
                   value: "http://vault.vault.svc.cluster.local:8200"
                 - name: VAULT_AUTH_PATH
@@ -549,6 +556,15 @@ spec:
                       --entity-name "${principal}" \
                       --delete-config SCRAM-SHA-256 || true
                   }
+
+                  # Keep the built-in GraphQL test worker's exact consumer
+                  # group authorized without broad access to other groups.
+                  kafka_cli_retry kafka-acls.sh \
+                    --add \
+                    --allow-principal "User:${KAFKA_GRAPHQL_ASYNC_USERNAME}" \
+                    --group "${KAFKA_GRAPHQL_OPERATION_TEST_GROUP}" \
+                    --operation Read \
+                    --operation Describe
 
                   mapfile -t desired_user_ids < <(list_vault_user_ids | sort -u)
                   desired_principals_tmp="$(mktemp)"
