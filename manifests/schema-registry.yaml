@@ -16,7 +16,7 @@ data:
 
     # The name of the topic to store schemas in
     kafkastore.topic=_schemas
-    kafkastore.topic.replication.factor=1
+    kafkastore.topic.replication.factor=3
 
     # If true, API requests that fail will include extra debugging information, including stack traces
     debug=false
@@ -81,7 +81,7 @@ spec:
             done
             for t in _schemas _schema_encoders _dek_registry_keys; do
               /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --command-config "$CLIENT_CFG" --list | grep -qx "$t" || \
-              /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --command-config "$CLIENT_CFG" --create --topic "$t" --partitions 1 --replication-factor 1 --config cleanup.policy=compact
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" --command-config "$CLIENT_CFG" --create --topic "$t" --partitions 1 --replication-factor 3 --config cleanup.policy=compact
               /opt/kafka/bin/kafka-configs.sh --bootstrap-server "$BOOT" --command-config "$CLIENT_CFG" --entity-type topics --entity-name "$t" --alter --add-config cleanup.policy=compact
             done
       containers:
@@ -130,9 +130,9 @@ spec:
               value: "SCRAM-SHA-256"
             - name: SCHEMA_REGISTRY_KAFKASTORE_SASL_JAAS_CONFIG
               value: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="$(SCHEMA_REGISTRY_KAFKA_USERNAME)" password="$(SCHEMA_REGISTRY_KAFKA_PASSWORD)";'
-            # Single-node RF
+            # Three-broker data resilience
             - name: SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR
-              value: "1"
+              value: "3"
             - name: SCHEMA_REGISTRY_COMPATIBILITY_LEVEL
               value: "BACKWARD"
             - name: SCHEMA_REGISTRY_KAFKASTORE_TOPIC

@@ -155,6 +155,21 @@ Only after the three-voter quorum is healthy:
    batch.
 5. Set `min.insync.replicas=2` only after all replicas are in sync.
 
+The source-controlled migration tool runs one topic at a time, balances
+preferred leaders across brokers 1, 2, and 3, and refuses to apply minimum ISR
+until every partition has three replicas in ISR:
+
+```sh
+scripts/kafka-rf3-topic-migration.sh --plan
+scripts/kafka-rf3-topic-migration.sh --execute
+scripts/kafka-rf3-topic-migration.sh --apply-min-isr
+```
+
+This is intentionally an operator-run migration rather than a continuously
+mutating controller. New-topic resilience is enforced by broker defaults and
+the topic-owning manifests; routine conformance checks must report drift rather
+than silently changing a topic that may have an intentional exception.
+
 Expected steady state: every applicable partition has three replicas and three
 in-sync replicas. The cluster must continue accepting operations after any one
 broker is stopped.

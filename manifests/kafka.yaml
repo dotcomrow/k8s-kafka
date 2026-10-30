@@ -4,7 +4,8 @@
 # The cluster uses dynamic KRaft membership. Broker/controller identities are
 # derived from StatefulSet ordinals, and new controller storage joins without
 # initial voters. See ../docs/KAFKA_RF3_ROLLOUT.md. Replicas are raised one at
-# a time during Gate 3; topic replication remains a separate Gate 4 change.
+# a time during Gate 3. Gate 4 sets RF3 broker defaults; existing topics are
+# migrated in bounded batches before the cluster-wide minimum ISR is raised.
 # ============================================================================
 ---
 apiVersion: v1
@@ -194,6 +195,8 @@ spec:
           set_property offsets.topic.replication.factor "$KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR"
           set_property transaction.state.log.replication.factor "$KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR"
           set_property transaction.state.log.min.isr "$KAFKA_TRANSACTION_STATE_LOG_MIN_ISR"
+          set_property default.replication.factor "$KAFKA_DEFAULT_REPLICATION_FACTOR"
+          set_property min.insync.replicas "$KAFKA_MIN_IN_SYNC_REPLICAS"
           set_property group.initial.rebalance.delay.ms "$KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS"
           set_property log.dirs "$KAFKA_LOG_DIRS"
           set_property log.retention.hours "$KAFKA_LOG_RETENTION_HOURS"
@@ -278,9 +281,11 @@ spec:
         - { name: KAFKA_SUPER_USERS, value: "User:kafka_admin;User:ANONYMOUS" }
         - { name: KAFKA_CONTROLLER_QUORUM_BOOTSTRAP_SERVERS, value: "kafka-0.kafka-hs.kafka.svc.internal.lan:9093,kafka-1.kafka-hs.kafka.svc.internal.lan:9093,kafka-2.kafka-hs.kafka.svc.internal.lan:9093" }
         - { name: KAFKA_QUORUM_ADMIN_BOOTSTRAP_SERVER, value: "kafka-0.kafka-hs.kafka.svc.internal.lan:9094,kafka-1.kafka-hs.kafka.svc.internal.lan:9094,kafka-2.kafka-hs.kafka.svc.internal.lan:9094" }
-        - { name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "1" }
-        - { name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "1" }
+        - { name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "3" }
+        - { name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "3" }
         - { name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR, value: "1" }
+        - { name: KAFKA_DEFAULT_REPLICATION_FACTOR, value: "3" }
+        - { name: KAFKA_MIN_IN_SYNC_REPLICAS, value: "1" }
         - { name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS, value: "0" }
         - { name: KAFKA_LOG_DIRS, value: "/tmp/kraft-combined-logs/kafka-data" }
         - { name: KAFKA_LOG_RETENTION_HOURS, value: "48" }
