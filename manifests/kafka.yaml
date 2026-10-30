@@ -50,7 +50,7 @@ metadata:
     platform.suncoast.systems/vpa-exclude: "true"
 spec:
   serviceName: kafka-hs
-  replicas: 2
+  replicas: 3
   updateStrategy:
     type: RollingUpdate
   selector: { matchLabels: { app: kafka } }
