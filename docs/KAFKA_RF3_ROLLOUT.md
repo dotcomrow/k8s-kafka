@@ -106,7 +106,10 @@ After the feature conversion, update the StatefulSet configuration to replace
 verify kafka-0 before adding replicas. Existing formatted storage must not be
 reformatted. The controller headless service must publish not-ready addresses
 so each controller's stable DNS name resolves during quorum bootstrap, before
-the broker readiness probe succeeds.
+the broker readiness probe succeeds. The Apache Docker wrapper's unconditional
+storage setup is bypassed after this conversion because dynamic formatting
+requires an explicit controller role; the init container owns formatting and
+uses `--standalone` only when kafka-0 storage is genuinely blank.
 
 ## Gate 3 - add controllers and brokers 2 and 3
 

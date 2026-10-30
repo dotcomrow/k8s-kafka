@@ -126,6 +126,7 @@ spec:
             /opt/kafka/bin/kafka-storage.sh format \
               -t "${CLUSTER_ID}" \
               -c "$CONF" \
+              --standalone \
               --release-version 3.9-IV0 \
               --ignore-formatted
           fi
@@ -139,13 +140,39 @@ spec:
           set -euo pipefail
           u_esc="$(printf '%s' "$KAFKA_ADMIN_USERNAME" | sed 's/[\\"]/\\&/g')"
           p_esc="$(printf '%s' "$KAFKA_ADMIN_PASSWORD" | sed 's/[\\"]/\\&/g')"
+          CONF="/tmp/kafka-server.properties"
+          set_property() {
+            printf '%s=%s\n' "$1" "$2" >> "$CONF"
+          }
+          : > "$CONF"
+          set_property process.roles "$KAFKA_PROCESS_ROLES"
+          set_property node.id "$KAFKA_NODE_ID"
+          set_property controller.listener.names "$KAFKA_CONTROLLER_LISTENER_NAMES"
+          set_property controller.quorum.bootstrap.servers "$KAFKA_CONTROLLER_QUORUM_BOOTSTRAP_SERVERS"
+          set_property listeners "$KAFKA_LISTENERS"
+          set_property advertised.listeners "$KAFKA_ADVERTISED_LISTENERS"
+          set_property listener.security.protocol.map "$KAFKA_LISTENER_SECURITY_PROTOCOL_MAP"
+          set_property inter.broker.listener.name "$KAFKA_INTER_BROKER_LISTENER_NAME"
+          set_property sasl.enabled.mechanisms "$KAFKA_SASL_ENABLED_MECHANISMS"
+          set_property listener.name.sasl_plaintext.scram-sha-256.sasl.jaas.config \
+            "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"${u_esc}\" password=\"${p_esc}\";"
+          set_property authorizer.class.name "$KAFKA_AUTHORIZER_CLASS_NAME"
+          set_property allow.everyone.if.no.acl.found "$KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND"
+          set_property super.users "$KAFKA_SUPER_USERS"
+          set_property offsets.topic.replication.factor "$KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR"
+          set_property transaction.state.log.replication.factor "$KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR"
+          set_property transaction.state.log.min.isr "$KAFKA_TRANSACTION_STATE_LOG_MIN_ISR"
+          set_property group.initial.rebalance.delay.ms "$KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS"
+          set_property log.dirs "$KAFKA_LOG_DIRS"
+          set_property log.retention.hours "$KAFKA_LOG_RETENTION_HOURS"
+          set_property auto.create.topics.enable "$KAFKA_AUTO_CREATE_TOPICS_ENABLE"
           cat > /tmp/kafka_server_jaas.conf <<EOF
           KafkaServer {
             org.apache.kafka.common.security.scram.ScramLoginModule required username="${u_esc}" password="${p_esc}";
           };
           EOF
           export KAFKA_OPTS="-Djava.security.auth.login.config=/tmp/kafka_server_jaas.conf ${KAFKA_OPTS:-}"
-          exec /etc/kafka/docker/run
+          exec /opt/kafka/bin/kafka-server-start.sh "$CONF"
         env:
         - name: GOOGLE_APPLICATION_CREDENTIALS
           value: /vault/secrets/gcp-key.json
