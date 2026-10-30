@@ -1,0 +1,127 @@
+# Enforce the platform maximum for delete-policy Kafka transport records.
+# Application repositories remain responsible for choosing shorter retention.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: kafka-retention-reconciler
+  namespace: kafka
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+spec:
+  schedule: "17 * * * *"
+  startingDeadlineSeconds: 900
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 600
+      ttlSecondsAfterFinished: 300
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: kafka-retention-reconciler
+          annotations:
+            linkerd.io/inject: "disabled"
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: reconcile-retention
+              image: apache/kafka:3.9.0
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: KAFKA_BOOTSTRAP_SERVERS
+                  value: "kafka-0.kafka-hs.kafka.svc.internal.lan:9094"
+                - name: KAFKA_MAX_RETENTION_MS
+                  value: "604800000"
+                - name: KAFKA_MAX_SEGMENT_MS
+                  value: "3600000"
+                - name: KAFKA_TOPIC_EXCLUDE_REGEX
+                  value: "^_"
+                - name: KAFKA_CLI_TIMEOUT
+                  value: "75s"
+              command: ["/bin/bash", "-lc"]
+              args:
+                - |
+                  set -euo pipefail
+
+                  for value_name in KAFKA_MAX_RETENTION_MS KAFKA_MAX_SEGMENT_MS; do
+                    value="${!value_name}"
+                    if [[ ! "$value" =~ ^[0-9]+$ || "$value" -lt 1 ]]; then
+                      echo "$value_name must be a positive integer" >&2
+                      exit 1
+                    fi
+                  done
+
+                  kafka_cli() {
+                    local script="$1"
+                    shift
+                    timeout "$KAFKA_CLI_TIMEOUT" "/opt/kafka/bin/${script}" \
+                      --bootstrap-server "$KAFKA_BOOTSTRAP_SERVERS" "$@"
+                  }
+
+                  describe_output="$(kafka_cli kafka-configs.sh \
+                    --describe --entity-type topics --all 2>&1)"
+
+                  scanned=0
+                  changed=0
+                  skipped_internal=0
+                  while IFS=$'\t' read -r topic cleanup_policy retention_ms segment_ms; do
+                    [[ -n "$topic" ]] || continue
+                    if [[ "$topic" =~ $KAFKA_TOPIC_EXCLUDE_REGEX ]]; then
+                      skipped_internal=$((skipped_internal + 1))
+                      continue
+                    fi
+                    scanned=$((scanned + 1))
+                    if [[ "$cleanup_policy" != *delete* ]]; then
+                      continue
+                    fi
+
+                    add_config=""
+                    if [[ "$retention_ms" == "-1" ]] || { \
+                      [[ "$retention_ms" =~ ^[0-9]+$ ]] \
+                      && (( retention_ms > KAFKA_MAX_RETENTION_MS )); \
+                    }; then
+                      add_config="retention.ms=${KAFKA_MAX_RETENTION_MS}"
+                    fi
+                    if [[ "$segment_ms" =~ ^[0-9]+$ ]] \
+                      && (( segment_ms > KAFKA_MAX_SEGMENT_MS )); then
+                      if [[ -n "$add_config" ]]; then add_config+=","; fi
+                      add_config+="segment.ms=${KAFKA_MAX_SEGMENT_MS}"
+                    fi
+
+                    if [[ -n "$add_config" ]]; then
+                      echo "Reconciling ${topic}: ${add_config}"
+                      kafka_cli kafka-configs.sh --alter --entity-type topics \
+                        --entity-name "$topic" --add-config "$add_config"
+                      changed=$((changed + 1))
+                    fi
+                  done < <(
+                    printf '%s\n' "$describe_output" | awk '
+                      function emit() {
+                        if (topic != "") print topic "\t" cleanup "\t" retention "\t" segment
+                      }
+                      ($1 == "All" || $1 == "Dynamic") && $2 == "configs" && $3 == "for" && $4 == "topic" {
+                        emit()
+                        topic=$5
+                        cleanup=""
+                        retention=""
+                        segment=""
+                        next
+                      }
+                      $1 ~ /^cleanup.policy=/ { split($1, value, "="); cleanup=value[2] }
+                      $1 ~ /^retention.ms=/ { split($1, value, "="); retention=value[2] }
+                      $1 ~ /^segment.ms=/ { split($1, value, "="); segment=value[2] }
+                      END { emit() }
+                    '
+                  )
+
+                  echo "Kafka retention reconcile complete: scanned=${scanned} changed=${changed} skipped_internal=${skipped_internal}"
+              resources:
+                requests:
+                  cpu: "50m"
+                  memory: "256Mi"
+                limits:
+                  cpu: "1"
+                  memory: "1Gi"

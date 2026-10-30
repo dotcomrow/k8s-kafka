@@ -10,6 +10,14 @@ Kafka client traffic on `kafka.kafka.svc.internal.lan:9092` is configured for:
 An internal broker listener (`INTERNAL://:9094`) remains plaintext for broker-internal/bootstrap operations.
 ACL authorizer is enabled with `allow.everyone.if.no.acl.found=true`, and bootstrap ACLs are created for admin/connect/schema-registry/ui/graphql-async principals.
 
+## Retention policy
+
+Delete-policy application topics may retain records for at most seven days. Application repositories own their exact, usually shorter, retention settings. `kafka-retention-reconciler` runs hourly as a safety ceiling and reduces effective `retention.ms` values above `604800000` and effective `segment.ms` values above one hour. Kafka internal topics beginning with `_` are excluded because compacted consumer, transaction, Connect, and schema state has different lifecycle requirements.
+
+The broker default remains 48 hours. Kafka retention is asynchronous and segment-based, so deletion can lag the configured record age by a segment roll and retention scan. The one-hour segment ceiling bounds that lag without creating an excessive number of segments on this low-volume cluster.
+
+There is deliberately no platform `retention.bytes` override. Time is the authoritative lifecycle control; a byte cap could discard a short traffic spike before its allowed time window. Broker disk usage and topic growth must still be monitored independently.
+
 ## Credential Bootstrap
 `manifests/` includes:
 
