@@ -134,6 +134,8 @@ ordinal. A manifest-owned background reconciler waits for observer lag zero and
 runs `kafka-metadata-quorum.sh add-controller` using that pod's local server
 configuration. Controller 3 additionally waits until controller 2 is a voter,
 which makes the add sequence declarative and safe on a clean rebuild.
+The final bootstrap lists contain all three controller and broker endpoints so
+membership discovery and reconciliation do not depend on kafka-0 availability.
 
 Gate 3 is complete only when all three pods are Ready and `describe --status`
 shows voters 1, 2, and 3 with no material follower lag.
