@@ -104,7 +104,9 @@ of retained messages and consumer offsets is acceptable.
 After the feature conversion, update the StatefulSet configuration to replace
 `controller.quorum.voters` with `controller.quorum.bootstrap.servers`. Roll and
 verify kafka-0 before adding replicas. Existing formatted storage must not be
-reformatted.
+reformatted. The controller headless service must publish not-ready addresses
+so each controller's stable DNS name resolves during quorum bootstrap, before
+the broker readiness probe succeeds.
 
 ## Gate 3 - add controllers and brokers 2 and 3
 

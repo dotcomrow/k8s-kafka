@@ -34,6 +34,10 @@ metadata:
     argocd.argoproj.io/sync-wave: "3"
 spec:
   clusterIP: None
+  # Controllers must be discoverable while starting, before their broker
+  # readiness probe succeeds, so dynamic quorum bootstrap cannot deadlock on
+  # Kubernetes endpoint readiness.
+  publishNotReadyAddresses: true
   ports: [{ name: controller, port: 9093, targetPort: 9093 }]
   selector: { app: kafka }
 ---
