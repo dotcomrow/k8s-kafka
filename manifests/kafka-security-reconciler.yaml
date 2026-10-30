@@ -82,6 +82,8 @@ spec:
                   value: "false"
                 - name: KAFKA_GRAPHQL_OPERATION_TEST_GROUP
                   value: "graphql-operation-test-worker-v1"
+                - name: KAFKA_GRAPHQL_PLATFORM_OPERATION_GROUP
+                  value: "graphql-operation-platform-worker-v1"
                 - name: KAFKA_GRAPHQL_ASYNC_USERNAME
                   valueFrom:
                     secretKeyRef:
@@ -557,12 +559,19 @@ spec:
                       --delete-config SCRAM-SHA-256 || true
                   }
 
-                  # Keep the built-in GraphQL test worker's exact consumer
-                  # group authorized without broad access to other groups.
+                  # Keep the built-in GraphQL operation workers' exact consumer
+                  # groups authorized without broad access to other groups.
                   kafka_cli_retry kafka-acls.sh \
                     --add \
                     --allow-principal "User:${KAFKA_GRAPHQL_ASYNC_USERNAME}" \
                     --group "${KAFKA_GRAPHQL_OPERATION_TEST_GROUP}" \
+                    --operation Read \
+                    --operation Describe
+
+                  kafka_cli_retry kafka-acls.sh \
+                    --add \
+                    --allow-principal "User:${KAFKA_GRAPHQL_ASYNC_USERNAME}" \
+                    --group "${KAFKA_GRAPHQL_PLATFORM_OPERATION_GROUP}" \
                     --operation Read \
                     --operation Describe
 
