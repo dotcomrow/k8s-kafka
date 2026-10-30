@@ -3,10 +3,10 @@
 #
 # The cluster is intentionally kept at one replica during the Kafka 4.1
 # software-upgrade gate.  After the live broker is verified on 4.1.2, the
-# quorum is converted from static kraft.version=0 membership to dynamic
+# quorum has been converted from static kraft.version=0 membership to dynamic
 # membership before replicas 2 and 3 are introduced.  See
-# ../docs/KAFKA_RF3_ROLLOUT.md.  Do not increase this value directly while
-# controller.quorum.voters is still configured.
+# ../docs/KAFKA_RF3_ROLLOUT.md.  Keep this at one replica until the dynamic
+# single-voter configuration has rolled and been verified.
 # ============================================================================
 ---
 apiVersion: v1
@@ -106,7 +106,8 @@ spec:
           set_property process.roles "broker,controller"
           set_property node.id "1"
           set_property controller.listener.names "CONTROLLER"
-          set_property controller.quorum.voters "1@kafka-0.kafka-hs.kafka.svc.internal.lan:9093"
+          sed -i '/^controller\.quorum\.voters=/d' "$CONF"
+          set_property controller.quorum.bootstrap.servers "kafka-0.kafka-hs.kafka.svc.internal.lan:9093"
           set_property listeners "SASL_PLAINTEXT://:9092,INTERNAL://:9094,CONTROLLER://:9093"
           set_property advertised.listeners "SASL_PLAINTEXT://kafka.kafka.svc.internal.lan:9092,INTERNAL://kafka-0.kafka-hs.kafka.svc.internal.lan:9094"
           set_property listener.security.protocol.map "SASL_PLAINTEXT:SASL_PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT"
@@ -168,7 +169,7 @@ spec:
         - { name: KAFKA_AUTHORIZER_CLASS_NAME, value: "org.apache.kafka.metadata.authorizer.StandardAuthorizer" }
         - { name: KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND, value: "true" }
         - { name: KAFKA_SUPER_USERS, value: "User:kafka_admin;User:ANONYMOUS" }
-        - { name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "1@kafka-0.kafka-hs.kafka.svc.internal.lan:9093" }
+        - { name: KAFKA_CONTROLLER_QUORUM_BOOTSTRAP_SERVERS, value: "kafka-0.kafka-hs.kafka.svc.internal.lan:9093" }
         - { name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "1" }
         - { name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "1" }
         - { name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR, value: "1" }

@@ -39,8 +39,10 @@ Before every gate:
 4. Record the current Git revision, broker image, metadata quorum status,
    feature levels, topic descriptions, topic configuration, consumer offsets,
    and ACLs.
-5. Confirm the Kafka PVC is healthy and a recent Longhorn backup/snapshot is
-   available.
+5. Confirm the Kafka PVC is healthy. A recent Longhorn backup/snapshot is an
+   optional rollback convenience when retained Kafka data must be preserved;
+   it is not required when the accepted recovery path is a declarative rebuild
+   with loss of retained messages and consumer offsets.
 
 Run `scripts/kafka-rf3-preflight.sh` to capture the non-secret Kubernetes,
 quorum, topic, and consumer-group state before and after each gate.
@@ -95,8 +97,9 @@ Verify `FinalizedVersionLevel: 1`. This conversion is a distinct, explicitly
 approved production mutation.
 
 After this succeeds, Kafka 3.9 is no longer a valid rollback target. Recovery
-must use Kafka 4.1.2 and the dynamic quorum configuration, or restore the
-pre-conversion storage backup.
+must use Kafka 4.1.2 and the dynamic quorum configuration, restore a
+pre-conversion storage backup if one exists, or rebuild the cluster when loss
+of retained messages and consumer offsets is acceptable.
 
 After the feature conversion, update the StatefulSet configuration to replace
 `controller.quorum.voters` with `controller.quorum.bootstrap.servers`. Roll and
