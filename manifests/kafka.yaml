@@ -1,12 +1,10 @@
 # ============================================================================
 # Kafka (wave 3): KRaft broker/controller cluster
 #
-# The cluster is intentionally kept at one replica during the Kafka 4.1
-# software-upgrade gate.  After the live broker is verified on 4.1.2, the
-# quorum has been converted from static kraft.version=0 membership to dynamic
-# membership before replicas 2 and 3 are introduced.  See
-# ../docs/KAFKA_RF3_ROLLOUT.md.  Keep this at one replica until the dynamic
-# single-voter configuration has rolled and been verified.
+# The cluster uses dynamic KRaft membership. Broker/controller identities are
+# derived from StatefulSet ordinals, and new controller storage joins without
+# initial voters. See ../docs/KAFKA_RF3_ROLLOUT.md. Replicas are raised one at
+# a time during Gate 3; topic replication remains a separate Gate 4 change.
 # ============================================================================
 ---
 apiVersion: v1
@@ -84,6 +82,23 @@ spec:
       securityContext:
         fsGroup: 1000
         runAsUser: 0
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                - work-node-t4-gpu
+                - work-node-l4-gpu
+                - srvr-node
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                app: kafka
+            topologyKey: kubernetes.io/hostname
       initContainers:
       - name: format-storage
         image: apache/kafka:4.1.2
@@ -96,6 +111,12 @@ spec:
           set -eu
           LOG_DIR="/tmp/kraft-combined-logs/kafka-data"
           CONF="/tmp/kraft/server.properties"
+          ORDINAL="${HOSTNAME##*-}"
+          case "${ORDINAL}" in
+            ''|*[!0-9]*) echo "Unable to derive StatefulSet ordinal from HOSTNAME=${HOSTNAME}" >&2; exit 1 ;;
+          esac
+          NODE_ID="$((ORDINAL + 1))"
+          POD_FQDN="${HOSTNAME}.kafka-hs.kafka.svc.internal.lan"
           mkdir -p "$LOG_DIR" /tmp/kraft
           cp /opt/kafka/config/server.properties "$CONF"
           set_property() {
@@ -108,12 +129,12 @@ spec:
             fi
           }
           set_property process.roles "broker,controller"
-          set_property node.id "1"
+          set_property node.id "${NODE_ID}"
           set_property controller.listener.names "CONTROLLER"
           sed -i '/^controller\.quorum\.voters=/d' "$CONF"
           set_property controller.quorum.bootstrap.servers "kafka-0.kafka-hs.kafka.svc.internal.lan:9093"
           set_property listeners "SASL_PLAINTEXT://:9092,INTERNAL://:9094,CONTROLLER://:9093"
-          set_property advertised.listeners "SASL_PLAINTEXT://kafka.kafka.svc.internal.lan:9092,INTERNAL://kafka-0.kafka-hs.kafka.svc.internal.lan:9094"
+          set_property advertised.listeners "SASL_PLAINTEXT://${POD_FQDN}:9092,INTERNAL://${POD_FQDN}:9094"
           set_property listener.security.protocol.map "SASL_PLAINTEXT:SASL_PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT"
           set_property inter.broker.listener.name "INTERNAL"
           if grep -q '^log.dirs=' "$CONF"; then
@@ -123,10 +144,15 @@ spec:
           fi
           META="${LOG_DIR}/meta.properties"
           if [ ! -f "$META" ]; then
+            if [ "${ORDINAL}" -eq 0 ]; then
+              FORMAT_MODE="--standalone"
+            else
+              FORMAT_MODE="--no-initial-controllers"
+            fi
             /opt/kafka/bin/kafka-storage.sh format \
               -t "${CLUSTER_ID}" \
               -c "$CONF" \
-              --standalone \
+              "${FORMAT_MODE}" \
               --release-version 3.9-IV0 \
               --ignore-formatted
           fi
@@ -138,6 +164,12 @@ spec:
         args:
         - |
           set -euo pipefail
+          ORDINAL="${HOSTNAME##*-}"
+          case "${ORDINAL}" in
+            ''|*[!0-9]*) echo "Unable to derive StatefulSet ordinal from HOSTNAME=${HOSTNAME}" >&2; exit 1 ;;
+          esac
+          NODE_ID="$((ORDINAL + 1))"
+          POD_FQDN="${HOSTNAME}.kafka-hs.kafka.svc.internal.lan"
           u_esc="$(printf '%s' "$KAFKA_ADMIN_USERNAME" | sed 's/[\\"]/\\&/g')"
           p_esc="$(printf '%s' "$KAFKA_ADMIN_PASSWORD" | sed 's/[\\"]/\\&/g')"
           CONF="/tmp/kafka-server.properties"
@@ -146,11 +178,11 @@ spec:
           }
           : > "$CONF"
           set_property process.roles "$KAFKA_PROCESS_ROLES"
-          set_property node.id "$KAFKA_NODE_ID"
+          set_property node.id "$NODE_ID"
           set_property controller.listener.names "$KAFKA_CONTROLLER_LISTENER_NAMES"
           set_property controller.quorum.bootstrap.servers "$KAFKA_CONTROLLER_QUORUM_BOOTSTRAP_SERVERS"
           set_property listeners "$KAFKA_LISTENERS"
-          set_property advertised.listeners "$KAFKA_ADVERTISED_LISTENERS"
+          set_property advertised.listeners "SASL_PLAINTEXT://${POD_FQDN}:9092,INTERNAL://${POD_FQDN}:9094"
           set_property listener.security.protocol.map "$KAFKA_LISTENER_SECURITY_PROTOCOL_MAP"
           set_property inter.broker.listener.name "$KAFKA_INTER_BROKER_LISTENER_NAME"
           set_property sasl.enabled.mechanisms "$KAFKA_SASL_ENABLED_MECHANISMS"
@@ -172,6 +204,50 @@ spec:
           };
           EOF
           export KAFKA_OPTS="-Djava.security.auth.login.config=/tmp/kafka_server_jaas.conf ${KAFKA_OPTS:-}"
+          reconcile_controller_membership() {
+            if [ "$NODE_ID" -eq 1 ]; then
+              return 0
+            fi
+
+            if [ "$NODE_ID" -eq 3 ]; then
+              until timeout 30 /opt/kafka/bin/kafka-metadata-quorum.sh \
+                --command-config "$CONF" \
+                --bootstrap-server "$KAFKA_QUORUM_ADMIN_BOOTSTRAP_SERVER" \
+                describe --status 2>/dev/null | grep -q '"id": 2'; do
+                echo "Waiting for controller 2 to become a voter before adding controller 3"
+                sleep 5
+              done
+            fi
+
+            while true; do
+              status="$(timeout 30 /opt/kafka/bin/kafka-metadata-quorum.sh \
+                --command-config "$CONF" \
+                --bootstrap-server "$KAFKA_QUORUM_ADMIN_BOOTSTRAP_SERVER" \
+                describe --status 2>/dev/null || true)"
+              if printf '%s\n' "$status" | grep -q "\"id\": ${NODE_ID}"; then
+                echo "Controller ${NODE_ID} is already a voter"
+                return 0
+              fi
+
+              replication="$(timeout 30 /opt/kafka/bin/kafka-metadata-quorum.sh \
+                --command-config "$CONF" \
+                --bootstrap-server "$KAFKA_QUORUM_ADMIN_BOOTSTRAP_SERVER" \
+                describe --replication 2>/dev/null || true)"
+              if printf '%s\n' "$replication" | awk -v node_id="$NODE_ID" '$1 == node_id && $4 == 0 { found=1 } END { exit !found }'; then
+                if timeout 60 /opt/kafka/bin/kafka-metadata-quorum.sh \
+                  --command-config "$CONF" \
+                  --bootstrap-server "$KAFKA_QUORUM_ADMIN_BOOTSTRAP_SERVER" \
+                  add-controller; then
+                  echo "Controller ${NODE_ID} was added to the dynamic quorum"
+                  return 0
+                fi
+              fi
+
+              echo "Waiting for controller ${NODE_ID} to catch up as an observer"
+              sleep 5
+            done
+          }
+          reconcile_controller_membership &
           exec /opt/kafka/bin/kafka-server-start.sh "$CONF"
         env:
         - name: GOOGLE_APPLICATION_CREDENTIALS
@@ -187,11 +263,9 @@ spec:
               name: kafka-security-credentials
               key: admin_password
         - { name: CLUSTER_ID, valueFrom: { secretKeyRef: { name: kafka-cluster-id, key: CLUSTER_ID } } }
-        - { name: KAFKA_NODE_ID, value: "1" }
         - { name: KAFKA_PROCESS_ROLES, value: "broker,controller" }
         - { name: KAFKA_CONTROLLER_LISTENER_NAMES, value: "CONTROLLER" }
         - { name: KAFKA_LISTENERS, value: "SASL_PLAINTEXT://:9092,INTERNAL://:9094,CONTROLLER://:9093" }
-        - { name: KAFKA_ADVERTISED_LISTENERS, value: "SASL_PLAINTEXT://kafka.kafka.svc.internal.lan:9092,INTERNAL://kafka-0.kafka-hs.kafka.svc.internal.lan:9094" }
         - { name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP, value: "SASL_PLAINTEXT:SASL_PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT" }
         - { name: KAFKA_INTER_BROKER_LISTENER_NAME, value: "INTERNAL" }
         - { name: KAFKA_SASL_ENABLED_MECHANISMS, value: "SCRAM-SHA-256" }
@@ -201,6 +275,7 @@ spec:
         - { name: KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND, value: "true" }
         - { name: KAFKA_SUPER_USERS, value: "User:kafka_admin;User:ANONYMOUS" }
         - { name: KAFKA_CONTROLLER_QUORUM_BOOTSTRAP_SERVERS, value: "kafka-0.kafka-hs.kafka.svc.internal.lan:9093" }
+        - { name: KAFKA_QUORUM_ADMIN_BOOTSTRAP_SERVER, value: "kafka-0.kafka-hs.kafka.svc.internal.lan:9094" }
         - { name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "1" }
         - { name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "1" }
         - { name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR, value: "1" }

@@ -121,15 +121,19 @@ ordinal:
 - kafka-1 -> node 2
 - kafka-2 -> node 3
 
-Set `podManagementPolicy: Parallel`, use required pod anti-affinity on
-`kubernetes.io/hostname`, and constrain placement to the two worker nodes plus
-`srvr-node`. Do not schedule a broker on the CPU-saturated `ctrl-node` or on
-`etcd-node`.
+Retain the existing `OrderedReady` pod-management policy because the field is
+immutable on the live StatefulSet and sequential startup is safer for this
+rollout. Use required pod anti-affinity on `kubernetes.io/hostname`, and
+constrain placement to the two worker nodes plus `srvr-node`. Do not schedule a
+broker on `ctrl-node` or `etcd-node`. Longhorn replicas remain single-copy and
+can be scheduled only on the T4 and L4 worker disks.
 
-Start kafka-1 and kafka-2 as dynamic quorum observers. Wait until each observer
-has caught up, then add it with `kafka-metadata-quorum.sh add-controller` using
-that pod's local server configuration. Add one controller at a time and verify
-the voter set after each addition.
+Start kafka-1 and kafka-2 as dynamic quorum observers, one StatefulSet ordinal
+at a time. Each pod derives its node ID and advertised listeners from its
+ordinal. A manifest-owned background reconciler waits for observer lag zero and
+runs `kafka-metadata-quorum.sh add-controller` using that pod's local server
+configuration. Controller 3 additionally waits until controller 2 is a voter,
+which makes the add sequence declarative and safe on a clean rebuild.
 
 Gate 3 is complete only when all three pods are Ready and `describe --status`
 shows voters 1, 2, and 3 with no material follower lag.
