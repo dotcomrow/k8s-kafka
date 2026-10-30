@@ -1,5 +1,12 @@
 # ============================================================================
-# Kafka (wave 3): single-broker KRaft
+# Kafka (wave 3): KRaft broker/controller cluster
+#
+# The cluster is intentionally kept at one replica during the Kafka 4.1
+# software-upgrade gate.  After the live broker is verified on 4.1.2, the
+# quorum is converted from static kraft.version=0 membership to dynamic
+# membership before replicas 2 and 3 are introduced.  See
+# ../docs/KAFKA_RF3_ROLLOUT.md.  Do not increase this value directly while
+# controller.quorum.voters is still configured.
 # ============================================================================
 ---
 apiVersion: v1
@@ -43,8 +50,7 @@ spec:
   serviceName: kafka-hs
   replicas: 1
   updateStrategy:
-    type: OnDelete
-    rollingUpdate: null
+    type: RollingUpdate
   selector: { matchLabels: { app: kafka } }
   volumeClaimTemplates:
   - metadata:
@@ -76,7 +82,7 @@ spec:
         runAsUser: 0
       initContainers:
       - name: format-storage
-        image: apache/kafka:3.9.0
+        image: apache/kafka:4.1.2
         env:
         - name: CLUSTER_ID
           valueFrom: { secretKeyRef: { name: kafka-cluster-id, key: CLUSTER_ID } }
@@ -87,7 +93,24 @@ spec:
           LOG_DIR="/tmp/kraft-combined-logs/kafka-data"
           CONF="/tmp/kraft/server.properties"
           mkdir -p "$LOG_DIR" /tmp/kraft
-          cp /opt/kafka/config/kraft/server.properties "$CONF"
+          cp /opt/kafka/config/server.properties "$CONF"
+          set_property() {
+            key="$1"
+            value="$2"
+            if grep -q "^${key}=" "$CONF"; then
+              sed -i "s|^${key}=.*|${key}=${value}|" "$CONF"
+            else
+              printf '\n%s=%s\n' "$key" "$value" >> "$CONF"
+            fi
+          }
+          set_property process.roles "broker,controller"
+          set_property node.id "1"
+          set_property controller.listener.names "CONTROLLER"
+          set_property controller.quorum.voters "1@kafka-0.kafka-hs.kafka.svc.internal.lan:9093"
+          set_property listeners "SASL_PLAINTEXT://:9092,INTERNAL://:9094,CONTROLLER://:9093"
+          set_property advertised.listeners "SASL_PLAINTEXT://kafka.kafka.svc.internal.lan:9092,INTERNAL://kafka-0.kafka-hs.kafka.svc.internal.lan:9094"
+          set_property listener.security.protocol.map "SASL_PLAINTEXT:SASL_PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT"
+          set_property inter.broker.listener.name "INTERNAL"
           if grep -q '^log.dirs=' "$CONF"; then
             sed -i "s|^log.dirs=.*|log.dirs=${LOG_DIR}|" "$CONF"
           else
@@ -95,12 +118,16 @@ spec:
           fi
           META="${LOG_DIR}/meta.properties"
           if [ ! -f "$META" ]; then
-            /opt/kafka/bin/kafka-storage.sh format -t "${CLUSTER_ID}" -c "$CONF" --ignore-formatted
+            /opt/kafka/bin/kafka-storage.sh format \
+              -t "${CLUSTER_ID}" \
+              -c "$CONF" \
+              --release-version 3.9-IV0 \
+              --ignore-formatted
           fi
         volumeMounts: [{ name: kafka-logs, mountPath: /tmp/kraft-combined-logs }]
       containers:
       - name: broker
-        image: apache/kafka:3.9.0
+        image: apache/kafka:4.1.2
         command: ["/bin/bash","-lc"]
         args:
         - |
