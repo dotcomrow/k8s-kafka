@@ -77,9 +77,17 @@ spec:
                   --create \
                   --topic "${topic}" \
                   --partitions 3 \
-                  --replication-factor 3
+                  --replication-factor 3 \
+                  --config min.insync.replicas=2
               }
 
               ensure_topic "${CMS_TRANSLATION_REQUEST_TOPIC}"
               ensure_topic "${CMS_TRANSLATION_DLQ_TOPIC}"
+              for topic in "${CMS_TRANSLATION_REQUEST_TOPIC}" "${CMS_TRANSLATION_DLQ_TOPIC}"; do
+                /opt/kafka/bin/kafka-configs.sh \
+                  --bootstrap-server "${KAFKA_BOOTSTRAP_SERVERS}" \
+                  --command-config "${CLIENT_CFG}" \
+                  --alter --entity-type topics --entity-name "${topic}" \
+                  --add-config min.insync.replicas=2
+              done
               echo "CMS content translation topics are ready."

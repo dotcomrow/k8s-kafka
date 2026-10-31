@@ -283,9 +283,9 @@ spec:
         - { name: KAFKA_QUORUM_ADMIN_BOOTSTRAP_SERVER, value: "kafka-0.kafka-hs.kafka.svc.internal.lan:9094,kafka-1.kafka-hs.kafka.svc.internal.lan:9094,kafka-2.kafka-hs.kafka.svc.internal.lan:9094" }
         - { name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "3" }
         - { name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "3" }
-        - { name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR, value: "1" }
+        - { name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR, value: "2" }
         - { name: KAFKA_DEFAULT_REPLICATION_FACTOR, value: "3" }
-        - { name: KAFKA_MIN_IN_SYNC_REPLICAS, value: "1" }
+        - { name: KAFKA_MIN_IN_SYNC_REPLICAS, value: "2" }
         - { name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS, value: "0" }
         - { name: KAFKA_LOG_DIRS, value: "/tmp/kraft-combined-logs/kafka-data" }
         - { name: KAFKA_LOG_RETENTION_HOURS, value: "48" }

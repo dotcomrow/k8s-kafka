@@ -3,9 +3,9 @@ set -euo pipefail
 
 MODE="${1:---plan}"
 case "$MODE" in
-  --plan|--execute|--apply-min-isr) ;;
+  --plan|--execute|--apply-min-isr|--check) ;;
   *)
-    echo "Usage: $0 [--plan|--execute|--apply-min-isr]" >&2
+    echo "Usage: $0 [--plan|--execute|--apply-min-isr|--check]" >&2
     exit 2
     ;;
 esac
@@ -31,6 +31,47 @@ broker_count="$(kafka_cli kafka-broker-api-versions.sh 2>/dev/null \
 if [[ "$broker_count" -ne 3 ]]; then
   echo "Expected 3 reachable brokers, found ${broker_count}" >&2
   exit 1
+fi
+
+if [[ "$MODE" == "--check" ]]; then
+  topic_count="$(kafka_cli kafka-topics.sh --list | awk 'NF { count++ } END { print count+0 }')"
+  description="$(kafka_cli kafka-topics.sh --describe)"
+  printf '%s\n' "$description" | awk '
+    /^Topic:/ && /PartitionCount:/ {
+      topics++
+      for (i=1; i<=NF; i++) if ($i == "ReplicationFactor:" && $(i+1) != 3) bad_topics++
+    }
+    /Partition:/ && !/PartitionCount:/ {
+      partitions++; replicas=""; isr=""
+      for (i=1; i<=NF; i++) {
+        if ($i == "Replicas:") replicas=$(i+1)
+        if ($i == "Isr:") isr=$(i+1)
+      }
+      if (split(replicas, replica_ids, ",") != 3) bad_replicas++
+      if (split(isr, isr_ids, ",") != 3) bad_isr++
+    }
+    END {
+      printf "topics=%d partitions=%d bad_topic_rf=%d bad_replica_count=%d bad_isr_count=%d\n", topics, partitions, bad_topics+0, bad_replicas+0, bad_isr+0
+      exit (bad_topics || bad_replicas || bad_isr)
+    }
+  '
+
+  min_isr_count="$(kafka_cli kafka-configs.sh --describe --entity-type topics --all \
+    | awk '/min.insync.replicas=2/ { count++ } END { print count+0 }')"
+  if [[ "$min_isr_count" -ne "$topic_count" ]]; then
+    echo "Minimum ISR conformance failed: ${min_isr_count}/${topic_count} topics are set to 2" >&2
+    exit 1
+  fi
+
+  reassignments="$(kafka_cli kafka-reassign-partitions.sh --list)"
+  printf '%s\n' "$reassignments"
+  if ! grep -q 'No partition reassignments found' <<<"$reassignments"; then
+    echo "Active partition reassignments remain" >&2
+    exit 1
+  fi
+
+  echo "Kafka RF3/min-ISR-2 conformance passed for ${topic_count} topics"
+  exit 0
 fi
 
 verify_topic() {

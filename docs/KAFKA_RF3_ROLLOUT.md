@@ -163,6 +163,7 @@ until every partition has three replicas in ISR:
 scripts/kafka-rf3-topic-migration.sh --plan
 scripts/kafka-rf3-topic-migration.sh --execute
 scripts/kafka-rf3-topic-migration.sh --apply-min-isr
+scripts/kafka-rf3-topic-migration.sh --check
 ```
 
 This is intentionally an operator-run migration rather than a continuously
