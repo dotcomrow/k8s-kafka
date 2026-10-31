@@ -183,4 +183,10 @@ canary execution, realtime operation updates, consumer lag, broker logs, and
 retention configuration. Then stop one non-leader broker and repeat the echo
 probe before restoring it.
 
+The repeatable isolated failover probe is:
+
+```sh
+scripts/kafka-rf3-failover-test.sh
+```
+
 Do not claim the rollout complete from pod readiness or Argo health alone.
