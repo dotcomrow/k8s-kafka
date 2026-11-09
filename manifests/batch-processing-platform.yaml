@@ -766,7 +766,7 @@ spec:
   jobManager:
     replicas: 1
     resource:
-      cpu: 0.5
+      cpu: 0.25
       memory: "1536m"
     podTemplate:
       spec:
