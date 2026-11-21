@@ -69,6 +69,7 @@ spec:
       annotations:
         linkerd.io/inject: "disabled"
     spec:
+      serviceAccountName: default
       securityContext:
         fsGroup: 1000
         runAsUser: 0
