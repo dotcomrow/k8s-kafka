@@ -1,5 +1,5 @@
 # ============================================================================
-# Kafka Connect (wave 4) — with BigQuery + YB gRPC connectors
+# Kafka Connect (wave 4) — with Debezium + YB gRPC connectors
 # ============================================================================
 ---
 apiVersion: v1
@@ -29,7 +29,6 @@ data:
     log4j.appender.stdout.layout.ConversionPattern=[%d{ISO8601}] %-5p %c - %m%n
     log4j.logger.io.debezium=INFO
     log4j.logger.io.debezium.connector.yugabytedb=INFO
-    log4j.logger.com.wepay.kafka.connect.bigquery=INFO
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -48,18 +47,7 @@ spec:
       labels: { app: kafka-connect }
       annotations:
         linkerd.io/inject: "disabled"
-        vault.hashicorp.com/agent-inject: "true"
-        vault.hashicorp.com/role: "data-bootstrap"
-        vault.hashicorp.com/agent-pre-populate-only: "true"
-        vault.hashicorp.com/exit-on-error: "false"
-        vault.hashicorp.com/agent-inject-secret-gcp-key.json: "secret/data/kafka/bq/config"
-        vault.hashicorp.com/agent-inject-template-gcp-key.json: |
-          {{- with secret "secret/data/kafka/bq/config" -}}
-          {{ .Data.data.sa_json }}
-          {{- end -}}
-        vault.hashicorp.com/agent-inject-permissions-gcp-key.json: "0644"
     spec:
-      serviceAccountName: bq-yb-bootstrap
       securityContext: { fsGroup: 1000 }
       terminationGracePeriodSeconds: 30
       volumes:
@@ -122,15 +110,6 @@ spec:
 
             echo "[DBZ] Installed REST extension version: ${DL_OK} into: ${DBZ_DIR}"
             ls -l "${DBZ_DIR}"
-        volumeMounts: [{ name: plugins, mountPath: /plugins }]
-      - name: install-bq
-        image: confluentinc/cp-kafka-connect:7.6.1
-        command: ["/bin/bash","-lc"]
-        args:
-        - |
-          set -eu
-          mkdir -p /plugins
-          confluent-hub install --no-prompt --component-dir /plugins wepay/kafka-connect-bigquery:2.5.7
         volumeMounts: [{ name: plugins, mountPath: /plugins }]
       - name: fetch-yb-connector
         image: curlimages/curl:8.8.0
@@ -238,7 +217,7 @@ spec:
         - name: CONNECT_PLUGIN_DISCOVERY
           value: "only_scan"
         - name: CONNECT_PLUGIN_PATH
-          value: "/plugins/debezium,/plugins/wepay-kafka-connect-bigquery,/plugins/yb/debezium-postgres,/plugins/yb/yugabytedb-grpc"
+          value: "/plugins/debezium,/plugins/yb/debezium-postgres,/plugins/yb/yugabytedb-grpc"
         - name: CONNECT_BOOTSTRAP_SERVERS
           value: "kafka.kafka.svc.internal.lan:9092"
         - name: KAFKA_CONNECT_USERNAME
@@ -308,7 +287,6 @@ spec:
         - { name: CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE, value: "true" }
         - { name: CONNECT_REST_ADVERTISED_HOST_NAME, value: "kafka-connect.kafka.svc.internal.lan" }
         - { name: CONNECT_REST_PORT, value: "8083" }
-        - { name: GOOGLE_APPLICATION_CREDENTIALS, value: "/vault/secrets/gcp-key.json" }
         ports: [{ containerPort: 8083 }]
         resources:
           requests:

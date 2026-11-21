@@ -29,25 +29,16 @@ spec:
         - { name: VAULT_ADDR, value: "http://vault.vault.svc.cluster.local:8200" }
         - { name: AUTH_PATH, value: "kubernetes" }
         - { name: PG_USER, value: "vaultadmin" }
-        - { name: SA_NAME, value: "bq-yb-bootstrap" }
-        - { name: SA_NAMESPACE, value: "kafka" }
         - { name: PG_HOST, value: "yb-tserver-service.yugabyte.svc.cluster.local" }
         - { name: PG_PORT, value: "5433" }
         - { name: PG_DATABASE, value: "kafka" }
         - { name: YB_MASTER_ADDRESSES, value: "yb-master-0.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-1.yb-master-service.yugabyte.svc.cluster.local:7100,yb-master-2.yb-master-service.yugabyte.svc.cluster.local:7100" }
-        # - { name: BQ_BOOTSTRAP_LOCATION, value: "US" }
-        # - { name: BQ_BOOTSTRAP_PROJECT, value: "k8s-kafka-774d" }
-        - { name: BQ_PROJECT, value: "k8s-kafka-774d" }
-        # - { name: BQ_BOOTSTRAP_BUCKET, value: "suncoast-systems-yb-bootstrap" }
-        - { name: BQ_DEFAULT_DATASET, value: "yugabyte_backup" }
         command: ["/bin/sh","-c"]
         args:
         - |
           set -eu
           until [ -s /vault-token/VAULT_TOKEN ]; do sleep 2; done
           export VAULT_TOKEN="$(cat /vault-token/VAULT_TOKEN)"
-          BQ_SA_JSON="$(vault kv get -field=value secret/k8s-kafka-gcp-service-account-json 2>/dev/null || true)"
-          [ -n "$BQ_SA_JSON" ] && printf '%s' "$BQ_SA_JSON" > /tmp/sa.json || true
           # Check if the Kafka database exists in Yugabyte, and create it if it doesn't
           until [ -s /vault-token/VAULT_TOKEN ]; do sleep 2; done
           export VAULT_TOKEN="$(cat /vault-token/VAULT_TOKEN)"
@@ -98,23 +89,6 @@ spec:
           PG_ARGS="host=$PG_HOST port=$PG_PORT database=$PG_DATABASE user=$PG_USER"
           [ -n "${YB_MASTER_ADDRESSES:-}" ] && PG_ARGS="$PG_ARGS master_addresses=$YB_MASTER_ADDRESSES"
           vault kv put secret/kafka/pgconfig $PG_ARGS >/dev/null
-          # vault kv put secret/kafka/bq/bootstrap bucket="$BQ_BOOTSTRAP_BUCKET" project="$BQ_BOOTSTRAP_PROJECT" location="$BQ_BOOTSTRAP_LOCATION" >/dev/null
-          CFG="project=$BQ_PROJECT dataset=$BQ_DEFAULT_DATASET"
-          [ -s /tmp/sa.json ] && CFG="$CFG sa_json=@/tmp/sa.json"
-          vault kv put secret/kafka/bq/config $CFG >/dev/null
-          [ -s /tmp/sa.json ] && vault kv put secret/kafka/bq/exporter sa_json=@/tmp/sa.json >/dev/null
-
-          vault policy write data-bootstrap - <<'EOP'
-          path "secret/data/kafka/pgconfig"     { capabilities = ["read"] }
-          # path "secret/data/kafka/bq/bootstrap" { capabilities = ["read"] }
-          path "secret/data/kafka/bq/config"    { capabilities = ["read"] }
-          path "secret/data/kafka/bq/exporter"  { capabilities = ["read"] }
-          path "secret/data/vaultadmin"         { capabilities = ["read"] }
-          EOP
-          vault write auth/${AUTH_PATH}/role/data-bootstrap \
-            bound_service_account_names="${SA_NAME}" \
-            bound_service_account_namespaces="${SA_NAMESPACE}" \
-            policies="data-bootstrap" ttl="24h" >/dev/null
 
           vault policy write kafka-security-reconciler - <<'EOP'
           path "secret/metadata"                     { capabilities = ["read", "list"] }

@@ -102,8 +102,6 @@ spec:
             - name: kafka-tools
               mountPath: /opt/kafka-tools
           env:
-            - name: GOOGLE_APPLICATION_CREDENTIALS
-              value: /vault/secrets/gcp-key.json
             - name: SCHEMA_REGISTRY_LISTENERS
               value: "http://0.0.0.0:8081"
             # Must be unique per pod for leader election during rolling updates.

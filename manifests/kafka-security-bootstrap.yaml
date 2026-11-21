@@ -16,7 +16,6 @@ spec:
         linkerd.io/inject: "disabled"
     spec:
       restartPolicy: Never
-      serviceAccountName: bq-yb-bootstrap
       containers:
       - name: configure-security
         image: apache/kafka:3.9.0
