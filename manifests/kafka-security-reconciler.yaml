@@ -84,6 +84,8 @@ spec:
                   value: "graphql-operation-test-worker-v1"
                 - name: KAFKA_GRAPHQL_PLATFORM_OPERATION_GROUP
                   value: "graphql-operation-platform-worker-v1"
+                - name: KAFKA_GRAPHQL_DISCOURSE_OPERATION_GROUP
+                  value: "graphql-operation-discourse-v1"
                 - name: KAFKA_GRAPHQL_ASYNC_USERNAME
                   valueFrom:
                     secretKeyRef:
@@ -572,6 +574,13 @@ spec:
                     --add \
                     --allow-principal "User:${KAFKA_GRAPHQL_ASYNC_USERNAME}" \
                     --group "${KAFKA_GRAPHQL_PLATFORM_OPERATION_GROUP}" \
+                    --operation Read \
+                    --operation Describe
+
+                  kafka_cli_retry kafka-acls.sh \
+                    --add \
+                    --allow-principal "User:${KAFKA_GRAPHQL_ASYNC_USERNAME}" \
+                    --group "${KAFKA_GRAPHQL_DISCOURSE_OPERATION_GROUP}" \
                     --operation Read \
                     --operation Describe
 
